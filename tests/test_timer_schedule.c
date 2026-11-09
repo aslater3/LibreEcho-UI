@@ -8,11 +8,16 @@
  * forward mid-session" is its normal boot, not an edge case.
  */
 
+/* setenv and tzset are POSIX; the schedule itself stays C99. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "adapter/timer_schedule.h"
 
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #define BOOT_EPOCH 10LL              /* what the clock reads before NTP */
 #define SYNCED_EPOCH 1767225600LL    /* 2026-01-01, after NTP lands */
@@ -273,6 +278,333 @@ int main(void)
                0);
         /* Never longer than the caller's cap. */
         assert(le_timer_poll_timeout_ms(&set, 0, SYNCED_EPOCH, 5000) == 5000);
+    }
+
+    /* The next local occurrence of a wall-clock time, in the device zone. */
+    {
+        long long due = 0;
+
+        /* A fixed zone with no DST keeps the expectations exact. */
+        setenv("TZ", "UTC0", 1);
+        tzset();
+        /* 2026-01-01 06:00 UTC: 07:00 is an hour away today. */
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 6 * 3600, 7, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 7 * 3600);
+        /* At 07:30 the same 07:00 is tomorrow, never in the past. */
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 7 * 3600 + 1800, 7, 0,
+                                         &due) == LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 31 * 3600);
+        /* Exactly the due instant counts as passed, so it moves to tomorrow. */
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 7 * 3600, 7, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 31 * 3600);
+
+        /* The zone is the device's: the same instant in another zone is a
+           different wall-clock time. 2026-01-01 06:00 UTC is 07:00 at UTC+1. */
+        setenv("TZ", "CET-1", 1);
+        tzset();
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 6 * 3600, 7, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 6 * 3600 + 24 * 3600);
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH + 6 * 3600, 8, 0, &due) ==
+               LE_TIMER_OK);
+        assert(due == SYNCED_EPOCH + 6 * 3600 + 3600);
+        setenv("TZ", "UTC0", 1);
+        tzset();
+
+        /* An unset clock and out-of-range times are refused. */
+        assert(le_timer_next_alarm_epoch(BOOT_EPOCH, 7, 0, &due) ==
+               LE_TIMER_ERR_CLOCK);
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH, 24, 0, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_alarm_epoch(SYNCED_EPOCH, 7, 60, &due) ==
+               LE_TIMER_ERR_RANGE);
+    }
+
+    /* Repeating alarms. SYNCED_EPOCH is Thursday 2026-01-01 00:00 UTC. */
+    {
+        const long long thursday_0700 = SYNCED_EPOCH + 25200LL;
+        const long long next_monday_0700 = SYNCED_EPOCH + 4 * 86400LL + 25200LL;
+        const long long friday_0700 = SYNCED_EPOCH + 86400LL + 25200LL;
+        long long due = 0;
+        unsigned int id = 0;
+        struct le_timer_set set;
+        struct le_timer *timer;
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+
+        /* The next occurrence is the next allowed weekday at the set time. */
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0x02U, &due) ==
+               LE_TIMER_OK);
+        assert(due == next_monday_0700);
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0x3eU, &due) ==
+               LE_TIMER_OK);
+        assert(due == thursday_0700);
+        /* Thursday 08:00 with a weekday mask rolls to Friday 07:00. */
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH + 8 * 3600LL, 7, 0, 0x3eU,
+                                          &due) == LE_TIMER_OK);
+        assert(due == friday_0700);
+        /* Invalid input is refused rather than guessed at. */
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0U, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 7, 0, 0x80U, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_repeat_epoch(SYNCED_EPOCH, 24, 0, 0x7fU, &due) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_next_repeat_epoch(BOOT_EPOCH, 7, 0, 0x7fU, &due) ==
+               LE_TIMER_ERR_CLOCK);
+
+        le_timer_set_init(&set);
+        assert(le_timer_add_repeat_alarm(&set, 7, 0, 0U, "x", SYNCED_EPOCH,
+                                         &id) == LE_TIMER_ERR_RANGE);
+        assert(le_timer_add_repeat_alarm(&set, 7, 0, 0x3eU, "work", SYNCED_EPOCH,
+                                         &id) == LE_TIMER_OK);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->hour == 7 &&
+               timer->minute == 0 && timer->due_epoch == thursday_0700);
+
+        /* A repeat rings at its due instant, is dismissed, and comes back on
+           its next allowed day instead of being removed. */
+        assert(step(&set, 1000, thursday_0700) == 1);
+        assert(le_timer_ringing_count(&set) == 1);
+        assert(le_timer_dismiss_at(&set, id, thursday_0700 + 10) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == friday_0700);
+
+        /* Snooze: a ringing alarm rings again after the snooze period, and
+           keeps its repeat. */
+        assert(step(&set, 2000, friday_0700) == 1);
+        assert(le_timer_snooze_ringing(&set, friday_0700 + 5) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS);
+        assert(timer->repeat_days == 0x3eU && timer->hour == 7);
+        assert(step(&set, 3000, friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS - 1) == 0);
+        assert(step(&set, 3000 + 300000,
+                    friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS) == 1);
+        /* Letting the ring run out also advances a repeat to the next day. */
+        assert(step(&set, 3000 + 300000 + 301000,
+                    friday_0700 + 5 + LE_TIMER_SNOOZE_SECONDS + 301) == 0);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        /* Friday is a weekday, so the rollover after it is Monday. */
+        assert(timer->due_epoch == next_monday_0700);
+
+        /* A countdown is never snoozed, and a one-off is cleared on dismiss. */
+        le_timer_set_init(&set);
+        assert(le_timer_add_countdown(&set, 60, "eggs", 0, &id) == LE_TIMER_OK);
+        assert(step(&set, 60000, SYNCED_EPOCH) == 1);
+        assert(le_timer_snooze_ringing(&set, SYNCED_EPOCH) == 0);
+        assert(le_timer_ringing_count(&set) == 1);
+        assert(le_timer_dismiss_at(&set, id, SYNCED_EPOCH) == 1);
+        assert(le_timer_find(&set, id) == NULL);
+        assert(le_timer_add_alarm(&set, SYNCED_EPOCH + 60, "once", SYNCED_EPOCH,
+                                  &id) == LE_TIMER_OK);
+        assert(step(&set, 1000, SYNCED_EPOCH + 60) == 1);
+        assert(le_timer_dismiss_all_at(&set, SYNCED_EPOCH + 61) == 1);
+        assert(le_timer_active_count(&set) == 0);
+
+        /* An alarm whose repeat expired while the device was down is advanced
+           to its next occurrence, not reported as missed. */
+        le_timer_set_init(&set);
+        assert(le_timer_restore_repeat_alarm(&set, 7, SYNCED_EPOCH - 2 * 86400LL,
+                                             7, 0, 0x7fU, "daily",
+                                             SYNCED_EPOCH + 12 * 3600LL, 1000,
+                                             &id) == LE_TIMER_OK);
+        assert(id == 7 && set.missed == 0);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->due_epoch == friday_0700);
+    }
+
+    /* Daylight saving: an alarm set for 07:00 keeps 07:00 across the change,
+       rather than drifting by an hour. Europe/London moves forward on
+       2026-03-29 and back on 2026-10-25. */
+    {
+        struct tm when;
+        long long now, due;
+        time_t check;
+        struct tm local;
+
+        setenv("TZ", "Europe/London", 1);
+        tzset();
+
+        memset(&when, 0, sizeof(when));
+        when.tm_year = 2026 - 1900;
+        when.tm_mon = 2;
+        when.tm_mday = 28;
+        when.tm_hour = 12;
+        when.tm_isdst = -1;
+        now = (long long)mktime(&when);
+        assert(le_timer_next_repeat_epoch(now, 7, 0, 0x7fU, &due) == LE_TIMER_OK);
+        check = (time_t)due;
+        assert(localtime_r(&check, &local));
+        assert(local.tm_mday == 29 && local.tm_hour == 7 && local.tm_min == 0);
+        /* Noon GMT to 07:00 BST the next day is eighteen hours, not nineteen. */
+        assert(due - now == 18LL * 3600LL);
+
+        memset(&when, 0, sizeof(when));
+        when.tm_year = 2026 - 1900;
+        when.tm_mon = 9;
+        when.tm_mday = 24;
+        when.tm_hour = 12;
+        when.tm_isdst = -1;
+        now = (long long)mktime(&when);
+        assert(le_timer_next_repeat_epoch(now, 7, 0, 0x7fU, &due) == LE_TIMER_OK);
+        check = (time_t)due;
+        assert(localtime_r(&check, &local));
+        assert(local.tm_mday == 25 && local.tm_hour == 7 && local.tm_min == 0);
+        /* Noon BST is 11:00 UTC; 07:00 GMT the next day is 07:00 UTC: twenty hours. */
+        assert(due - now == 20LL * 3600LL);
+
+        /* A time that does not exist on the spring-forward day (01:30) still
+           resolves to one instant within the day rather than failing. */
+        memset(&when, 0, sizeof(when));
+        when.tm_year = 2026 - 1900;
+        when.tm_mon = 2;
+        when.tm_mday = 28;
+        when.tm_hour = 12;
+        when.tm_isdst = -1;
+        now = (long long)mktime(&when);
+        assert(le_timer_next_repeat_epoch(now, 1, 30, 0x7fU, &due) == LE_TIMER_OK);
+        assert(due > now && due < now + 2LL * 86400LL);
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+    }
+
+    /*
+     * Reminders are alarm records that are announced rather than rung. A one-off
+     * reminder fires once at its time and leaves the schedule once announced; a
+     * repeating one moves to its next weekday occurrence.
+     */
+    {
+        struct le_timer_set set;
+        unsigned int id = 0, fired[LE_TIMER_MAX];
+        struct le_timer *timer;
+        long long now = SYNCED_EPOCH;   /* 2026-01-01 00:00 UTC, a Thursday */
+        int count;
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+        le_timer_set_init(&set);
+        /* 00:00 today is not after now, so "00:00" means the next midnight. */
+        assert(le_timer_add_reminder(&set, 0, 30, 0, "take pills", now, &id) ==
+               LE_TIMER_OK);
+        assert(le_timer_is_reminder(&set, id) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->kind == LE_TIMER_ALARM && timer->reminder == 1);
+        assert(timer->due_epoch == now + 30 * 60);
+        assert(timer->hour == 0 && timer->minute == 30 && timer->repeat_days == 0);
+
+        /* Not due before its time, then announced exactly once. */
+        assert(le_timer_step(&set, 0, now + 29 * 60, fired, LE_TIMER_MAX) == 0);
+        count = le_timer_step(&set, 0, now + 30 * 60, fired, LE_TIMER_MAX);
+        assert(count == 1 && fired[0] == id);
+        assert(le_timer_dismiss_at(&set, id, now + 30 * 60) == 1);
+        assert(le_timer_find(&set, id) == NULL);
+        assert(le_timer_step(&set, 0, now + 31 * 60, fired, LE_TIMER_MAX) == 0);
+
+        /* A repeating weekday reminder at 08:00. Thursday is a weekday, so the
+           first occurrence is today; once announced, the next is Friday. */
+        le_timer_set_init(&set);
+        assert(le_timer_add_reminder(&set, 8, 0, 0x3eU, "standup", now, &id) ==
+               LE_TIMER_OK);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->reminder == 1);
+        assert(timer->due_epoch == now + 8 * 3600);
+        count = le_timer_step(&set, 0, timer->due_epoch, fired, LE_TIMER_MAX);
+        assert(count == 1 && le_timer_is_reminder(&set, id) == 1);
+        assert(le_timer_dismiss_at(&set, id, timer->due_epoch) == 1);
+        timer = le_timer_find(&set, id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == now + 86400 + 8 * 3600);
+
+        /* Bad input is refused, not stored. */
+        assert(le_timer_add_reminder(&set, 24, 0, 0, "x", now, &id) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_add_reminder(&set, 9, 0, 0x80U, "x", now, &id) ==
+               LE_TIMER_ERR_RANGE);
+        assert(le_timer_add_reminder(&set, 9, 0, 0, "x", 10, &id) ==
+               LE_TIMER_ERR_CLOCK);
+    }
+
+    /* A reminder restored from disk keeps its kind; a one-off that came due
+       while the device was down is missed, not spoken late. */
+    {
+        struct le_timer_set set;
+        unsigned int id = 0;
+        long long now = SYNCED_EPOCH;
+
+        setenv("TZ", "UTC0", 1);
+        tzset();
+        le_timer_set_init(&set);
+        assert(le_timer_restore_reminder(&set, 7, now + 600, 0, 10, 0, "tea",
+                                         now, 5000, &id) == LE_TIMER_OK);
+        assert(id == 7 && le_timer_is_reminder(&set, 7) == 1);
+        assert(le_timer_restore_reminder(&set, 8, now - 3600, 0, 10, 0, "old",
+                                         now, 5000, &id) == LE_TIMER_ERR_RANGE);
+        assert(le_timer_find(&set, 8) == NULL);
+        /* A plain alarm with the same id space is not a reminder. */
+        assert(le_timer_add_alarm(&set, now + 60, "wake", now, &id) == LE_TIMER_OK);
+        assert(le_timer_is_reminder(&set, id) == 0);
+    }
+
+    /*
+     * Sunrise wake light (UI #447). Off by default; a lead applies only to
+     * pending alarms inside [due - lead, due), never to countdowns or to an
+     * alarm that is already ringing.
+     */
+    {
+        struct le_timer_set set;
+        unsigned int id = 0, alarm_id = 0;
+        long long due = 0, fake_due = SYNCED_EPOCH + 3600LL;
+
+        assert(le_timer_sunrise_minutes_valid(0));
+        assert(le_timer_sunrise_minutes_valid(5));
+        assert(le_timer_sunrise_minutes_valid(30));
+        assert(!le_timer_sunrise_minutes_valid(4));
+        assert(!le_timer_sunrise_minutes_valid(31));
+        assert(!le_timer_sunrise_minutes_valid(-5));
+
+        le_timer_set_init(&set);
+        assert(le_timer_add_alarm(&set, fake_due, "wake", SYNCED_EPOCH, &alarm_id)
+               == LE_TIMER_OK);
+        /* Outside the 5-minute window: 10 minutes early. */
+        assert(!le_timer_sunrise_due(&set, fake_due - 600, 5, &id, &due));
+        /* Inside: 3 minutes early with a 5-minute lead. */
+        assert(le_timer_sunrise_due(&set, fake_due - 180, 5, &id, &due));
+        assert(id == alarm_id && due == fake_due);
+        /* Lead off never opens a window. */
+        assert(!le_timer_sunrise_due(&set, fake_due - 180, 0, &id, &due));
+        /* The window closes at the due instant itself. */
+        assert(!le_timer_sunrise_due(&set, fake_due, 5, &id, &due));
+        /* An unsynced clock never opens one. */
+        assert(!le_timer_sunrise_due(&set, 10, 5, &id, &due));
+
+        /* Sleep until the window opens rather than polling past it. */
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 600, 5, 600000) ==
+               300000LL);
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 600, 5, 60000) ==
+               60000LL);
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 600, 0, 60000) ==
+               60000LL);
+        assert(le_timer_sunrise_timeout_ms(&set, fake_due - 180, 5, 60000) ==
+               60000LL);
+
+        /* A ringing alarm is not "before" anything. */
+        {
+            unsigned int fired[LE_TIMER_MAX];
+            assert(le_timer_step(&set, 1000, fake_due, fired, LE_TIMER_MAX) == 1);
+            assert(!le_timer_sunrise_due(&set, fake_due - 60, 5, &id, &due));
+        }
+
+        /* A countdown never has a sunrise. */
+        le_timer_set_init(&set);
+        assert(le_timer_add_countdown(&set, 600, "tea", 1000, &id) == LE_TIMER_OK);
+        assert(!le_timer_sunrise_due(&set, SYNCED_EPOCH, 5, &id, &due));
     }
 
     printf("timer schedule: ok\n");

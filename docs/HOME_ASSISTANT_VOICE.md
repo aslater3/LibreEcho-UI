@@ -33,11 +33,157 @@ first added, and Assist can then target "the lights" in that area. Home
 Assistant only applies a suggested area when the device is added; for a device
 that is already set up, change its area in Home Assistant.
 
+Besides the Assist satellite, the device offers Home Assistant a media player,
+a **Microphone mute** switch and, on boards with the TSL2540 ambient light
+sensor, an **Illuminance** sensor (unit `lx`, device class `illuminance`, state
+class `measurement`). `libreecho-esphomed` reads the sensor's `als_lux` node at
+most once a second and publishes a new value only when it changes by 5% (or
+1 lx in the dark), or after a minute for smaller drift, so HA sees no more than
+one update a second. A board without the sensor lists no illuminance entity;
+if the sensor stops reading, HA shows the entity as unknown. Tests and other
+boards can point the daemon at a different file with `--light-sensor PATH`.
+The sensor is found when HA lists entities, so a sensor that appears late in
+boot shows up at HA's next reconnect.
+
+The last turn is offered as text sensors. **Last wake word** (the wake model
+waked reports, on by default) updates when a wake word is heard. **Last
+transcript** and **Last reply** carry speech text, so they are listed only when
+the owner sets `"esphome_speech_text_sensors": true` in the web configuration;
+they are off by default and nothing else is published about speech. The
+sensors clear to empty when the voice history is cleared. Values are kept in
+memory only, and a change reaches HA only while HA is subscribed.
+
+**Room level** is a dBFS sensor (one decimal, not calibrated to dB SPL) of the
+room's sound level, averaged over one-second windows. It is off by default and
+listed only when the owner sets `"esphome_room_level_sensor": true` in the web
+configuration. It reuses the audio stream the satellite already reads for its
+ring, so it opens no second capture. No audio leaves the device for it. It is
+published at most every 5 s, and only when the level moves by 2 dB or more, or
+once a minute. It reads missing while the microphone is muted or the stream is
+stale. The level is taken after the echo canceller, which does not remove the
+device's own playback: on bench tests a 2 s test tone at volume 30 raised the
+reading by about 25 dB, so playing sound on the device does show in the sensor.
+
+The four hardware buttons are offered as event entities, one each: **Volume up
+button**, **Volume down button**, **Microphone mute button** and **Action
+button**. Each event's type is the gesture: `press`, `long_press` (reported
+once the button has been held for 0.8 s) or `double_press` (two presses starting
+within 0.35 s of each other). A short press is reported after that 0.35 s
+window, so it can arrive a fraction of a second after the press. The buttons
+keep working locally as before; the events only report what the buttons did.
+An entity only sees presses from a button the board has.
+
+Device activity is offered the same way, as three more event entities. None of
+them carries transcript text, TTS or media URLs, or timer names; each event is
+only its type:
+
+- **Voice assistant** (`wake_word`, `listening`, `thinking`, `replying`,
+  `finished`, `stopped`): `wake_word` when the wake word is heard on the
+  device, `listening` when the request opens, `thinking` when capture ends,
+  `replying` when the reply is about to play, and one closing event per turn:
+  `finished` when it completed, or `stopped` when it was cancelled or failed.
+  Announcements and follow-up turns open and close their own turn the same way.
+- **Playback** (`started`, `stopped`): a finite reply or announcement URL starts
+  or stops playing on the device. Plain media-player URLs (radio streams) and
+  Bluetooth/AirPlay audio are not reported.
+- **Timer** (`started`, `updated`, `cancelled`, `finished`): the timer events
+  Home Assistant sends for its voice timers. A timer ringing on the device is
+  not reported yet.
+
+These entities are event-only: they carry no state, and HA receives them only
+while it is subscribed to the device's states, as with the buttons.
+
+The LED ring is offered as an **LED ring** light: on/off, RGB colour, brightness
+and three effects, **Solid**, **Pulse** and **Flash** (the ring's own overlay
+patterns). HA's setting is shown on the ring only while the device is not
+showing its own voice indicator. The voice steps above take the ring while a
+turn is open, and HA's state is applied again when the turn ends, so a change
+made during a turn waits for it. Turning the light off releases only HA's
+overlay; the ring returns to the saved ring settings. The light's state is kept
+in the daemon, so a restart of the satellite turns the light off and returns
+the ring to its saved settings.
+
+The satellite also offers three **device actions** for Home Assistant automations
+(ESPHome user services, under the device's ESPHome services in HA, for example
+`esphome.<device>_announce`). Each validates its arguments first; a malformed
+call disconnects that Home Assistant client and changes nothing. A call that
+arrives during a voice turn, playback or another LED write is ignored rather
+than queued, so the device's own activity keeps priority.
+
+- **announce**: `text` (string, 1-200 characters, no control characters). The
+  text is spoken through the device's TTS (audiod `speak`, the same path as the
+  voice replies). Not available as a URL.
+- **play_sound**: `name` (string, lowercase letters, digits, `-` or `_`, up to 48
+  characters). Plays one of the bundled sounds by name (currently `action-1`,
+  `action-2`, `action-3`); a name with no bundled file plays nothing.
+- **set_ring**: `colour` (string `#RRGGBB`), `effect` (string `Solid`, `Pulse` or
+  `Flash`) and `duration` (integer, 1-300 seconds). Shows the colour on the ring
+  for the duration, then releases only that overlay; the ring returns to what it
+  was showing before.
+
 Disabling HA restores the previously selected **Local** or **Custom** mode and
 its settings. Custom Whisper/Piper addresses, model/voice choices and assistant
 configuration are not erased. There is no protocol selector, legacy satellite
 banner, or staged compatibility state. Integration bit 1 remains HA-enabled;
 missing/old `ha_protocol` values normalize to `esphome`.
+
+### Cancelling a request
+
+A request can be cancelled at any stage, and the light ring then goes straight
+back to idle (no error flash). Home Assistant is told to stop the run, and
+nothing from that run is played afterwards:
+
+- **Action button**: while a request is in progress (listening, thinking or
+  replying), a press cancels it instead of doing its usual job. A button whose
+  action is set to `disabled` stays inert.
+- **Home Assistant**: the device exposes a **Cancel request** button entity
+  (`button.<device>_cancel_request`), usable from dashboards and automations.
+- **Wake word**: saying the wake word again while Home Assistant is thinking
+  cancels the request. While listening and replying the wake word does not
+  cancel (your own command, or the reply's echo, could contain it); use the
+  button, Home Assistant or "stop" there.
+
+For about 1.5 seconds after a cancel, a new wake word is ignored, so late events
+from the stopped run can never attach to a new one. `buttond` reaches
+`esphomed` through the root-only datagram socket
+`/run/libreecho/esphome-control.sock` (`--control-socket`); the only command is
+`cancel`, and it does nothing when no request is in progress.
+
+## Server-side wake word (optional, off by default)
+
+By default the wake word is detected on the device by `waked`, and that stays
+the only path that starts a turn. The owner can instead let Home Assistant run
+wake detection, as in ESPHome's "wake word on Home Assistant" mode, by setting
+`"esphome_server_wake": true` in `web-config.json` (no web control yet). The
+option is read when the daemon starts or on SIGHUP.
+
+While it is on, Home Assistant owns voice, and the satellite is subscribed,
+`esphomed` opens a run with `USE_VAD|USE_WAKE_WORD` and no wake phrase, then
+streams the post-AEC mono 16 kHz microphone continuously. Home Assistant's
+wake engine decides when a turn begins. On-device wake events are ignored while
+the option is on. The ring pulses the listening colour while the stream is open.
+`/run/libreecho/esphome-status.json` reports `server_wake` (configured) and
+`server_wake_streaming` (audio is being sent now).
+
+Mute, the privacy switch, or the unsubscribe of Home Assistant ends the stream
+at once with a stop request. After a run ends or times out, streaming restarts
+after one second, unless it is muted or privacy is on. Nothing streams while
+the option is off or Home Assistant does not own voice. Saves from the web UI
+keep the `esphome_server_wake` key.
+
+## Bluetooth proxy (experimental, off by default)
+
+The satellite can offer Home Assistant a Bluetooth proxy that forwards raw LE
+advertisements from `btd`. This is experimental: on current hardware no LE
+advertisements have been observed reaching the device, so it is not advertised
+unless the owner opts in with `"esphome_bluetooth_proxy": true` in
+`web-config.json` (no web control yet). The option is read when the daemon
+starts or on SIGHUP, and web saves keep the key.
+
+While it is off (the default) the device info reports
+`bluetooth_proxy_feature_flags = 0`, Home Assistant creates no Bluetooth
+scanner for the device, a Bluetooth subscribe request is ignored, and
+`esphomed` never asks `btd` to scan.
 
 ## Protocol contract
 

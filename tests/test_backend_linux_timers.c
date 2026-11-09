@@ -76,6 +76,24 @@ int main(void)
     test_response = "{\"dismissed\":\"bad\"}";
     assert(timer_dismiss(NULL, NULL) == LE_IO);
 
+    /* A reminder is a schedule entry like an alarm, so it parses, and its time
+       and days come through; an unknown kind is still refused. */
+    test_response = "{\"available\":true,\"ringing\":0,\"missed\":0,\"timers\":[{\"id\":2,\"kind\":\"reminder\",\"state\":\"pending\",\"seconds_remaining\":60,\"label\":\"pills\",\"repeat_days\":62,\"hour\":7,\"minute\":30}]}";
+    assert(timers(NULL, &list) == LE_OK && list.count == 1 &&
+           !strcmp(list.items[0].kind, "reminder") && list.items[0].repeat_days == 62U &&
+           list.items[0].hour == 7 && list.items[0].minute == 30);
+    test_response = "{\"available\":true,\"ringing\":0,\"missed\":0,\"timers\":[{\"id\":2,\"kind\":\"chime\",\"state\":\"pending\",\"seconds_remaining\":60,\"label\":\"x\"}]}";
+    assert(timers(NULL, &list) == LE_IO);
+    test_response = "{\"id\":8}";
+    {
+        unsigned id = 0;
+        assert(timer_add_reminder(NULL, 7, 30, 0, "pills", &id) == LE_OK && id == 8);
+        assert(timer_add_reminder(NULL, 24, 0, 0, "pills", NULL) == LE_INVALID);
+        assert(timer_add_reminder(NULL, 7, 30, 0x80U, "pills", NULL) == LE_INVALID);
+    }
+    test_response = "{\"id\":\"bad\"}";
+    assert(timer_add_reminder(NULL, 7, 30, 0x3eU, "pills", NULL) == LE_IO);
+
     puts("Linux timer status transport failures propagate: ok");
     return 0;
 }

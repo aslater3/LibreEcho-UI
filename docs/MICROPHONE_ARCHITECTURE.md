@@ -35,7 +35,10 @@ line protocol:
 - `stream_raw` returns one JSON response line and then switches that connection
   to the interleaved raw PCM byte stream.
 - `stream_mono` does the same for the calibrated, beamformed, high-passed mono
-  stream (`pcm_s16_le`, 16 kHz). `libreecho-waked` keeps one open.
+  stream (`pcm_s16_le`, 16 kHz). `libreecho-waked` keeps one open. Its OK
+  header is sent only once the capture has delivered audio; if the codec
+  cannot be opened, the client gets `microphone capture unavailable` instead
+  of an OK header followed by an empty stream.
 - `beams` returns a snapshot of the beamformer while a `stream_mono` is
   running (see below), or `running:false` when none is.
 - `stream_logical` fails closed: no consumer needs per-microphone logical
@@ -108,6 +111,40 @@ The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction
 only and comb-filtered speech from every other direction.
 
+## Mix mode
+
+The owner picks how the speech microphones become the mono stream with
+`microphone_mix` on `PUT /api/v1/audio` (see `docs/API.md`):
+
+- `beamformer` (default): the fixed-beam output described above.
+- `average`: the mean of the lanes in the speech set, rounded to nearest.
+- `single`: one array microphone. `microphone_lane` picks lane 0-6 (array
+  microphone 1-7); `-1`, the default, uses the lowest-numbered lane in the
+  speech set (lane 0 by default). The lane is set live with `set_lane` (`{"lane":N}`),
+  reported as `pipeline.microphone_lane`, and saved in the web configuration.
+  It is only used in `single` mode.
+
+The beamformer runs in every mode, so its selection and the beam view stay
+current, and switching modes does not restart the stream. The mode is held in
+the shared slot that the stream worker reads each frame. `set_mix` changes it
+live, and `status` reports it as `pipeline.microphone_mix`. At start-up micd
+reads the saved value from the web configuration named by `LE_MIC_CONFIG`.
+Average and single output are not delayed by the 16 ms beamformer latency, so
+a switch causes a one-time step of about 16 ms in the stream.
+
+### External microphones
+
+Only the on-board array is selectable. A USB audio input is not possible on
+the radar image: the running MT8163 kernel is built without
+`CONFIG_SND_USB_AUDIO` (checked in `/proc/config.gz` on radar, 2026-11-01).
+Bluetooth audio input is not part of this contract. Adding an external source
+needs the USB audio driver in the kernel, and any new source must stay behind
+micd, the sole capture owner.
+
+The dot has no seven-microphone array: its capture is a single TLV320AIC3101
+codec, and the array stream returns no samples there, so `single` with a lane
+choice is radar-only.
+
 ## Beam view and direction of arrival
 
 `GET /api/v1/microphones/beams` (see `docs/API.md`) exposes the `beams`
@@ -130,3 +167,58 @@ while the selected beam follows talkers. The two can therefore differ.
 - Raw capture is not retained by `micd`.
 - The UI/API authentication and privacy policy remain in front of browser
   streaming and the beam view.
+
+## Clap detection (experimental, off by default)
+
+`libreecho-waked` can screen its cleaned mono frames for claps. The detector
+(`src/adapter/clap_detector.c`) is off at start-up and is switched on only by
+the adapter control socket:
+
+```text
+{"v":1,"id":1,"cmd":"set_clap","args":{"enabled":true}}
+```
+
+`status` reports `clap_enabled` and `clap_count`. While enabled, a clap is a
+10 ms frame whose energy jumps well above a slowly tracked noise floor, whose
+peak is impulsive, whose spectrum is broadband (spectral flatness over eight
+Goertzel bands) and whose energy falls back by about 6 dB within 40 ms. Frames
+that fail the energy test never reach the spectral check, so silence and steady
+sound cost almost nothing.
+
+Results go to the wake subscriber stream as `clap_detected` with
+`{"detection_sample":N,"claps":1}` for a single clap or `"claps":2` for two
+claps 150-800 ms apart. A single is reported once the double window has passed
+without a second clap. Existing subscribers select on `wake_detected`, so a
+clap does not start a voice turn. The setting is not persisted, not exposed in
+the HTTP API and not forwarded to Home Assistant yet.
+
+## Smoke alarm detection (experimental, off by default)
+
+`libreecho-waked` can also screen its cleaned mono frames for the T3 temporal
+pattern of a smoke alarm: three pulses of a steady tone near 3 kHz, each about
+0.5 s long, separated by gaps of about 0.5 s. The detector
+(`src/adapter/smoke_alarm_detector.c`) is off at start-up and is switched on
+only by the adapter control socket:
+
+```text
+{"v":1,"id":1,"cmd":"set_smoke_alarm","args":{"enabled":true}}
+```
+
+`status` reports `smoke_alarm_enabled` and `smoke_alarm_count`. While enabled,
+each 10 ms frame must pass an energy gate. Frames that pass it are checked for
+tonality: one of three Goertzel filters (2.9, 3.1, 3.3 kHz) must hold most of
+the frame energy. A run of tonal frames of 0.3-0.9 s, followed by a gap of
+0.3-0.9 s and then the next run, counts as a pulse. Three pulses in sequence
+report one event, and a further 10 s cooldown applies. Noise, speech, music at
+other frequencies and pulses with the wrong length or gap break the sequence.
+The detector costs three 160-sample Goertzel passes per frame that passes the
+energy gate.
+
+Results go to the wake subscriber stream as `smoke_alarm_detected` with
+`{"detection_sample":N,"pulses":3}`. Like claps, it never starts a voice turn.
+The timing windows, the tonal threshold and the energy gate are tuned
+constants, not a measured standard: they must be checked against the alarm
+standard and a real alarm before any conformance claim. Only the T3 pattern is
+covered; the CO (T4) pattern has short pulses that do not fit these windows.
+The setting is not persisted, not exposed in the HTTP API and not forwarded to
+Home Assistant yet.

@@ -39,6 +39,9 @@ grep -Fq -e '"$MDNS_INIT" status' "$SCRIPT"
 grep -Fq 'le_mdns_status(' "$SOURCE"
 grep -Fq 'LE_MDNS_BUS_SOCKET' "$SOURCE"
 grep -Fq 'mdns_running' "$SOURCE"
+# A responder restart must re-register AirPlay, not leave it unadvertised.
+grep -Fq 'airplay_mdns_poll(&ctx);' "$SOURCE"
+grep -Fq 'LE_MDNS_AVAHI_PIDFILE' "$SOURCE"
 
 # AirPlay audio and Shairport lifecycle is unchanged and still owned here.
 grep -Fq 'shairport_path' "$SOURCE"

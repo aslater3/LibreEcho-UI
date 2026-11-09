@@ -7,6 +7,7 @@
 #include "tls.h"
 #include "adapter/adapter.h"
 #include "adapter/timer_schedule.h"
+#include "adapter/voice_clip_store.h"
 #include "adapter/wyoming_client.h"
 #include "config_store.h"
 #include "feature_provenance.h"
@@ -14,10 +15,22 @@
 #include "boot_control.h"
 #include "json.h"
 #include "wake_diagnostic.h"
+#include "wake_model.h"
+#include "wake_model_store.h"
 #include "logd.h"
 #include "log.h"
 #include "service_env.h"
 #include "update_identity.h"
+#include "timezone.h"
+#include "sound_store.h"
+#include "peers.h"
+#include "peer_link.h"
+#include "peer_group.h"
+#include "peer_settings.h"
+#include "peer_announce.h"
+#include "adapter/mdns_client.h"
+#include <arpa/inet.h>
+#include <ifaddrs.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -44,6 +57,7 @@
 #define LE_TLS_AVAILABLE 0
 #endif
 static int button_action_valid(const char *action);
+static int button_action_long_valid(const char *action);
 static int button_sound_list_valid(const char *list);
 static void out(struct api_response*r,int status,const char*fmt,...){va_list ap;r->status=status;strcpy(r->type,"application/json; charset=utf-8");va_start(ap,fmt);r->length=(size_t)vsnprintf(r->body,sizeof(r->body),fmt,ap);va_end(ap);if(r->length>=sizeof(r->body))r->length=sizeof(r->body)-1;}
 static void ok(struct api_response*r,const char*data){out(r,200,"{\"ok\":true,\"data\":%s,\"error\":null}",data?data:"{}");}static void err(struct api_response*r,int status,int rc,const char*msg){char e[256];json_escape(e,sizeof(e),msg);out(r,status,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"%s\",\"message\":\"%s\"}}",le_result_code(rc),e);}static void method_not_allowed(struct api_response*r){err(r,405,LE_INVALID,"HTTP method is not allowed for this endpoint");}
@@ -62,7 +76,13 @@ static int changing(const char*m){return strcmp(m,"GET")&&strcmp(m,"HEAD");}stat
  */
 static int origin_matches_host(const char*origin,const char*host){const char*rest=0;if(!host[0])return 0;if(!strncmp(origin,"http://",7))rest=origin+7;else if(!strncmp(origin,"https://",8))rest=origin+8;return rest&&constant_equal(rest,host);}
 static int loopback_origin(const char*o){const char*host;if(!strncmp(o,"http://",7))host=o+7;else if(!strncmp(o,"https://",8))host=o+8;else return 0;if(!strncmp(host,"127.0.0.1",9))host+=9;else if(!strncmp(host,"localhost",9))host+=9;else return 0;return !*host||*host==':';}
-static int allowed_origin(const struct api_context*c,const struct api_request*q){const char*origin=q->origin;if(!origin[0]||c->allow_insecure_lan)return 1;if(c->allowed_origin[0])return constant_equal(origin,c->allowed_origin);if(origin_matches_host(origin,q->host))return 1;return loopback_origin(origin);}static int security(const struct api_context*c,const struct api_request*q,struct api_response*r){int authorized=0,bootstrap_path=!strcmp(q->path,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST"),login_path=!strcmp(q->path,"/api/v1/auth/login")&&!strcmp(q->method,"POST");if(!strcmp(q->path,"/api/v1/config")||bootstrap_path||login_path)authorized=1;if(!authorized&&c->auth_token[0]){char expected[256];snprintf(expected,sizeof(expected),"Bearer %s",c->auth_token);authorized=constant_equal(q->authorization,expected);}if(!authorized&&c->auth.enabled&&!strncmp(q->authorization,"Bearer ",7))authorized=le_auth_session((struct le_auth_db*)&c->auth,q->authorization+7,0,0);if(api_bootstrap_required_internal(c)&&!authorized){err(r,401,LE_AUTH,"Initial account setup is required");return 0;}if((c->auth_token[0]||c->auth.enabled)&&!authorized){err(r,401,LE_AUTH,"Authentication is required");return 0;}if(!changing(q->method))return 1;if(!constant_equal(q->csrf,c->csrf_token)){err(r,403,LE_AUTH,"Missing or invalid CSRF token");return 0;}if(!allowed_origin(c,q)){err(r,403,LE_AUTH,"Origin is not allowed");return 0;}return 1;}
+/* Paired-device proof (#450): another device asks without a session; the
+   answer is only a signature over its own nonce, and is given only to GET. */
+static int peer_proof_path(const struct api_request*q){return !strcmp(q->method,"GET")&&!strncmp(q->path,"/api/v1/peer/proof",18)&&(q->path[18]==0||q->path[18]=='?');}
+/* Device-to-device POSTs carry a sealed packet as the whole body (#448 group commands, #449 settings copies); the packet is their credential. */
+static int peer_command_path(const struct api_request*q){return !strcmp(q->method,"POST")&&(!strcmp(q->path,"/api/v1/peer/command")||!strcmp(q->path,"/api/v1/peer/settings")||!strcmp(q->path,"/api/v1/peer/announce"));}
+static int allowed_origin(const struct api_context*c,const struct api_request*q){const char*origin=q->origin;if(!origin[0]||c->allow_insecure_lan)return 1;if(c->allowed_origin[0])return constant_equal(origin,c->allowed_origin);if(origin_matches_host(origin,q->host))return 1;return loopback_origin(origin);}static int security(const struct api_context*c,const struct api_request*q,struct api_response*r){int authorized=0,bootstrap_path=!strcmp(q->path,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST"),login_path=!strcmp(q->path,"/api/v1/auth/login")&&!strcmp(q->method,"POST");if(!strcmp(q->path,"/api/v1/config")||bootstrap_path||login_path||peer_proof_path(q)||peer_command_path(q))authorized=1;if(!authorized&&c->auth_token[0]){char expected[256];snprintf(expected,sizeof(expected),"Bearer %s",c->auth_token);authorized=constant_equal(q->authorization,expected);}if(!authorized&&c->auth.enabled&&!strncmp(q->authorization,"Bearer ",7))authorized=le_auth_session((struct le_auth_db*)&c->auth,q->authorization+7,0,0);if(api_bootstrap_required_internal(c)&&!authorized){err(r,401,LE_AUTH,"Initial account setup is required");return 0;}if((c->auth_token[0]||c->auth.enabled)&&!authorized){err(r,401,LE_AUTH,"Authentication is required");return 0;}/* The signed group packet (#448) is the credential here, as the proof GET is; it carries no CSRF token. */
+if(!changing(q->method)||peer_command_path(q))return 1;if(!constant_equal(q->csrf,c->csrf_token)){err(r,403,LE_AUTH,"Missing or invalid CSRF token");return 0;}if(!allowed_origin(c,q)){err(r,403,LE_AUTH,"Origin is not allowed");return 0;}return 1;}
 static int body_ok(const struct api_request*q,struct api_response*r){if(!json_valid_object(q->body,q->body_len)){err(r,400,LE_INVALID,"Request body must be a valid JSON object");return 0;}return 1;}
 static int valid_utf8(const char*s,size_t n){const unsigned char*p=(const unsigned char*)s;size_t i=0;while(i<n){unsigned char c=p[i];if(c<=0x7f){i++;continue;}if(c>=0xc2&&c<=0xdf){if(i+1>=n||(p[i+1]&0xc0)!=0x80)return 0;i+=2;continue;}if(c==0xe0){if(i+2>=n||p[i+1]<0xa0||p[i+1]>0xbf||(p[i+2]&0xc0)!=0x80)return 0;i+=3;continue;}if((c>=0xe1&&c<=0xec)||(c>=0xee&&c<=0xef)){if(i+2>=n||(p[i+1]&0xc0)!=0x80||(p[i+2]&0xc0)!=0x80)return 0;i+=3;continue;}if(c==0xed){if(i+2>=n||p[i+1]<0x80||p[i+1]>0x9f||(p[i+2]&0xc0)!=0x80)return 0;i+=3;continue;}if(c==0xf0){if(i+3>=n||p[i+1]<0x90||p[i+1]>0xbf||(p[i+2]&0xc0)!=0x80||(p[i+3]&0xc0)!=0x80)return 0;i+=4;continue;}if(c>=0xf1&&c<=0xf3){if(i+3>=n||(p[i+1]&0xc0)!=0x80||(p[i+2]&0xc0)!=0x80||(p[i+3]&0xc0)!=0x80)return 0;i+=4;continue;}if(c==0xf4){if(i+3>=n||p[i+1]<0x80||p[i+1]>0x8f||(p[i+2]&0xc0)!=0x80||(p[i+3]&0xc0)!=0x80)return 0;i+=4;continue;}return 0;}return 1;}
 static const char *update_path(void){const char *p=getenv("LIBREECHO_UPDATE");return p&&*p?p:"/usr/local/sbin/libreecho-update";}
@@ -112,6 +132,17 @@ size_t le_update_max_upload_bytes(void)
                                             : (size_t)LE_UPDATE_MAX_BYTES;
 }
 int api_update_upload_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->path,"/api/v1/system/update/upload")||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(strcmp(le_backend_mode(c->backend),"linux")||access("/usr/local/sbin/libreecho-update",X_OK)){err(r,501,LE_NOT_SUPPORTED,"Signed OTA updates are unavailable on this image");return 0;}return 1;}
+/* Owner event sounds (#410). "/api/v1/sounds/<event>" plus an optional
+   "/select" or "/preview" action; any other shape is not a sound route. */
+static int sound_route(const char*path,int*index,const char**action){char id[16];size_t n;const char*rest;if(strncmp(path,"/api/v1/sounds/",15))return 0;path+=15;n=strcspn(path,"/");if(!n||n>=sizeof(id))return 0;memcpy(id,path,n);id[n]=0;rest=path+n;if(!*rest)*action="";else if(!strcmp(rest,"/select"))*action="select";else if(!strcmp(rest,"/preview"))*action="preview";else return 0;*index=le_event_sound_index(id);return *index>=0;}
+int api_sound_upload_authorize(struct api_context*c,const struct api_request*q,struct api_response*r,int*index){const char*action="";if(!sound_route(q->path,index,&action)||action[0]){err(r,404,LE_INVALID,"Sound event was not found; use wake, end or timer");return 0;}if(strcmp(q->method,"PUT")){method_not_allowed(r);return 0;}return security(c,q,r);}
+static void sounds_list(struct api_response*r){char list[1536];if(le_sound_store_json(le_event_sound_dir(),list,sizeof(list))){err(r,503,LE_IO,"Sounds could not be listed");return;}ok(r,list);}
+static int sound_preview(struct api_context*c,int index){struct le_adapter*a;char args[64],data[256];int rc;if(!strcmp(le_backend_mode(c->backend),"mock"))return LE_OK;a=le_adapter_connect(LE_ADAPTER_AUDIO_SOCK,1000);if(!a)return LE_NOT_SUPPORTED;le_adapter_set_io_timeout(a,1000);snprintf(args,sizeof(args),"{\"event\":\"%s\",\"preview\":true}",le_event_sound_slots[index].id);data[0]=0;rc=le_adapter_call(a,"event_sound",args,data,sizeof(data));le_adapter_close(a);if(rc!=LE_ADAPTER_OK)return LE_IO;{int playing=0,busy=0;(void)json_get_top_level_bool(data,strlen(data),"playing",&playing);(void)json_get_top_level_bool(data,strlen(data),"busy",&busy);return playing?LE_OK:busy?LE_BUSY:LE_INVALID;}}
+static int sounds_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int index=-1;const char*action="";const char*dir=le_event_sound_dir();if(!strcmp(q->path,"/api/v1/sounds")){if(!strcmp(q->method,"GET")){sounds_list(r);return 1;}method_not_allowed(r);return 1;}if(strncmp(q->path,"/api/v1/sounds/",15))return 0;if(!sound_route(q->path,&index,&action)){err(r,404,LE_INVALID,"Sound event was not found; use wake, end or timer");return 1;}
+ if(!strcmp(action,"select")){char selected[16];int got,rc;if(strcmp(q->method,"POST")){method_not_allowed(r);return 1;}if(json_duplicate_key(q->body,q->body_len,"selected")||(got=json_get_string_top_level(q->body,"selected",selected,sizeof(selected)))!=1||(strcmp(selected,"custom")&&strcmp(selected,"default"))){err(r,400,LE_INVALID,"selected must be custom or default");return 1;}rc=le_sound_store_select(dir,index,!strcmp(selected,"custom"));if(rc==1){err(r,409,LE_INVALID,"No sound has been uploaded for this event");return 1;}if(rc){err(r,503,LE_IO,"Sound choice could not be saved");return 1;}api_log(c,"info",!strcmp(selected,"custom")?"Owner sound selected":"Built-in sound selected");sounds_list(r);return 1;}
+ if(!strcmp(action,"preview")){int rc;if(strcmp(q->method,"POST")){method_not_allowed(r);return 1;}if(!le_sound_store_uploaded(dir,index)){err(r,409,LE_INVALID,"No sound has been uploaded for this event");return 1;}rc=sound_preview(c,index);if(rc==LE_INVALID){err(r,409,LE_INVALID,"No sound has been uploaded for this event");return 1;}if(rc==LE_BUSY){err(r,409,LE_BUSY,"Another sound is playing; try again when it finishes");return 1;}if(rc){err(r,503,rc,"Sound could not be played");return 1;}ok(r,"{\"playing\":true}");return 1;}
+ if(!strcmp(q->method,"DELETE")){if(le_sound_store_delete(dir,index)){err(r,503,LE_IO,"Sound could not be removed");return 1;}api_log(c,"info","Owner sound removed");sounds_list(r);return 1;}
+ method_not_allowed(r);return 1;}
 int api_update_fetch_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){int apply=!strcmp(q->path,"/api/v1/system/update/apply"),path_ok=!strcmp(q->path,"/api/v1/system/update/check")||apply;char status[64]="";if(!path_ok||strcmp(q->method,"POST")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return 0;}if(apply&&(!key_from_file("/data/libreecho/update/check-status","status",status,sizeof(status))||strcmp(status,"update-available"))){err(r,409,LE_BUSY,"No checked update is currently available");return 0;}return 1;}
 int api_update_channel_authorize(struct api_context*c,const struct api_request*q,struct api_response*r,char*channel,size_t channel_size){if(strcmp(q->method,"PUT")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;if(!body_ok(q,r))return 0;if(!update_fetch_supported(c)){err(r,501,LE_NOT_SUPPORTED,"GitHub OTA updates are unavailable on this image");return 0;}if(!channel||json_get_string(q->body,"channel",channel,channel_size)!=1||(strcmp(channel,"stable")&&strcmp(channel,"dev"))||json_duplicate_key(q->body,q->body_len,"channel")){err(r,400,LE_INVALID,"Channel must be stable or dev");return 0;}return 1;}
 static int key_from_stream(FILE*f,const char*key,char*out,size_t size){char line[256];size_t n=strlen(key);while(fgets(line,sizeof(line),f))if(!strncmp(line,key,n)&&line[n]=='='){size_t len=strcspn(line+n+1,"\r\n");if(len>=size)len=size-1;memcpy(out,line+n+1,len);out[len]=0;return 1;}return 0;}
@@ -433,7 +464,7 @@ static int voice_pipeline_restart_result = LE_OK;
 struct voice_transition_snapshot {
     struct api_context *context;
     char mode[24],previous[24],stt_uri[320],stt_model[128],tts_uri[320],tts_voice[128];
-    unsigned ha_bit;int previous_valid,local_only,max_utterance,end_silence,vad_floor;
+    unsigned ha_bit;int previous_valid,local_only,max_utterance,end_silence,vad_floor,noise_suppression;
 };
 static struct voice_transition_snapshot voice_transition;
 static int voice_pipeline_rolling_back;
@@ -454,6 +485,7 @@ static void voice_transition_capture(struct api_context *c)
     voice_transition.max_utterance=c->stt_max_utterance_ms;
     voice_transition.end_silence=c->stt_end_silence_ms;
     voice_transition.vad_floor=c->stt_vad_floor_rms;
+    voice_transition.noise_suppression=c->voice_noise_suppression;
     voice_pipeline_rollback_failed=0;
 }
 static void voice_transition_restore(void)
@@ -471,6 +503,7 @@ static void voice_transition_restore(void)
     c->stt_max_utterance_ms=voice_transition.max_utterance;
     c->stt_end_silence_ms=voice_transition.end_silence;
     c->stt_vad_floor_rms=voice_transition.vad_floor;
+    c->voice_noise_suppression=voice_transition.noise_suppression;
 }
 
 
@@ -735,22 +768,87 @@ static void ensure_voice_pipeline_config(struct api_context *c)
  * The device has no zoneinfo database, so the timezone is a POSIX TZ string
  * such as "CST6CDT,M3.2.0,M11.1.0" rather than "America/Chicago".  It ends
  * up exported into every daemon's environment by the init script, so keep
- * it to characters that cannot do anything surprising there.
+ * it to characters that cannot do anything surprising there (timezone.h).
  */
-static int timezone_valid(const char *tz)
+static int timezone_valid(const char *tz){return le_timezone_valid(tz);}
+/*
+ * The IANA name the owner picked ("Europe/London"), kept only so the picker
+ * can show it again: several names share one POSIX string. Empty is unset.
+ */
+static int timezone_name_valid(const char *name)
 {
     size_t i;
 
-    if (!tz || !tz[0] || strlen(tz) > 63)
+    if (!name || strlen(name) > 63)
         return 0;
-    for (i = 0; tz[i]; ++i) {
-        unsigned char ch = (unsigned char)tz[i];
+    for (i = 0; name[i]; ++i) {
+        unsigned char ch = (unsigned char)name[i];
 
-        if (!isalnum(ch) && ch != '+' && ch != '-' && ch != ':' &&
-            ch != ',' && ch != '.' && ch != '/')
+        if (!isalnum(ch) && ch != '_' && ch != '+' && ch != '-' && ch != '/')
             return 0;
     }
     return 1;
+}
+/* "manual": set here. "home_assistant": esphomed stores the zone Home Assistant reports (#371). */
+static int timezone_source_valid(const char *source)
+{
+    return source && (!strcmp(source, "manual") || !strcmp(source, "home_assistant"));
+}
+/*
+ * While the zone follows Home Assistant, esphomed writes it straight into
+ * web-config.json, so the file is the authority: pick it up before the
+ * value is shown or written back, never overwrite it with a stale copy.
+ */
+/* Set while a PUT that names a zone is being saved: that zone, not the file's, is the one to write. */
+static int timezone_put_pinned;
+static void timezone_sync_from_file(struct api_context *c)
+{
+    char saved[16384], tz[64], name[64];
+
+    if (timezone_put_pinned || strcmp(c->timezone_source, "home_assistant") || !c->config_path[0] ||
+        config_read(c->config_path, saved, sizeof(saved)) <= 0)
+        return;
+    if (json_get_string(saved, "timezone", tz, sizeof(tz)) == 1 && timezone_valid(tz))
+        strcpy(c->timezone, tz);
+    if (json_get_string(saved, "timezone_name", name, sizeof(name)) == 1 && timezone_name_valid(name))
+        strcpy(c->timezone_name, name);
+}
+/*
+ * PUT /api/v1/system/timezone: {"timezone", "name"?, "source"?}. A manual
+ * zone needs "timezone"; Home Assistant mode keeps the current zone until HA
+ * reports one, unless the caller supplies an interim value. "<+04>-4" style
+ * names are accepted and stored as letters (timezone.h). Returns 0 with the
+ * context updated, or 1 with an error response already written.
+ */
+static int timezone_put(struct api_context *c, const char *body, struct api_response *r)
+{
+    char raw[96], tz[64], name[64] = "", source[16] = "manual";
+    int tz_field = json_get_string(body, "timezone", raw, sizeof(raw));
+    int name_field = json_get_string(body, "name", name, sizeof(name));
+    int source_field = json_get_string(body, "source", source, sizeof(source));
+
+    if (source_field < 0 || (source_field > 0 && !timezone_source_valid(source))) {
+        err(r, 400, LE_INVALID, "source must be manual or home_assistant");
+        return 1;
+    }
+    if (name_field < 0 || (name_field > 0 && !timezone_name_valid(name))) {
+        err(r, 400, LE_INVALID, "name must be an IANA time zone name such as Europe/London");
+        return 1;
+    }
+    if (tz_field < 0 || (tz_field == 0 && strcmp(source, "home_assistant")) ||
+        (tz_field > 0 && le_timezone_normalize(raw, tz, sizeof(tz)) != 0)) {
+        err(r, 400, LE_INVALID, "timezone must be a POSIX TZ string such as CST6CDT,M3.2.0,M11.1.0");
+        return 1;
+    }
+    if (tz_field > 0) {
+        strcpy(c->timezone, tz);
+        strcpy(c->timezone_name, name);
+        timezone_put_pinned = 1; /* cleared by the caller once saved */
+    } else if (name_field > 0) {
+        strcpy(c->timezone_name, name);
+    }
+    strcpy(c->timezone_source, source);
+    return 0;
 }
 
 static int stt_max_utterance_valid(int v){return v>=2000&&v<=20000;}
@@ -874,7 +972,8 @@ static void voice_pipeline_json(struct api_context *c,
            tune them for a room with background conversation, where the VAD
            stays active and end-of-speech would otherwise never fire. */
         "\"listening\":{\"max_utterance_ms\":%d,"
-        "\"end_silence_ms\":%d,\"vad_floor_rms\":%d},"
+        "\"end_silence_ms\":%d,\"vad_floor_rms\":%d,"
+        "\"noise_suppression\":%s},"
         "\"restart\":{\"state\":\"%s\",\"error\":\"%s\"}},\"error\":null}",
         c->voice_pipeline_mode, satellite_ready ? "true" : "false",
         home_assistant && esphome_satellite_connected() ? "true" : "false",
@@ -885,7 +984,8 @@ static void voice_pipeline_json(struct api_context *c,
         c->tts_wyoming_uri[0] ? "true" : "false",
         tts_reachable ? "true" : "false",
         c->stt_max_utterance_ms, c->stt_end_silence_ms,
-        c->stt_vad_floor_rms, restart_state, voice_pipeline_restart_error());
+        c->stt_vad_floor_rms, c->voice_noise_suppression ? "true" : "false",
+        restart_state, voice_pipeline_restart_error());
 }
 static int voice_pipeline_update(struct api_context *c, const char *json)
 {
@@ -897,6 +997,7 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
     int max_utterance = c->stt_max_utterance_ms;
     int end_silence = c->stt_end_silence_ms;
     int vad_floor = c->stt_vad_floor_rms;
+    int noise_suppression = c->voice_noise_suppression;
 
     ensure_voice_pipeline_config(c);
     snprintf(mode, sizeof(mode), "%s", c->voice_pipeline_mode);
@@ -949,6 +1050,15 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
                 return LE_INVALID;
             vad_floor = value;
         }
+        /* Noise suppression on the assistant audio (#401). A boolean only:
+         * a non-boolean or repeated key is rejected rather than read as
+         * off. */
+        field = json_get_top_level_bool(json, strlen(json),
+                                        "noise_suppression", &value);
+        if (field < 0)
+            return LE_INVALID;
+        if (field == 1)
+            noise_suppression = value ? 1 : 0;
     }
     if (strcmp(mode, "local") && strcmp(mode, "custom") &&
         strcmp(mode, "home-assistant"))
@@ -963,6 +1073,7 @@ static int voice_pipeline_update(struct api_context *c, const char *json)
     c->stt_max_utterance_ms = max_utterance;
     c->stt_end_silence_ms = end_silence;
     c->stt_vad_floor_rms = vad_floor;
+    c->voice_noise_suppression = noise_suppression;
     snprintf(c->voice_pipeline_mode, sizeof(c->voice_pipeline_mode),
              "%s", mode);
     /* The selected mode and the Home Assistant integration bit are two signals
@@ -1014,7 +1125,7 @@ static void setup_force_next_boot(struct api_context*c,const struct api_request*
 enum setup_failure_stage{SETUP_STAGE_NONE,SETUP_STAGE_HOSTNAME,SETUP_STAGE_AUDIO,SETUP_STAGE_WAKE,SETUP_STAGE_NETWORK,SETUP_STAGE_PERSIST,SETUP_STAGE_FEATURES};
 /* setup failure responses use setup_failure_message(c) for the user-facing stage. */
 static const char*setup_failure_message(const struct api_context*c){switch(c->setup_failure_stage){case SETUP_STAGE_HOSTNAME:return "The device hostname could not be applied";case SETUP_STAGE_AUDIO:return "The initial audio volume could not be applied";case SETUP_STAGE_WAKE:return "The wake-word setting could not be applied";case SETUP_STAGE_NETWORK:return "The Wi-Fi connection could not be completed; check the access point and try again";case SETUP_STAGE_PERSIST:return "Setup settings could not be saved";case SETUP_STAGE_FEATURES:return "Installed feature services are not ready";default:return "Initial setup could not be completed";}}
-static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT];int volume,sensitivity,local_only,telemetry,crash_reports=-1,rc;memset(&wifi,0,sizeof(wifi));c->setup_failure_stage=SETUP_STAGE_NONE;if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!api_valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}/* crash_reports is optional for older setup clients; when present it must be a boolean. */if(json_get_bool(j,"crash_reports",&crash_reports)<0){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}c->setup_failure_stage=SETUP_STAGE_HOSTNAME;if((rc=le_set_hostname(c->backend,hostname))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_AUDIO;if((rc=le_set_volume(c->backend,volume))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_WAKE;if((rc=le_set_wake_word(c->backend,wake))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}if((rc=le_set_wake_word_sensitivity(c->backend,sensitivity))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_NETWORK;if((rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}strncpy(c->configured_wake_word,wake,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;if(crash_reports>=0)c->privacy_crash_reports=crash_reports;c->integrations|=16u;c->setup_completed=1;c->setup_failure_stage=SETUP_STAGE_PERSIST;rc=persist_configuration(c);if(!rc){snprintf(c->configured_wake_word,sizeof(c->configured_wake_word),"%s",wake);c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;c->setup_failure_stage=SETUP_STAGE_FEATURES;rc=setup_activate_installed_features(c);}if(!rc)rc=api_write_setup_marker(c,1);if(rc)c->setup_completed=0;else c->setup_failure_stage=SETUP_STAGE_NONE;return rc;}
+static int setup_apply(struct api_context*c,const char*j){struct le_wifi_credentials wifi;char hostname[LE_TEXT],wake[LE_TEXT],tz_raw[96],tz[64]="",tz_name[64]="";int tz_field,tz_name_field,volume,sensitivity,local_only,telemetry,crash_reports=-1,rc;memset(&wifi,0,sizeof(wifi));c->setup_failure_stage=SETUP_STAGE_NONE;if(c->setup_completed)return LE_BUSY;if(json_get_string(j,"hostname",hostname,sizeof(hostname))<1||!api_valid_hostname(hostname)||json_get_string(j,"ssid",wifi.ssid,sizeof(wifi.ssid))<1||!wifi.ssid[0]||json_get_string(j,"security",wifi.security,sizeof(wifi.security))<1||json_get_string(j,"password",wifi.password,sizeof(wifi.password))<1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||!wake[0]||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_bool(j,"local_only",&local_only)<1||json_get_bool(j,"diagnostic_telemetry",&telemetry)<1){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}/* crash_reports is optional for older setup clients; when present it must be a boolean. */if(json_get_bool(j,"crash_reports",&crash_reports)<0){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}/* timezone (POSIX) and timezone_name (IANA) are optional (#371): the wizard offers the browser's zone; older clients keep UTC. */tz_field=json_get_string(j,"timezone",tz_raw,sizeof(tz_raw));tz_name_field=json_get_string(j,"timezone_name",tz_name,sizeof(tz_name));if(tz_field<0||tz_name_field<0||(tz_field>0&&le_timezone_normalize(tz_raw,tz,sizeof(tz)))||(tz_name_field>0&&(!timezone_name_valid(tz_name)||tz_field<1))){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strlen(wifi.password)<8){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}if(strcmp(wifi.security,"open")&&strcmp(wifi.security,"wpa2")){memset(wifi.password,0,sizeof(wifi.password));return LE_INVALID;}c->setup_failure_stage=SETUP_STAGE_HOSTNAME;if((rc=le_set_hostname(c->backend,hostname))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_AUDIO;if((rc=le_set_volume(c->backend,volume))){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_WAKE;if((rc=le_set_wake_word(c->backend,wake))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}if((rc=le_set_wake_word_sensitivity(c->backend,sensitivity))&&rc!=LE_NOT_SUPPORTED){memset(wifi.password,0,sizeof(wifi.password));return rc;}c->setup_failure_stage=SETUP_STAGE_NETWORK;if((rc=le_connect_wifi(c->backend,&wifi))){memset(wifi.password,0,sizeof(wifi.password));return rc;}strncpy(c->configured_wake_word,wake,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;memset(wifi.password,0,sizeof(wifi.password));c->privacy_local_only=local_only;c->privacy_telemetry=telemetry;if(crash_reports>=0)c->privacy_crash_reports=crash_reports;if(tz_field>0){strcpy(c->timezone,tz);strcpy(c->timezone_name,tz_name);strcpy(c->timezone_source,"manual");}c->integrations|=16u;c->setup_completed=1;c->setup_failure_stage=SETUP_STAGE_PERSIST;rc=persist_configuration(c);if(!rc){snprintf(c->configured_wake_word,sizeof(c->configured_wake_word),"%s",wake);c->configured_wake_sensitivity=sensitivity;c->configured_wake_valid=1;c->setup_failure_stage=SETUP_STAGE_FEATURES;rc=setup_activate_installed_features(c);}if(!rc)rc=api_write_setup_marker(c,1);if(rc)c->setup_completed=0;else c->setup_failure_stage=SETUP_STAGE_NONE;return rc;}
 /*
  * Is this the real device?
  *
@@ -1100,6 +1211,17 @@ int api_apply_persisted_configuration(struct api_context *c, char *unrestored,
         value >= 0 && value <= 100)
         APPLY_CONFIG("microphone gain",
                  le_set_microphone_gain(c->backend, value));
+    {
+        char mix[16];
+
+        if (json_get_string(saved, "microphone_mix", mix, sizeof(mix)) > 0)
+            APPLY_CONFIG("microphone mix",
+                         le_set_microphone_mix(c->backend, mix));
+    }
+    if (json_get_int(saved, "microphone_lane", &value) > 0 &&
+        value >= -1 && value <= 6)
+        APPLY_CONFIG("microphone lane",
+                 le_set_microphone_lane(c->backend, value));
     if (json_get_bool(saved, "microphone_muted", &value) > 0)
         APPLY_CONFIG("microphone mute",
                  le_set_microphone_muted(c->backend, value));
@@ -1126,6 +1248,9 @@ int api_apply_persisted_configuration(struct api_context *c, char *unrestored,
         value >= 0 && value <= 100)
         APPLY_CONFIG("wake sensitivity",
                  le_set_wake_word_sensitivity(c->backend, value));
+    if (json_get_bool(saved, "do_not_disturb", &value) > 0)
+        APPLY_CONFIG("do not disturb",
+                 le_set_do_not_disturb(c->backend, value));
     if (json_get_bool(saved, "hostname_persisted",
                       &hostname_persisted) > 0 &&
         hostname_persisted &&
@@ -1146,7 +1271,7 @@ static int member_is(const struct json_member*m,const char*name){return m->name_
 /* A room is owner-set free text that is spoken into the assistant prompt and sent to Home Assistant, so it stays small and
    single-line: at most 48 bytes, no control characters, quotes or backslashes. Over-length or unsafe input is rejected, never trimmed. */
 static int room_valid(const char*room){size_t i;if(!room||strlen(room)>48)return 0;for(i=0;room[i];i++){unsigned char ch=(unsigned char)room[i];if(ch<0x20||ch==0x7f||ch=='"'||ch=='\\')return 0;}return 1;}
-int api_init(struct api_context*c,struct le_backend*b,int dev,int insecure,const char*token,const char*origin,const char*csrf,const char*config_path,const char*users_path){char saved[16384];int v;memset(c,0,sizeof(*c));strcpy(c->ui_theme,"classic");c->buttond_status_path="/run/libreecho/buttond-status";c->backend=b;c->dev_controls=dev;c->allow_insecure_lan=insecure;c->privacy_local_only=1;c->privacy_audio_retention=0;c->privacy_audio_retention_hours=LE_AUDIO_RETENTION_DEFAULT_HOURS;c->privacy_audio_max_mb=LE_AUDIO_RETENTION_DEFAULT_MAX_MB;strcpy(c->privacy_audio_mode,"none");c->privacy_audio_remote_url[0]=0;c->privacy_log_hours=24;c->privacy_active_ping=1;c->integrations=4u;c->stt_max_utterance_ms=LE_STT_MAX_UTTERANCE_DEFAULT;c->stt_end_silence_ms=LE_STT_END_SILENCE_DEFAULT;c->stt_vad_floor_rms=LE_STT_VAD_FLOOR_DEFAULT;strcpy(c->timezone,"UTC");c->net_ssh=1;c->button_tones=1;strcpy(c->button_action,"sound");strcpy(c->button_action_sounds,"action-1,action-2,action-3");c->button_action_brightness=70;c->button_mute_brightness=60;strcpy(c->button_short,"Start listening");strcpy(c->button_long,"Open pairing mode");if(token)strncpy(c->auth_token,token,sizeof(c->auth_token)-1);if(origin)strncpy(c->allowed_origin,origin,sizeof(c->allowed_origin)-1);if(!csrf||strlen(csrf)!=64)return -1;strncpy(c->csrf_token,csrf,sizeof(c->csrf_token)-1);if(config_path)strncpy(c->config_path,config_path,sizeof(c->config_path)-1);if(users_path){if(strlen(users_path)+strlen(".sessions")>=sizeof(c->sessions_path))return -1;strncpy(c->users_path,users_path,sizeof(c->users_path)-1);snprintf(c->sessions_path,sizeof(c->sessions_path),"%s.sessions",c->users_path);}if(c->users_path[0]&&!access(c->users_path,F_OK)&&le_auth_load(&c->auth,c->users_path)!=0){fprintf(stderr,"Unable to load LibreEcho users file: %s\n",c->users_path);return -1;}if(c->config_path[0]&&config_read(c->config_path,saved,sizeof(saved))>0){if(json_get_string(saved,"wake_word",c->configured_wake_word,sizeof(c->configured_wake_word))>0&&json_get_int(saved,"wake_sensitivity",&c->configured_wake_sensitivity)>0&&c->configured_wake_sensitivity>=0&&c->configured_wake_sensitivity<=100)c->configured_wake_valid=1;json_get_bool(saved,"privacy_local_only",&c->privacy_local_only);json_get_bool(saved,"privacy_audio_retention",&c->privacy_audio_retention);{char mode[16],url[256];int mode_rc=json_get_string(saved,"privacy_audio_mode",mode,sizeof(mode));if(mode_rc==1&&audio_retention_mode_valid(mode))strcpy(c->privacy_audio_mode,mode);else if(c->privacy_audio_retention)strcpy(c->privacy_audio_mode,"local");if(json_get_int(saved,"privacy_audio_retention_hours",&v)>0&&audio_retention_hours_valid(v))c->privacy_audio_retention_hours=v;if(json_get_int(saved,"privacy_audio_max_mb",&v)>0&&audio_retention_max_mb_valid(v))c->privacy_audio_max_mb=v;if(json_get_string(saved,"privacy_audio_remote_url",url,sizeof(url))==1&&audio_remote_url_valid(url))strcpy(c->privacy_audio_remote_url,url);{char ha_url[200];if(json_get_string(saved,"home_assistant_url",ha_url,sizeof(ha_url))==1&&home_assistant_url_valid(ha_url))strcpy(c->home_assistant_url,ha_url);}{char v[16];if(json_get_string(saved,"ui_theme",v,sizeof(v))==1&&ui_theme_valid(v))strcpy(c->ui_theme,v);if(json_get_string(saved,"color_mode",v,sizeof(v))==1&&color_mode_valid(v))strcpy(c->color_mode,v);}{char room[64];if(json_get_string(saved,"room",room,sizeof(room))==1&&room_valid(room))strcpy(c->room,room);}json_get_bool(saved,"news_enabled",&c->news_enabled);c->news_enabled=c->news_enabled?1:0;c->privacy_audio_retention=strcmp(c->privacy_audio_mode,"none")!=0;}json_get_bool(saved,"privacy_telemetry",&c->privacy_telemetry);json_get_bool(saved,"privacy_crash_reports",&c->privacy_crash_reports);json_get_bool(saved,"privacy_active_ping",&c->privacy_active_ping);if(json_get_int(saved,"privacy_log_hours",&v)>0)c->privacy_log_hours=v;if(json_get_int(saved,"stt_max_utterance_ms",&v)>0&&stt_max_utterance_valid(v))c->stt_max_utterance_ms=v;if(json_get_int(saved,"stt_end_silence_ms",&v)>0&&stt_end_silence_valid(v))c->stt_end_silence_ms=v;if(json_get_int(saved,"stt_vad_floor_rms",&v)>0&&stt_vad_floor_valid(v))c->stt_vad_floor_rms=v;{char tzbuf[64];if(json_get_string(saved,"timezone",tzbuf,sizeof(tzbuf))>0&&timezone_valid(tzbuf))strcpy(c->timezone,tzbuf);}if(json_get_int(saved,"integrations",&v)>0)c->integrations=(unsigned)v;json_get_bool(saved,"feature_simulation",&c->feature_simulation);json_get_bool(saved,"feature_https",&c->feature_https);json_get_bool(saved,"feature_acoustic_events",&c->feature_acoustic_events);json_get_string(saved,"mac_wifi",c->mac_wifi,sizeof(c->mac_wifi));json_get_string(saved,"mac_bt",c->mac_bt,sizeof(c->mac_bt));json_get_bool(saved,"ssh",&c->net_ssh);json_get_bool(saved,"api_lan",&c->net_api_lan);json_get_string(saved,"button_short",c->button_short,sizeof(c->button_short));json_get_bool(saved,"button_tones",&c->button_tones);{char action[sizeof(c->button_action)],sounds[sizeof(c->button_action_sounds)];if(json_get_string(saved,"button_action",action,sizeof(action))==1&&button_action_valid(action))strcpy(c->button_action,action);if(json_get_string(saved,"button_action_sounds",sounds,sizeof(sounds))==1&&button_sound_list_valid(sounds))strcpy(c->button_action_sounds,sounds);}{int v3;if(json_get_int(saved,"button_mute_brightness",&v3)>0&&v3>=0&&v3<=100)c->button_mute_brightness=v3;}{int v2;if(json_get_int(saved,"button_action_brightness",&v2)>0&&v2>=0&&v2<=100)c->button_action_brightness=v2;}json_get_string(saved,"button_long",c->button_long,sizeof(c->button_long));}/* Sessions are only kept across a restart when HTTPS is on. Persisting a
+int api_init(struct api_context*c,struct le_backend*b,int dev,int insecure,const char*token,const char*origin,const char*csrf,const char*config_path,const char*users_path){char saved[16384];int v;memset(c,0,sizeof(*c));strcpy(c->ui_theme,"classic");c->buttond_status_path="/run/libreecho/buttond-status";c->backend=b;c->dev_controls=dev;c->allow_insecure_lan=insecure;c->privacy_local_only=1;c->privacy_audio_retention=0;c->privacy_audio_retention_hours=LE_AUDIO_RETENTION_DEFAULT_HOURS;c->privacy_audio_max_mb=LE_AUDIO_RETENTION_DEFAULT_MAX_MB;strcpy(c->privacy_audio_mode,"none");c->privacy_audio_remote_url[0]=0;c->privacy_log_hours=24;c->privacy_active_ping=1;c->integrations=4u;c->stt_max_utterance_ms=LE_STT_MAX_UTTERANCE_DEFAULT;c->stt_end_silence_ms=LE_STT_END_SILENCE_DEFAULT;c->stt_vad_floor_rms=LE_STT_VAD_FLOOR_DEFAULT;strcpy(c->timezone,"UTC");strcpy(c->timezone_source,"manual");c->net_ssh=1;c->discoverable=1;c->discovery_fd=-1;c->button_tones=1;strcpy(c->button_action,"sound");strcpy(c->button_action_long,"same");strcpy(c->button_action_sounds,"action-1,action-2,action-3");c->button_action_brightness=70;c->button_mute_brightness=60;strcpy(c->button_short,"Start listening");strcpy(c->button_long,"Open pairing mode");if(token)strncpy(c->auth_token,token,sizeof(c->auth_token)-1);if(origin)strncpy(c->allowed_origin,origin,sizeof(c->allowed_origin)-1);if(!csrf||strlen(csrf)!=64)return -1;strncpy(c->csrf_token,csrf,sizeof(c->csrf_token)-1);if(config_path)strncpy(c->config_path,config_path,sizeof(c->config_path)-1);if(users_path){if(strlen(users_path)+strlen(".sessions")>=sizeof(c->sessions_path))return -1;strncpy(c->users_path,users_path,sizeof(c->users_path)-1);snprintf(c->sessions_path,sizeof(c->sessions_path),"%s.sessions",c->users_path);}if(c->users_path[0]&&!access(c->users_path,F_OK)&&le_auth_load(&c->auth,c->users_path)!=0){fprintf(stderr,"Unable to load LibreEcho users file: %s\n",c->users_path);return -1;}if(c->config_path[0]&&config_read(c->config_path,saved,sizeof(saved))>0){if(json_get_string(saved,"wake_word",c->configured_wake_word,sizeof(c->configured_wake_word))>0&&json_get_int(saved,"wake_sensitivity",&c->configured_wake_sensitivity)>0&&c->configured_wake_sensitivity>=0&&c->configured_wake_sensitivity<=100)c->configured_wake_valid=1;json_get_bool(saved,"privacy_local_only",&c->privacy_local_only);json_get_bool(saved,"privacy_audio_retention",&c->privacy_audio_retention);{char mode[16],url[256];int mode_rc=json_get_string(saved,"privacy_audio_mode",mode,sizeof(mode));if(mode_rc==1&&audio_retention_mode_valid(mode))strcpy(c->privacy_audio_mode,mode);else if(c->privacy_audio_retention)strcpy(c->privacy_audio_mode,"local");if(json_get_int(saved,"privacy_audio_retention_hours",&v)>0&&audio_retention_hours_valid(v))c->privacy_audio_retention_hours=v;if(json_get_int(saved,"privacy_audio_max_mb",&v)>0&&audio_retention_max_mb_valid(v))c->privacy_audio_max_mb=v;if(json_get_string(saved,"privacy_audio_remote_url",url,sizeof(url))==1&&audio_remote_url_valid(url))strcpy(c->privacy_audio_remote_url,url);{char ha_url[200];if(json_get_string(saved,"home_assistant_url",ha_url,sizeof(ha_url))==1&&home_assistant_url_valid(ha_url))strcpy(c->home_assistant_url,ha_url);}{char v[16];if(json_get_string(saved,"ui_theme",v,sizeof(v))==1&&ui_theme_valid(v))strcpy(c->ui_theme,v);if(json_get_string(saved,"color_mode",v,sizeof(v))==1&&color_mode_valid(v))strcpy(c->color_mode,v);}{char room[64];if(json_get_string(saved,"room",room,sizeof(room))==1&&room_valid(room))strcpy(c->room,room);}json_get_bool(saved,"news_enabled",&c->news_enabled);c->news_enabled=c->news_enabled?1:0;json_get_bool(saved,"do_not_disturb",&c->do_not_disturb);c->do_not_disturb=c->do_not_disturb?1:0;c->privacy_audio_retention=strcmp(c->privacy_audio_mode,"none")!=0;}json_get_bool(saved,"privacy_telemetry",&c->privacy_telemetry);json_get_bool(saved,"privacy_crash_reports",&c->privacy_crash_reports);json_get_bool(saved,"privacy_active_ping",&c->privacy_active_ping);if(json_get_int(saved,"privacy_log_hours",&v)>0)c->privacy_log_hours=v;if(json_get_int(saved,"stt_max_utterance_ms",&v)>0&&stt_max_utterance_valid(v))c->stt_max_utterance_ms=v;if(json_get_int(saved,"stt_end_silence_ms",&v)>0&&stt_end_silence_valid(v))c->stt_end_silence_ms=v;if(json_get_int(saved,"stt_vad_floor_rms",&v)>0&&stt_vad_floor_valid(v))c->stt_vad_floor_rms=v;if(json_get_bool(saved,"voice_noise_suppression",&v)>0)c->voice_noise_suppression=v?1:0;{char tzbuf[64];if(json_get_string(saved,"timezone",tzbuf,sizeof(tzbuf))>0&&timezone_valid(tzbuf))strcpy(c->timezone,tzbuf);if(json_get_string(saved,"timezone_name",tzbuf,sizeof(tzbuf))==1&&timezone_name_valid(tzbuf))strcpy(c->timezone_name,tzbuf);if(json_get_string(saved,"timezone_source",tzbuf,sizeof(tzbuf))==1&&timezone_source_valid(tzbuf))strcpy(c->timezone_source,tzbuf);}if(json_get_int(saved,"integrations",&v)>0)c->integrations=(unsigned)v;json_get_bool(saved,"feature_simulation",&c->feature_simulation);json_get_bool(saved,"feature_https",&c->feature_https);json_get_bool(saved,"feature_acoustic_events",&c->feature_acoustic_events);json_get_string(saved,"mac_wifi",c->mac_wifi,sizeof(c->mac_wifi));json_get_string(saved,"mac_bt",c->mac_bt,sizeof(c->mac_bt));json_get_bool(saved,"ssh",&c->net_ssh);json_get_bool(saved,"api_lan",&c->net_api_lan);json_get_bool(saved,"discoverable",&c->discoverable);c->discoverable=c->discoverable?1:0;json_get_bool(saved,"nearest_answers",&c->nearest_answers);c->nearest_answers=c->nearest_answers?1:0;json_get_string(saved,"button_short",c->button_short,sizeof(c->button_short));json_get_bool(saved,"button_tones",&c->button_tones);{char action[sizeof(c->button_action)],sounds[sizeof(c->button_action_sounds)];if(json_get_string(saved,"button_action",action,sizeof(action))==1&&button_action_valid(action))strcpy(c->button_action,action);if(json_get_string(saved,"button_action_long",action,sizeof(action))==1&&button_action_long_valid(action))strcpy(c->button_action_long,action);if(json_get_string(saved,"button_action_sounds",sounds,sizeof(sounds))==1&&button_sound_list_valid(sounds))strcpy(c->button_action_sounds,sounds);}{int v3;if(json_get_int(saved,"button_mute_brightness",&v3)>0&&v3>=0&&v3<=100)c->button_mute_brightness=v3;}{int v2;if(json_get_int(saved,"button_action_brightness",&v2)>0&&v2>=0&&v2<=100)c->button_action_brightness=v2;}json_get_string(saved,"button_long",c->button_long,sizeof(c->button_long));}/* Sessions are only kept across a restart when HTTPS is on. Persisting a
     bearer token extends the life of a credential, which is worth doing only
     when the transport carrying it is encrypted; over plain HTTP the token is
     * readable on the wire and a restart is the one thing that reliably clears
@@ -1419,7 +1544,7 @@ static int radio_apply(struct api_context *c, const char *j)
 /* The colour arrives from audiod. Map it onto the known set rather than
    interpolating the daemon's string straight into the response. */
 static const char*noise_colour_name(const struct le_audio_state*a){if(!strcmp(a->noise_colour,"pink"))return "pink";if(!strcmp(a->noise_colour,"brown"))return "brown";return "white";}
-static void audio_json(struct api_context*c,struct api_response*r){struct le_audio_state a;char nsrc[40],nbed[24];int rc=le_get_audio_state(c->backend,&a);if(rc==LE_NOT_SUPPORTED){out(r,200,"{\"ok\":true,\"data\":{\"available\":false,\"unavailable\":true,\"message\":\"Audio hardware backend is not available\"},\"error\":null}");return;}if(rc){err(r,503,rc,"Audio hardware backend status is unavailable");return;}json_escape(nsrc,sizeof(nsrc),a.noise_source[0]?a.noise_source:noise_colour_name(&a));json_escape(nbed,sizeof(nbed),a.noise_bed[0]?a.noise_bed:"none");out(r,200,"{\"ok\":true,\"data\":{\"volume\":%d,\"microphone_gain\":%d,\"notification_volume\":%d,\"microphone_muted\":%s,\"startup_sound\":%s,\"amplifier_on\":%s,\"output_available\":%s,\"noise\":{\"active\":%s,\"colour\":\"%s\",\"source\":\"%s\",\"bed\":\"%s\",\"level\":%d,\"tempo\":%d,\"fade_seconds\":%d,\"remaining_seconds\":%ld},\"volume_leveling\":%s,\"tts_voice\":\"%s\",\"tts_voices\":[{\"id\":\"southern-female\",\"name\":\"Southern English — female\"},{\"id\":\"northern-male\",\"name\":\"Northern English — male\"}]},\"error\":null}",a.volume,a.microphone_gain,a.notification_volume,a.muted?"true":"false",a.startup_sound?"true":"false",a.amplifier_on?"true":"false",a.output_available?"true":"false",a.noise_active?"true":"false",noise_colour_name(&a),nsrc,nbed,a.noise_level,a.noise_tempo,a.noise_fade_seconds,a.noise_remaining_seconds,a.volume_leveling?"true":"false",a.tts_voice[0]?a.tts_voice:"southern-female");}
+static void audio_json(struct api_context*c,struct api_response*r){struct le_audio_state a;char nsrc[40],nbed[24];int rc=le_get_audio_state(c->backend,&a);if(rc==LE_NOT_SUPPORTED){out(r,200,"{\"ok\":true,\"data\":{\"available\":false,\"unavailable\":true,\"message\":\"Audio hardware backend is not available\"},\"error\":null}");return;}if(rc){err(r,503,rc,"Audio hardware backend status is unavailable");return;}json_escape(nsrc,sizeof(nsrc),a.noise_source[0]?a.noise_source:noise_colour_name(&a));json_escape(nbed,sizeof(nbed),a.noise_bed[0]?a.noise_bed:"none");out(r,200,"{\"ok\":true,\"data\":{\"volume\":%d,\"microphone_gain\":%d,\"notification_volume\":%d,\"microphone_muted\":%s,\"startup_sound\":%s,\"amplifier_on\":%s,\"output_available\":%s,\"noise\":{\"active\":%s,\"colour\":\"%s\",\"source\":\"%s\",\"bed\":\"%s\",\"level\":%d,\"tempo\":%d,\"fade_seconds\":%d,\"remaining_seconds\":%ld},\"volume_leveling\":%s,\"reply_volume\":%d,\"reply_volume_custom\":%s,\"microphone_mix\":\"%s\",\"microphone_lane\":%d,\"tts_voice\":\"%s\",\"tts_voices\":[{\"id\":\"southern-female\",\"name\":\"Southern English — female\"},{\"id\":\"northern-male\",\"name\":\"Northern English — male\"}]},\"error\":null}",a.volume,a.microphone_gain,a.notification_volume,a.muted?"true":"false",a.startup_sound?"true":"false",a.amplifier_on?"true":"false",a.output_available?"true":"false",a.noise_active?"true":"false",noise_colour_name(&a),nsrc,nbed,a.noise_level,a.noise_tempo,a.noise_fade_seconds,a.noise_remaining_seconds,a.volume_leveling?"true":"false",a.reply_volume_custom?a.reply_volume:a.volume,a.reply_volume_custom?"true":"false",a.microphone_mix[0]?a.microphone_mix:"beamformer",a.microphone_lane,a.tts_voice[0]?a.tts_voice:"southern-female");}
 /*
  * Internet radio is folded into the playback answer here rather than in the
  * backend, because the station's display name comes from the configured list
@@ -1505,15 +1630,20 @@ static int local_services_set(int on){char marker[400],dir[400];int fd;if(!local
 #define LE_NEWS_STALE_REFRESH 120L
 static const char*news_env(const char*k,const char*d){const char*v=getenv(k);return v&&*v?v:d;}
 static void news_path(char*out,size_t n,const char*name){snprintf(out,n,"%s/%s",news_env("LIBREECHO_NEWS_DIR","/data/libreecho/update"),name);}
-static int news_supported(void){return !access(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),X_OK)&&!access(news_env("LIBREECHO_NEWS_CA","/etc/ssl/certs/ca-certificates.crt"),R_OK);}
+/* Owner-added private CAs are appended to the system roots in trust-bundle.pem
+   (see https_private_ca below). The bundle is used in addition to the system
+   roots, never instead of them, and verification stays on either way. */
+static char news_trust_dir[320]="/data/libreecho/config";
+static const char*news_ca_path(char*buf,size_t size){const char*env=getenv("LIBREECHO_NEWS_CA");int n;if(env&&*env)return env;n=snprintf(buf,size,"%s/trust-bundle.pem",news_trust_dir);if(n>0&&(size_t)n<size&&!access(buf,R_OK))return buf;return "/etc/ssl/certs/ca-certificates.crt";}
+static int news_supported(void){char ca[384];return !access(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),X_OK)&&!access(news_ca_path(ca,sizeof(ca)),R_OK);}
 struct news_status{long long attempt,success,refreshing;char result[16];};
 static void news_status_read(struct news_status*st){char path[512],text[512],*line,*save=NULL;memset(st,0,sizeof(*st));news_path(path,sizeof(path),"news-status");if(config_read(path,text,sizeof(text))<=0)return;for(line=strtok_r(text,"\n",&save);line;line=strtok_r(NULL,"\n",&save)){if(!strncmp(line,"last_attempt=",13))st->attempt=atoll(line+13);else if(!strncmp(line,"last_success=",13))st->success=atoll(line+13);else if(!strncmp(line,"refreshing_since=",17))st->refreshing=atoll(line+17);else if(!strncmp(line,"result=",7)){size_t i;snprintf(st->result,sizeof(st->result),"%s",line+7);for(i=0;st->result[i];i++)if(!(st->result[i]>='a'&&st->result[i]<='z')&&st->result[i]!='_'){st->result[0]=0;break;}}}}
 static void news_status_write(const struct news_status*st){char path[512],text[256];int n;news_path(path,sizeof(path),"news-status");n=snprintf(text,sizeof(text),"schema=1\nlast_attempt=%lld\nlast_success=%lld\nrefreshing_since=%lld\nresult=%s\n",st->attempt,st->success,st->refreshing,st->result);if(n>0&&(size_t)n<sizeof(text))(void)config_write_atomic(path,text,(size_t)n);}
 static int news_refreshing(const struct news_status*st,long long now){return st->refreshing>0&&now-st->refreshing<LE_NEWS_STALE_REFRESH;}
 /* Runs in the detached grandchild: try each source until one validates. */
-static void news_fetch(void){char sources[1024],*src,*save=NULL,tmp[512],cache[512],doc[LE_NEWS_MAX_BYTES+2];struct news_status st;struct le_news_item items[LE_NEWS_MAX_ITEMS];size_t count;int ok=0;news_status_read(&st);st.refreshing=(long long)time(NULL);st.attempt=st.refreshing;news_status_write(&st);news_path(tmp,sizeof(tmp),"news-download.tmp");news_path(cache,sizeof(cache),"news-cache.json");snprintf(sources,sizeof(sources),"%s",news_env("LIBREECHO_NEWS_SOURCES","https://dl.libreecho.org/news/news-v1.json https://github.com/aslater3/LibreEcho/releases/download/news-feed/news-v1.json"));snprintf(st.result,sizeof(st.result),"offline");
+static void news_fetch(void){char ca[384],sources[1024],*src,*save=NULL,tmp[512],cache[512],doc[LE_NEWS_MAX_BYTES+2];struct news_status st;struct le_news_item items[LE_NEWS_MAX_ITEMS];size_t count;int ok=0;news_status_read(&st);st.refreshing=(long long)time(NULL);st.attempt=st.refreshing;news_status_write(&st);news_path(tmp,sizeof(tmp),"news-download.tmp");news_path(cache,sizeof(cache),"news-cache.json");snprintf(sources,sizeof(sources),"%s",news_env("LIBREECHO_NEWS_SOURCES","https://dl.libreecho.org/news/news-v1.json https://github.com/aslater3/LibreEcho/releases/download/news-feed/news-v1.json"));snprintf(st.result,sizeof(st.result),"offline");
  /* The first failure is the one reported: it is usually the primary source and the most telling. */
- for(src=strtok_r(sources," ",&save);src&&!ok;src=strtok_r(NULL," ",&save)){pid_t pid;int status,n;if(strncmp(src,"https://",8))continue;unlink(tmp);pid=le_news_download(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),news_env("LIBREECHO_NEWS_CA","/etc/ssl/certs/ca-certificates.crt"),src,tmp);if(pid<0)break;
+ for(src=strtok_r(sources," ",&save);src&&!ok;src=strtok_r(NULL," ",&save)){pid_t pid;int status,n;if(strncmp(src,"https://",8))continue;unlink(tmp);pid=le_news_download(news_env("LIBREECHO_NEWS_CURL","/usr/bin/curl"),news_ca_path(ca,sizeof(ca)),src,tmp);if(pid<0)break;
   if(waitpid(pid,&status,0)<0||!WIFEXITED(status)||WEXITSTATUS(status)){if(!strcmp(st.result,"offline"))snprintf(st.result,sizeof(st.result),"%s",WIFEXITED(status)&&WEXITSTATUS(status)==63?"too_large":"http");continue;}
   n=config_read(tmp,doc,sizeof(doc));if(n<=0){if(!strcmp(st.result,"offline"))snprintf(st.result,sizeof(st.result),"too_large");continue;}
   if(le_news_parse(doc,(size_t)n,items,LE_NEWS_MAX_ITEMS,&count)){if(!strcmp(st.result,"offline"))snprintf(st.result,sizeof(st.result),"invalid");continue;}
@@ -1526,6 +1656,117 @@ static void news_json(struct api_context*c,struct api_response*r){char cache[512
  if(!supported)state="unsupported";else if(news_refreshing(&st,now))state="refreshing";else if(now-st.attempt>=(strcmp(st.result,"ok")?LE_NEWS_RETRY:LE_NEWS_INTERVAL)||!st.attempt){state=news_start_refresh()==LE_OK?"refreshing":(have?"stale":"never");}else if(!have)state="never";else state=now-st.success<LE_NEWS_INTERVAL?"fresh":"stale";
  out(r,200,"{\"ok\":true,\"data\":{\"enabled\":true,\"supported\":%s,\"state\":\"%s\",\"last_success_epoch\":%lld,\"last_attempt_epoch\":%lld,\"last_error\":\"%s\",\"items\":%s},\"error\":null}",supported?"true":"false",state,st.success,st.attempt,strcmp(st.result,"ok")?st.result:"",have?items_json:"[]");}
 static void news_clear(void){static const char*const names[]={"news-cache.json","news-cache.json.bak","news-cache.json.tmp","news-status","news-status.bak","news-status.tmp","news-download.tmp"};char path[512];size_t i;for(i=0;i<sizeof(names)/sizeof(names[0]);i++){news_path(path,sizeof(path),names[i]);unlink(path);}}
+/* Device list (#413). */
+static int peer_key_ready(struct api_context*c);
+/* The api_lan switch is informational (nothing enforces it), so reachability is the listener bind itself. */
+static int discovery_wanted(const struct api_context*c){return c->discoverable&&c->http_lan&&c->http_port>0&&c->http_port<=65535;}
+void api_set_http_listener(struct api_context*c,int port,int lan){c->http_port=port;c->http_lan=lan?1:0;}
+static const char*discovery_socket(void){const char*e=getenv("LIBREECHO_MDNS_SOCKET");return e&&e[0]?e:LE_MDNS_SOCKET;}
+static void discovery_metadata(struct api_context*c,struct le_mdns_libreecho_metadata*m){struct le_device_info d;memset(m,0,sizeof(*m));memset(&d,0,sizeof(d));if(le_get_device_info(c->backend,&d)||!api_valid_hostname(d.hostname))snprintf(m->name,sizeof(m->name),"LibreEcho");else snprintf(m->name,sizeof(m->name),"%s",d.hostname);snprintf(m->version,sizeof(m->version),"%s",LE_OS_VERSION);snprintf(m->room,sizeof(m->room),"%s",c->room);}
+static void discovery_close(struct api_context*c){if(c->discovery_fd>=0)close(c->discovery_fd);c->discovery_fd=-1;c->discovery_sent[0]=0;}
+/* The lease lives as long as the connection to libreecho-mdnsd. A changed
+   hostname or room is re-registered on a fresh connection, at most every five
+   seconds; a refused or lost lease is retried after five seconds. */
+void api_discovery_tick(struct api_context*c){long now=(long)time(NULL);struct le_mdns_libreecho_metadata m;char message[LE_MDNS_LIBREECHO_PACKET_MAX];int n;
+ if(!discovery_wanted(c)){discovery_close(c);return;}
+ if(c->discovery_fd>=0&&le_mdns_receive(c->discovery_fd)<0){discovery_close(c);c->discovery_retry=now+5;}
+ if(c->discovery_fd>=0&&now-c->discovery_checked<5)return;
+ if(c->discovery_fd<0&&now<c->discovery_retry)return;
+ c->discovery_checked=now;discovery_metadata(c,&m);n=le_mdns_libreecho_encode(message,sizeof(message),(unsigned)c->http_port,&m);if(n<0){discovery_close(c);c->discovery_retry=now+5;return;}
+ if(c->discovery_fd>=0&&!strcmp(message,c->discovery_sent))return;
+ discovery_close(c);c->discovery_fd=le_mdns_register_libreecho(discovery_socket(),(unsigned)c->http_port,&m);if(c->discovery_fd<0){c->discovery_retry=now+5;return;}snprintf(c->discovery_sent,sizeof(c->discovery_sent),"%s",message);}
+/* LIBREECHO_MDNS_QUERY_ADDR=a.b.c.d:port points the browse at a test
+   responder instead of the mDNS group. */
+static int peers_destination(struct sockaddr_in*d){const char*e=getenv("LIBREECHO_MDNS_QUERY_ADDR");char host[32];const char*colon;unsigned long port;char*end;if(!e||!e[0])return 0;colon=strrchr(e,':');if(!colon||(size_t)(colon-e)>=sizeof(host))return 0;memcpy(host,e,(size_t)(colon-e));host[colon-e]=0;errno=0;port=strtoul(colon+1,&end,10);if(errno||*end||!port||port>65535)return 0;memset(d,0,sizeof(*d));d->sin_family=AF_INET;d->sin_port=htons((uint16_t)port);return inet_pton(AF_INET,host,&d->sin_addr)==1;}
+/* A record is this device when it points at one of this device's own IPv4
+   addresses and the plain HTTP port. The instance label is not used: two
+   devices left on the same hostname make Avahi rename one record ("name #2"),
+   so a name match would hide the other device and list this one as a peer. */
+static int peer_is_self(const struct api_context*c,const struct le_peer*p){struct ifaddrs*all=NULL,*it;struct in_addr a;int self=0;if(!c->http_port||p->port!=(unsigned)c->http_port||inet_pton(AF_INET,p->address,&a)!=1||getifaddrs(&all)<0)return 0;for(it=all;it&&!self;it=it->ifa_next)if(it->ifa_addr&&it->ifa_addr->sa_family==AF_INET&&((const struct sockaddr_in*)(const void*)it->ifa_addr)->sin_addr.s_addr==a.s_addr)self=1;freeifaddrs(all);return self;}
+#define LE_PEERS_BROWSE_MS 1000
+#define LE_PEERS_CACHE_S 3
+/* The browse waits up to a second on the single event loop, like a Wi-Fi
+   scan, so it only runs when someone opens the list and repeated requests
+   inside LE_PEERS_CACHE_S reuse the last answer. */
+static void peers_json(struct api_context*c,struct api_response*r){static struct le_peer list[LE_PEERS_MAX];static int count=-1,truncated;static long at;int self[LE_PEERS_MAX],trust[LE_PEERS_MAX];struct sockaddr_in dest;char devices[LE_PEERS_MAX*512+4],name[160],room[160],version[80];size_t used=0,i;long now=(long)time(NULL);
+ if(count<0||now-at>=LE_PEERS_CACHE_S||now<at){int t=0,have_dest=peers_destination(&dest);count=le_peers_browse(have_dest?&dest:NULL,LE_PEERS_BROWSE_MS,list,LE_PEERS_MAX,&t);truncated=t;at=(long)time(NULL);if(count<0){count=-1;err(r,503,LE_IO,"The local network could not be searched");return;}}
+ peer_key_ready(c);for(i=0;i<(size_t)count;i++)self[i]=peer_is_self(c,&list[i]);le_peer_verify_all(&c->peer_key,list,(size_t)count,self,LE_PEER_VERIFY_MS,trust);
+ devices[used++]='[';devices[used]=0;
+ for(i=0;i<(size_t)count;i++){int n;json_escape(name,sizeof(name),list[i].name);json_escape(room,sizeof(room),list[i].room);json_escape(version,sizeof(version),list[i].version);n=snprintf(devices+used,sizeof(devices)-used,"%s{\"name\":\"%s\",\"room\":\"%s\",\"version\":\"%s\",\"address\":\"%s\",\"port\":%u,\"url\":\"http://%s:%u/\",\"self\":%s,\"trust\":\"%s\"}",i?",":"",name,room,version,list[i].address,list[i].port,list[i].address,list[i].port,self[i]?"true":"false",le_peer_trust_name(trust[i]));if(n<0||(size_t)n>=sizeof(devices)-used-1){truncated=1;break;}used+=(size_t)n;}
+ devices[used++]=']';devices[used]=0;
+ out(r,200,"{\"ok\":true,\"data\":{\"discoverable\":%s,\"advertising\":%s,\"paired\":%s,\"key_id\":\"%s\",\"devices\":%s,\"truncated\":%s},\"error\":null}",c->discoverable?"true":"false",discovery_wanted(c)&&c->discovery_fd>=0?"true":"false",c->peer_key.set?"true":"false",c->peer_key.set?c->peer_key.id:"",devices,truncated?"true":"false");}
+/* Device groups (#448). The owner's device keeps the groups and fans a
+   command out to each member as a signed "group-command" packet; a member
+   applies it only after the packet verifies with the house key (#450), and
+   each packet is accepted once. Members are reached over the LAN, so each
+   fan-out is bounded by a total budget: the device is single-threaded. */
+#define LE_GROUP_FILE "peer-groups"
+#define LE_GROUP_FANOUT_MS 2000
+static long long group_now_ms(void){struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return -1;return (long long)t.tv_sec*1000+t.tv_nsec/1000000;}
+static int own_ipv4(const char*address){struct in_addr a;struct ifaddrs*all=NULL,*it;int own=0;if(inet_pton(AF_INET,address,&a)!=1||getifaddrs(&all)<0)return 0;for(it=all;it&&!own;it=it->ifa_next)if(it->ifa_addr&&it->ifa_addr->sa_family==AF_INET&&((const struct sockaddr_in*)(const void*)it->ifa_addr)->sin_addr.s_addr==a.s_addr)own=1;freeifaddrs(all);return own;}
+static void group_ready(struct api_context*c){const char*slash;if(c->groups_loaded)return;c->groups_loaded=1;le_group_set_init(&c->groups);c->groups_path[0]=0;if(!c->config_path[0])return;slash=strrchr(c->config_path,'/');if(!slash)snprintf(c->groups_path,sizeof(c->groups_path),"%s",LE_GROUP_FILE);else if((size_t)(slash-c->config_path)+1+strlen(LE_GROUP_FILE)<sizeof(c->groups_path))snprintf(c->groups_path,sizeof(c->groups_path),"%.*s/%s",(int)(slash-c->config_path),c->config_path,LE_GROUP_FILE);else return;if(le_group_set_load(&c->groups,c->groups_path)<0){le_group_set_init(&c->groups);api_log(c,"warning","Device groups could not be read; no groups are defined");}}
+/* 0 when applied; LE_NOT_SUPPORTED parts are skipped (a backend without radio). */
+static int group_apply(struct api_context*c,enum le_group_action action){int rc=LE_OK;switch(action){case LE_GROUP_ACTION_MUTE:rc=le_set_microphone_muted(c->backend,1);break;case LE_GROUP_ACTION_UNMUTE:rc=le_set_microphone_muted(c->backend,0);break;case LE_GROUP_ACTION_STOP:{int speech=le_stop_speech(c->backend),radio=le_radio_stop(c->backend);rc=speech!=LE_OK&&speech!=LE_NOT_SUPPORTED?speech:radio!=LE_OK&&radio!=LE_NOT_SUPPORTED?radio:LE_OK;break;}default:return LE_INVALID;}return rc==LE_NOT_SUPPORTED?LE_OK:rc;}
+/* Member side: a sealed "group-command" packet, verified and applied once. */
+static void peer_command(struct api_context*c,const struct api_request*q,struct api_response*r){const char*body=NULL;size_t blen=0;char name[32];enum le_group_action action;int rc;peer_key_ready(c);if(!c->peer_key.set){out(r,409,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_paired\",\"message\":\"This device is not paired with other devices\"}}");return;}if(le_peer_open(&c->peer_key,&c->peer_replay,(long long)time(NULL),LE_GROUP_COMMAND_WINDOW_S,LE_GROUP_COMMAND_TYPE,q->body,q->body_len,&body,&blen)!=LE_PEER_OK){api_log(c,"warning","Refused a group command that did not verify");out(r,401,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_verified\",\"message\":\"The group command did not verify with this device's key\"}}");return;}if(blen<1||blen>=sizeof(name)){err(r,400,LE_INVALID,"Group command is not recognised");return;}memcpy(name,body,blen);name[blen]=0;action=le_group_action_from_name(name);if(action==LE_GROUP_ACTION_NONE){err(r,400,LE_INVALID,"Group command is not recognised");return;}rc=group_apply(c,action);if(rc){err(r,501,rc,"The group command could not be applied");return;}api_log(c,"info","Group command applied");{char data[128];snprintf(data,sizeof(data),"{\"action\":\"%s\",\"applied\":true}",le_group_action_name(action));ok(r,data);}}
+static void groups_json(struct api_context*c,struct api_response*r){size_t i,j,used=0;int n;char name[LE_GROUP_NAME_MAX*2],mname[LE_GROUP_MEMBER_NAME_MAX*2];
+ n=snprintf(r->body,LE_API_RESPONSE_BYTES,"{\"ok\":true,\"data\":{\"groups\":[");if(n<0)goto overflow;used=(size_t)n;
+ for(i=0;i<c->groups.count;i++){const struct le_group*g=&c->groups.groups[i];json_escape(name,sizeof(name),g->name);n=snprintf(r->body+used,LE_API_RESPONSE_BYTES-used,"%s{\"id\":%d,\"name\":\"%s\",\"members\":[",i?",":"",g->id,name);if(n<0||(size_t)n>=LE_API_RESPONSE_BYTES-used)goto overflow;used+=(size_t)n;
+  for(j=0;j<g->member_count;j++){const struct le_group_member*m=&g->members[j];json_escape(mname,sizeof(mname),m->name);n=snprintf(r->body+used,LE_API_RESPONSE_BYTES-used,"%s{\"address\":\"%s\",\"port\":%u,\"name\":\"%s\"}",j?",":"",m->address,m->port,mname);if(n<0||(size_t)n>=LE_API_RESPONSE_BYTES-used)goto overflow;used+=(size_t)n;}
+  n=snprintf(r->body+used,LE_API_RESPONSE_BYTES-used,"]}");if(n<0||(size_t)n>=LE_API_RESPONSE_BYTES-used)goto overflow;used+=(size_t)n;}
+ n=snprintf(r->body+used,LE_API_RESPONSE_BYTES-used,"]},\"error\":null}");if(n<0||(size_t)n>=LE_API_RESPONSE_BYTES-used)goto overflow;used+=(size_t)n;
+ r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=used;return;
+overflow:err(r,503,LE_IO,"Groups are too large to list");}
+static void group_command(struct api_context*c,struct api_response*r,const struct le_group*g,enum le_group_action action){size_t i,applied=0,used=0;long long deadline;char data[LE_API_RESPONSE_BYTES/16];int n;const char*action_name=le_group_action_name(action);
+ peer_key_ready(c);if(!c->peer_key.set){err(r,409,LE_BUSY,"Pair this device with the others before sending group commands");return;}
+ if(!g->member_count){err(r,409,LE_INVALID,"The group has no devices");return;}
+ deadline=group_now_ms();if(deadline<0){err(r,503,LE_IO,"The group command could not be sent");return;}deadline+=LE_GROUP_FANOUT_MS;
+ n=snprintf(data,sizeof(data),"{\"group\":%d,\"action\":\"%s\",\"members\":[",g->id,action_name);if(n<0||(size_t)n>=sizeof(data)){err(r,503,LE_IO,"The group command could not be reported");return;}used=(size_t)n;
+ for(i=0;i<g->member_count;i++){const struct le_group_member*m=&g->members[i];char mname[LE_GROUP_MEMBER_NAME_MAX*2],packet[LE_PEER_HEADER_MAX+64],reply[1024],nonce[LE_PEER_NONCE_HEX+1];int status=0,applied_here=0,wire=0;long long left;const char*result="unreachable";
+  if(own_ipv4(m->address)&&m->port==(unsigned)c->http_port){result=group_apply(c,action)?"failed":"applied";}
+  else{left=deadline-group_now_ms();if(left>0&&!le_peer_nonce(nonce)&&(wire=le_peer_seal(&c->peer_key,LE_GROUP_COMMAND_TYPE,(long long)time(NULL),nonce,action_name,strlen(action_name),packet,sizeof(packet)))>0&&!le_peer_post(m->address,m->port,"/api/v1/peer/command",packet,(size_t)wire,(int)left,&status,reply,sizeof(reply))){if(status==200&&json_get_bool(reply,"applied",&applied_here)>0&&applied_here)result="applied";else if(status==401||status==404||status==409)result="unpaired";else result="failed";}}
+  if(!strcmp(result,"applied"))applied++;
+  json_escape(mname,sizeof(mname),m->name);
+  n=snprintf(data+used,sizeof(data)-used,"%s{\"name\":\"%s\",\"address\":\"%s\",\"port\":%u,\"result\":\"%s\"}",i?",":"",mname,m->address,m->port,result);if(n<0||(size_t)n>=sizeof(data)-used){err(r,503,LE_IO,"The group command could not be reported");return;}used+=(size_t)n;}
+ n=snprintf(data+used,sizeof(data)-used,"],\"applied\":%zu,\"total\":%zu}",applied,g->member_count);if(n<0||(size_t)n>=sizeof(data)-used){err(r,503,LE_IO,"The group command could not be reported");return;}
+ api_log(c,"info","Group command sent");ok(r,data);}
+static void groups_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*rest=q->path+strlen("/api/v1/network/groups");char name[LE_GROUP_MEMBER_NAME_MAX+16],address[32];int v=0,id=0;struct le_group*g=NULL;group_ready(c);if(!*rest){if(!strcmp(q->method,"GET")){groups_json(c,r);return;}if(strcmp(q->method,"POST")){method_not_allowed(r);return;}if(json_get_string(q->body,"name",name,sizeof(name))<1){err(r,400,LE_INVALID,"Group name is required");return;}if(c->groups.count>=LE_GROUPS_MAX){err(r,409,LE_BUSY,"The device already has the most groups");return;}if(le_group_create(&c->groups,name)<0){err(r,400,LE_INVALID,"Group name is invalid");return;}if(le_group_set_save(&c->groups,c->groups_path)){err(r,503,LE_IO,"The group could not be saved");return;}api_log(c,"info","Device group created");groups_json(c,r);return;}if(*rest!='/'||rest[1]<'0'||rest[1]>'9'){out(r,404,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_found\",\"message\":\"No such group route\"}}");return;}id=atoi(rest+1);rest++;while(*rest&&*rest!='/')rest++;g=le_group_find(&c->groups,id);if(!g){out(r,404,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_found\",\"message\":\"No such group\"}}");return;}if(!*rest){if(strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(le_group_delete(&c->groups,id)||le_group_set_save(&c->groups,c->groups_path)){err(r,503,LE_IO,"The group could not be removed");return;}api_log(c,"info","Device group removed");groups_json(c,r);return;}if(!strcmp(rest,"/members")){if(strcmp(q->method,"POST")){method_not_allowed(r);return;}if(json_get_string(q->body,"address",address,sizeof(address))<1||json_get_int(q->body,"port",&v)<1||json_get_string(q->body,"name",name,sizeof(name))<1){err(r,400,LE_INVALID,"A device needs an address, a port and a name");return;}if(v<1||v>65535||le_group_add_member(&c->groups,id,address,(unsigned)v,name)){err(r,400,LE_INVALID,"The device could not be added to the group (check the address, port and whether it is already listed)");return;}if(le_group_set_save(&c->groups,c->groups_path)){err(r,503,LE_IO,"The group could not be saved");return;}api_log(c,"info","Device added to a group");groups_json(c,r);return;}if(!strcmp(rest,"/command")){enum le_group_action action;char word[16];if(strcmp(q->method,"POST")){method_not_allowed(r);return;}if(json_get_string(q->body,"action",word,sizeof(word))<1||(action=le_group_action_from_name(word))==LE_GROUP_ACTION_NONE){err(r,400,LE_INVALID,"Action must be \"mute\", \"unmute\" or \"stop\"");return;}group_command(c,r,g,action);return;}out(r,404,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_found\",\"message\":\"No such group route\"}}");}
+/* Device pairing (#450). */
+#define LE_PEER_KEY_FILE "peer.key"
+static int peer_key_ready(struct api_context*c){const char*slash;int rc;if(c->peer_key_loaded)return c->peer_key_path[0]?0:-1;c->peer_key_loaded=1;c->peer_key_path[0]=0;if(!c->config_path[0])return -1;slash=strrchr(c->config_path,'/');if(!slash)snprintf(c->peer_key_path,sizeof(c->peer_key_path),"%s",LE_PEER_KEY_FILE);else if((size_t)(slash-c->config_path)+1+strlen(LE_PEER_KEY_FILE)<sizeof(c->peer_key_path))snprintf(c->peer_key_path,sizeof(c->peer_key_path),"%.*s/%s",(int)(slash-c->config_path),c->config_path,LE_PEER_KEY_FILE);else return -1;rc=le_peer_key_load(&c->peer_key,c->peer_key_path);if(rc<0)api_log(c,"warning","Device pairing key could not be read; this device is not paired");return 0;}
+/* Host must be exactly one of this device's IPv4 addresses and its plain HTTP
+   port: the signed host then tells the asking device which address answered,
+   so a relay on another address is caught. */
+static int peer_host_is_own(const struct api_context*c,const struct api_request*q){char addr[16];const char*colon=strrchr(q->host,':');unsigned long port;char*end;struct in_addr a;struct ifaddrs*all=NULL,*it;int own=0;if(q->https||!colon||colon==q->host||(size_t)(colon-q->host)>=sizeof(addr)||!c->http_port)return 0;memcpy(addr,q->host,(size_t)(colon-q->host));addr[colon-q->host]=0;errno=0;port=strtoul(colon+1,&end,10);if(errno||*end||colon[1]<'0'||colon[1]>'9'||port!=(unsigned long)c->http_port||inet_pton(AF_INET,addr,&a)!=1||getifaddrs(&all)<0)return 0;for(it=all;it&&!own;it=it->ifa_next)if(it->ifa_addr&&it->ifa_addr->sa_family==AF_INET&&((const struct sockaddr_in*)(const void*)it->ifa_addr)->sin_addr.s_addr==a.s_addr)own=1;freeifaddrs(all);return own;}
+static void peer_proof(struct api_context*c,const struct api_request*q,struct api_response*r){const char*nonce=strstr(q->path,"?nonce=");struct le_peer_proof proof;struct le_device_info d;char data[1024];int n;
+ if(strcmp(q->method,"GET")){method_not_allowed(r);return;}
+ peer_key_ready(c);if(!c->peer_key.set){out(r,409,"{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_paired\",\"message\":\"This device is not paired with other devices\"}}");return;}
+ if(!nonce||nonce!=q->path+18||!le_peer_nonce_valid(nonce+7)){err(r,400,LE_INVALID,"A 32-digit lowercase hex nonce is required");return;}
+ if(!peer_host_is_own(c,q)){err(r,400,LE_INVALID,"Ask this device on its own address and HTTP port");return;}
+ memset(&proof,0,sizeof(proof));memset(&d,0,sizeof(d));if(le_get_device_info(c->backend,&d)||!api_valid_hostname(d.hostname))snprintf(proof.name,sizeof(proof.name),"LibreEcho");else snprintf(proof.name,sizeof(proof.name),"%s",d.hostname);snprintf(proof.room,sizeof(proof.room),"%s",c->room);snprintf(proof.version,sizeof(proof.version),"%s",LE_OS_VERSION);snprintf(proof.host,sizeof(proof.host),"%s",q->host);
+ n=le_peer_proof_json(&c->peer_key,&proof,nonce+7,(long long)time(NULL),data,sizeof(data));if(n<0){err(r,500,LE_IO,"The proof could not be signed");return;}ok(r,data);}
+static void pairing_state(struct api_context*c,struct api_response*r,const char*code){char data[256];snprintf(data,sizeof(data),"{\"supported\":%s,\"paired\":%s,\"key_id\":\"%s\"%s%s%s}",c->peer_key_path[0]?"true":"false",c->peer_key.set?"true":"false",c->peer_key.set?c->peer_key.id:"",code?",\"code\":\"":"",code?code:"",code?"\"":"");ok(r,data);volatile_zero(data,sizeof(data));}
+/* POST {"action":"create"} makes a new house key, {"action":"join","code":...}
+   takes one from another device, {"action":"show"} returns the code again so
+   another device can join. DELETE unpairs. A paired device must unpair
+   before it creates or joins, so one click cannot cut it off from the rest. */
+static void pairing_handle(struct api_context*c,const struct api_request*q,struct api_response*r){struct json_member m[4];size_t count=0,i;char action[16]="",code_in[160]="",code[LE_PEER_CODE_LEN+1];struct le_peer_key next;int have_code=0;
+ if(peer_key_ready(c)){if(!strcmp(q->method,"GET")){pairing_state(c,r,NULL);return;}err(r,501,LE_NOT_SUPPORTED,"Pairing needs a saved configuration");return;}
+ if(!strcmp(q->method,"GET")){pairing_state(c,r,NULL);return;}
+ if(!strcmp(q->method,"DELETE")){if(le_peer_key_remove(c->peer_key_path)){err(r,503,LE_IO,"The pairing key could not be removed");return;}le_peer_key_clear(&c->peer_key);api_log(c,"info","Device pairing removed");pairing_state(c,r,NULL);return;}
+ if(strcmp(q->method,"POST")){method_not_allowed(r);return;}
+ if(json_object_members(q->body,q->body_len,m,sizeof(m)/sizeof(m[0]),&count)<0){err(r,400,LE_INVALID,"Request body must be a flat JSON object with action and optional code");return;}
+ for(i=0;i<count;i++){if(member_is(&m[i],"action")){if(json_string_span(m[i].value,m[i].value_len,action,sizeof(action))<0){err(r,400,LE_INVALID,"action must be create, join or show");return;}}else if(member_is(&m[i],"code")){if(json_string_span(m[i].value,m[i].value_len,code_in,sizeof(code_in))<0){err(r,400,LE_INVALID,"The pairing code is not valid");return;}have_code=1;}else{err(r,400,LE_INVALID,"Unknown pairing field");return;}}
+ if(!strcmp(action,"show")){if(!c->peer_key.set){err(r,409,LE_BUSY,"This device is not paired");return;}le_peer_key_code(&c->peer_key,code,sizeof(code));pairing_state(c,r,code);volatile_zero(code,sizeof(code));return;}
+ if(strcmp(action,"create")&&strcmp(action,"join")){err(r,400,LE_INVALID,"action must be create, join or show");return;}
+ if(!strcmp(action,"join")!=!!have_code){volatile_zero(code_in,sizeof(code_in));err(r,400,LE_INVALID,"join needs a code, create takes none");return;}
+ if(c->peer_key.set){volatile_zero(code_in,sizeof(code_in));err(r,409,LE_BUSY,"This device is already paired; unpair it first");return;}
+ if(!strcmp(action,"create")?le_peer_key_generate(&next):le_peer_key_from_code(&next,code_in)){volatile_zero(code_in,sizeof(code_in));if(!strcmp(action,"create")){err(r,503,LE_IO,"A pairing key could not be made");return;}err(r,400,LE_INVALID,"The pairing code must be 64 hex digits");return;}
+ volatile_zero(code_in,sizeof(code_in));
+ if(le_peer_key_save(&next,c->peer_key_path)){le_peer_key_clear(&next);err(r,503,LE_IO,"The pairing key could not be saved");return;}
+ c->peer_key=next;le_peer_key_clear(&next);api_log(c,"info",!strcmp(action,"create")?"Device pairing key created":"Device joined a pairing");
+ if(!strcmp(action,"create")){le_peer_key_code(&c->peer_key,code,sizeof(code));pairing_state(c,r,code);volatile_zero(code,sizeof(code));return;}
+ pairing_state(c,r,NULL);}
 static void net_json(struct api_context*c,struct api_response*r){
     struct le_network_state n;
     char ssh_state[40];
@@ -1548,7 +1789,7 @@ static void net_json(struct api_context*c,struct api_response*r){
     json_escape(cfg_wifi,sizeof(cfg_wifi),c->mac_wifi);
     json_escape(cfg_bt,sizeof(cfg_bt),c->mac_bt);json_escape(nmode,sizeof(nmode),n.mode[0]?n.mode:"client");json_escape(rmode,sizeof(rmode),n.recovery.mode[0]?n.recovery.mode:"off");json_escape(rtrig,sizeof(rtrig),n.recovery.trigger);json_escape(rssid,sizeof(rssid),n.recovery.ssid);json_escape(rreason,sizeof(rreason),n.recovery.reason);json_escape(rerror,sizeof(rerror),n.recovery.error);json_escape(rled,sizeof(rled),n.recovery.led_owner);
     gateway_reachable=n.gateway_reachable<0?"null":n.gateway_reachable?"true":"false";
-    ssh_runtime(&ssh_available,ssh_state,sizeof(ssh_state));out(r,200,"{\"ok\":true,\"data\":{\"state\":\"%s\",\"connectivity\":\"%s\",\"recovery_stage\":\"%s\",\"gateway_reachable\":%s,\"liveness_failures\":%d,\"ssid\":\"%s\",\"signal\":%d,\"rssi_dbm\":%d,\"ip\":\"%s\",\"gateway\":\"%s\",\"dns\":\"%s\",\"hostname\":\"%s\",\"wifi_mac\":\"%s\",\"wifi_mac_factory\":\"%s\",\"wifi_mac_configured\":\"%s\",\"bt_mac\":\"%s\",\"bt_mac_factory\":\"%s\",\"bt_mac_configured\":\"%s\",\"internet\":%s,\"dhcp\":%s,\"ssh\":%s,\"ssh_available\":%s,\"ssh_state\":\"%s\",\"api_lan\":%s,\"api_lan_effective\":%s,\"api_lan_forced\":%s,\"mode\":\"%s\",\"recovery\":{\"mode\":\"%s\",\"trigger\":\"%s\",\"available\":%s,\"ssid\":\"%s\",\"reason\":\"%s\",\"error\":\"%s\",\"secret_available\":%s,\"led_owner\":\"%s\",\"enabled\":%s,\"net_configured\":%s,\"auto_enabled\":%s,\"auto_timeout_ms\":%lld,\"auto_pending\":%s,\"auto_countdown_ms\":%lld,\"rate_count\":%d,\"children\":%d}},\"error\":null}",state,connectivity,recovery_stage,gateway_reachable,n.liveness_failures,ssid,n.signal,n.rssi_dbm,ip,gateway,dns,hostname,n.wifi_mac,n.wifi_mac_factory,cfg_wifi,n.bt_mac,n.bt_mac_factory,cfg_bt,n.internet?"true":"false",n.dhcp?"true":"false",n.ssh?"true":"false",ssh_available?"true":"false",ssh_state,n.api_lan?"true":"false",(c->allow_insecure_lan||n.api_lan)?"true":"false",c->allow_insecure_lan?"true":"false",nmode,rmode,rtrig,n.recovery.available?"true":"false",rssid,rreason,rerror,n.recovery.secret_available?"true":"false",rled,n.recovery.enabled?"true":"false",n.recovery.net_configured?"true":"false",n.recovery.auto_enabled?"true":"false",(long long)n.recovery.auto_timeout_ms,n.recovery.auto_pending?"true":"false",(long long)n.recovery.auto_countdown_ms,n.recovery.rate_count,n.recovery.children);
+    ssh_runtime(&ssh_available,ssh_state,sizeof(ssh_state));out(r,200,"{\"ok\":true,\"data\":{\"state\":\"%s\",\"connectivity\":\"%s\",\"recovery_stage\":\"%s\",\"gateway_reachable\":%s,\"liveness_failures\":%d,\"ssid\":\"%s\",\"signal\":%d,\"rssi_dbm\":%d,\"ip\":\"%s\",\"gateway\":\"%s\",\"dns\":\"%s\",\"hostname\":\"%s\",\"wifi_mac\":\"%s\",\"wifi_mac_factory\":\"%s\",\"wifi_mac_configured\":\"%s\",\"bt_mac\":\"%s\",\"bt_mac_factory\":\"%s\",\"bt_mac_configured\":\"%s\",\"internet\":%s,\"dhcp\":%s,\"ssh\":%s,\"ssh_available\":%s,\"ssh_state\":\"%s\",\"api_lan\":%s,\"api_lan_effective\":%s,\"api_lan_forced\":%s,\"discoverable\":%s,\"nearest_answers\":%s,\"mode\":\"%s\",\"recovery\":{\"mode\":\"%s\",\"trigger\":\"%s\",\"available\":%s,\"ssid\":\"%s\",\"reason\":\"%s\",\"error\":\"%s\",\"secret_available\":%s,\"led_owner\":\"%s\",\"enabled\":%s,\"net_configured\":%s,\"auto_enabled\":%s,\"auto_timeout_ms\":%lld,\"auto_pending\":%s,\"auto_countdown_ms\":%lld,\"rate_count\":%d,\"children\":%d}},\"error\":null}",state,connectivity,recovery_stage,gateway_reachable,n.liveness_failures,ssid,n.signal,n.rssi_dbm,ip,gateway,dns,hostname,n.wifi_mac,n.wifi_mac_factory,cfg_wifi,n.bt_mac,n.bt_mac_factory,cfg_bt,n.internet?"true":"false",n.dhcp?"true":"false",n.ssh?"true":"false",ssh_available?"true":"false",ssh_state,n.api_lan?"true":"false",(c->allow_insecure_lan||n.api_lan)?"true":"false",c->allow_insecure_lan?"true":"false",c->discoverable?"true":"false",c->nearest_answers?"true":"false",nmode,rmode,rtrig,n.recovery.available?"true":"false",rssid,rreason,rerror,n.recovery.secret_available?"true":"false",rled,n.recovery.enabled?"true":"false",n.recovery.net_configured?"true":"false",n.recovery.auto_enabled?"true":"false",(long long)n.recovery.auto_timeout_ms,n.recovery.auto_pending?"true":"false",(long long)n.recovery.auto_countdown_ms,n.recovery.rate_count,n.recovery.children);
 }
 /*
  * Captive-portal state for the HTTP layer.  Returns 1 only while networkd
@@ -1599,13 +1840,13 @@ int api_recovery_portal(struct api_context*c,char*address,size_t address_size){
 }
 static void wake_json(struct api_context*c,struct api_response*r){struct le_wake_word_state w;char wake[LE_TEXT*2],model[64];int rc=le_get_wake_word_state(c->backend,&w);if(rc==LE_NOT_SUPPORTED){out(r,200,"{\"ok\":true,\"data\":{\"available\":false,\"unavailable\":true,\"message\":\"Wake-word service is not available\"},\"error\":null}");return;}if(rc){err(r,503,rc,"Wake-word service status is unavailable");return;}json_escape(wake,sizeof(wake),w.wake_word);json_escape(model,sizeof(model),w.model_status);out(r,200,"{\"ok\":true,\"data\":{\"enabled\":%s,\"wake_word\":\"%s\",\"sensitivity\":%d,\"cooldown_ms\":%d,\"model_status\":\"%s\",\"detected_count\":%d,\"cpu_cost_percent\":%d,\"memory_cost_mb\":%d,\"local_processing\":true,\"health_available\":%s,\"model_loaded\":%s,\"capture_active\":%s,\"processed_frames\":%llu,\"capture_age_ms\":%d,\"inference_active\":%s,\"inference_age_ms\":%d},\"error\":null}",w.enabled?"true":"false",wake,w.sensitivity,w.cooldown_ms,model,w.detected_count,w.cpu_cost,w.memory_cost_mb,w.health_available?"true":"false",w.model_loaded?"true":"false",w.capture_active?"true":"false",w.processed_frames,w.capture_age_ms,w.inference_active?"true":"false",w.inference_age_ms);}
 static int configuration_item(char*out,size_t size,size_t*used,int*first,const char*fmt,...){va_list ap;int n;if(!out||!used||!first||!fmt||*used>=size)return -1;if(!*first){n=snprintf(out+*used,size-*used,",\n  ");if(n<0||(size_t)n>=size-*used)return -1;*used+=(size_t)n;}va_start(ap,fmt);n=vsnprintf(out+*used,size-*used,fmt,ap);va_end(ap);if(n<0||(size_t)n>=size-*used)return -1;*used+=(size_t)n;*first=0;return 0;}
-static int configuration_json(struct api_context*c,char*out,size_t size){struct le_audio_state a;struct le_led_state l;struct le_wake_word_state w;struct le_network_state n;const char*unsupported[16];size_t unsupported_count=0,i,used=0;char wake[128],host[128],short_action[80],long_action[80],remote_url[512];int audio_rc,led_rc,wake_rc,network_rc,first=0,nbytes;audio_rc=le_get_audio_state(c->backend,&a);led_rc=le_get_led_state(c->backend,&l);wake_rc=le_get_wake_word_state(c->backend,&w);network_rc=le_get_network_state(c->backend,&n);if(audio_rc){unsupported[unsupported_count++]="volume";unsupported[unsupported_count++]="microphone_gain";unsupported[unsupported_count++]="microphone_muted";}if(led_rc){unsupported[unsupported_count++]="led_r";unsupported[unsupported_count++]="led_g";unsupported[unsupported_count++]="led_b";unsupported[unsupported_count++]="led_brightness";unsupported[unsupported_count++]="led_visualizer_enabled";}if(wake_rc){unsupported[unsupported_count++]="wake_word";unsupported[unsupported_count++]="wake_sensitivity";}if(network_rc)unsupported[unsupported_count++]="hostname";nbytes=snprintf(out,size,"{\n  \"schema_version\": 1,\n  \"hostname_persisted\": true,\n  \"partial\": %s,\n  \"unsupported\": [",unsupported_count?"true":"false");if(nbytes<0||(size_t)nbytes>=size)return LE_IO;used=(size_t)nbytes;for(i=0;i<unsupported_count;i++){nbytes=snprintf(out+used,size-used,"%s\"%s\"",i?",":"",unsupported[i]);if(nbytes<0||(size_t)nbytes>=size-used)return LE_IO;used+=(size_t)nbytes;}nbytes=snprintf(out+used,size-used,"]");if(nbytes<0||(size_t)nbytes>=size-used)return LE_IO;used+=(size_t)nbytes;if(!audio_rc){char wake[128],host[128],short_action[80],long_action[80];if(configuration_item(out,size,&used,&first,"\"volume\": %d",a.volume)||configuration_item(out,size,&used,&first,"\"microphone_gain\": %d",a.microphone_gain)||configuration_item(out,size,&used,&first,"\"microphone_muted\": %s",a.muted?"true":"false"))return LE_IO;}if(!led_rc){if(configuration_item(out,size,&used,&first,"\"led_r\": %u",l.current.r)||configuration_item(out,size,&used,&first,"\"led_g\": %u",l.current.g)||configuration_item(out,size,&used,&first,"\"led_b\": %u",l.current.b)||configuration_item(out,size,&used,&first,"\"led_brightness\": %d",l.current.brightness)||configuration_item(out,size,&used,&first,"\"led_visualizer_enabled\": %s",l.visualizer_enabled?"true":"false"))return LE_IO;}if(!wake_rc){strncpy(c->configured_wake_word,w.wake_word,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=w.sensitivity;c->configured_wake_valid=1;}if(!wake_rc||c->configured_wake_valid){json_escape(wake,sizeof(wake),!wake_rc?w.wake_word:c->configured_wake_word);if(configuration_item(out,size,&used,&first,"\"wake_word\": \"%s\"",wake)||configuration_item(out,size,&used,&first,"\"wake_sensitivity\": %d",!wake_rc?w.sensitivity:c->configured_wake_sensitivity))return LE_IO;}if(!network_rc){json_escape(host,sizeof(host),n.hostname);if(configuration_item(out,size,&used,&first,"\"hostname\": \"%s\"",host))return LE_IO;}json_escape(short_action,sizeof(short_action),c->button_short);json_escape(long_action,sizeof(long_action),c->button_long);json_escape(remote_url,sizeof(remote_url),c->privacy_audio_remote_url);if(configuration_item(out,size,&used,&first,"\"ssh\": %s",c->net_ssh?"true":"false")||configuration_item(out,size,&used,&first,"\"api_lan\": %s",c->net_api_lan?"true":"false")||configuration_item(out,size,&used,&first,"\"button_short\": \"%s\"",short_action)||configuration_item(out,size,&used,&first,"\"button_tones\": %s",c->button_tones?"true":"false")||configuration_item(out,size,&used,&first,"\"button_action\": \"%s\"",c->button_action)||configuration_item(out,size,&used,&first,"\"button_action_sounds\": \"%s\"",c->button_action_sounds)||configuration_item(out,size,&used,&first,"\"button_action_brightness\": %d",c->button_action_brightness)||configuration_item(out,size,&used,&first,"\"button_mute_brightness\": %d",c->button_mute_brightness)||configuration_item(out,size,&used,&first,"\"button_long\": \"%s\"",long_action)||configuration_item(out,size,&used,&first,"\"privacy_local_only\": %s",c->privacy_local_only?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_audio_retention\": %s",!strcmp(c->privacy_audio_mode,"local")?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_telemetry\": %s",c->privacy_telemetry?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_crash_reports\": %s",c->privacy_crash_reports?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_active_ping\": %s",c->privacy_active_ping?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_log_hours\": %d",c->privacy_log_hours)||configuration_item(out,size,&used,&first,"\"stt_max_utterance_ms\": %d",c->stt_max_utterance_ms)||configuration_item(out,size,&used,&first,"\"stt_end_silence_ms\": %d",c->stt_end_silence_ms)||configuration_item(out,size,&used,&first,"\"stt_vad_floor_rms\": %d",c->stt_vad_floor_rms)||configuration_item(out,size,&used,&first,"\"timezone\": \"%s\"",c->timezone)||configuration_item(out,size,&used,&first,"\"ui_theme\": \"%s\"",c->ui_theme)||configuration_item(out,size,&used,&first,"\"color_mode\": \"%s\"",c->color_mode)||configuration_item(out,size,&used,&first,"\"room\": \"%s\"",c->room)||configuration_item(out,size,&used,&first,"\"news_enabled\": %s",c->news_enabled?"true":"false")||configuration_item(out,size,&used,&first,"\"home_assistant_url\": \"%s\"",home_assistant_url(c))||configuration_item(out,size,&used,&first,"\"integrations\": %u",c->integrations)||configuration_item(out,size,&used,&first,"\"privacy_audio_mode\": \"%s\"",c->privacy_audio_mode)||configuration_item(out,size,&used,&first,"\"privacy_audio_retention_hours\": %d",c->privacy_audio_retention_hours)||configuration_item(out,size,&used,&first,"\"privacy_audio_max_mb\": %d",c->privacy_audio_max_mb)||configuration_item(out,size,&used,&first,"\"privacy_audio_remote_url\": \"%s\"",remote_url)||configuration_item(out,size,&used,&first,"\"feature_simulation\": %s",c->feature_simulation?"true":"false")||configuration_item(out,size,&used,&first,"\"feature_https\": %s",c->feature_https?"true":"false")||configuration_item(out,size,&used,&first,"\"feature_acoustic_events\": %s",c->feature_acoustic_events?"true":"false")||configuration_item(out,size,&used,&first,"\"mac_wifi\": \"%s\"",c->mac_wifi)||configuration_item(out,size,&used,&first,"\"mac_bt\": \"%s\"",c->mac_bt))return LE_IO;nbytes=snprintf(out+used,size-used,"\n}");return nbytes<0||(size_t)nbytes>=size-used?LE_IO:LE_OK;}
+static int configuration_json(struct api_context*c,char*out,size_t size){struct le_audio_state a;struct le_led_state l;struct le_wake_word_state w;struct le_network_state n;const char*unsupported[16];size_t unsupported_count=0,i,used=0;char wake[128],host[128],short_action[80],long_action[80],remote_url[512];int audio_rc,led_rc,wake_rc,network_rc,first=0,nbytes;timezone_sync_from_file(c);audio_rc=le_get_audio_state(c->backend,&a);led_rc=le_get_led_state(c->backend,&l);wake_rc=le_get_wake_word_state(c->backend,&w);network_rc=le_get_network_state(c->backend,&n);if(audio_rc){unsupported[unsupported_count++]="volume";unsupported[unsupported_count++]="microphone_gain";unsupported[unsupported_count++]="microphone_muted";}if(led_rc){unsupported[unsupported_count++]="led_r";unsupported[unsupported_count++]="led_g";unsupported[unsupported_count++]="led_b";unsupported[unsupported_count++]="led_brightness";unsupported[unsupported_count++]="led_visualizer_enabled";}if(wake_rc){unsupported[unsupported_count++]="wake_word";unsupported[unsupported_count++]="wake_sensitivity";}if(network_rc)unsupported[unsupported_count++]="hostname";nbytes=snprintf(out,size,"{\n  \"schema_version\": 1,\n  \"hostname_persisted\": true,\n  \"partial\": %s,\n  \"unsupported\": [",unsupported_count?"true":"false");if(nbytes<0||(size_t)nbytes>=size)return LE_IO;used=(size_t)nbytes;for(i=0;i<unsupported_count;i++){nbytes=snprintf(out+used,size-used,"%s\"%s\"",i?",":"",unsupported[i]);if(nbytes<0||(size_t)nbytes>=size-used)return LE_IO;used+=(size_t)nbytes;}nbytes=snprintf(out+used,size-used,"]");if(nbytes<0||(size_t)nbytes>=size-used)return LE_IO;used+=(size_t)nbytes;if(!audio_rc){char wake[128],host[128],short_action[80],long_action[80];if(configuration_item(out,size,&used,&first,"\"volume\": %d",a.volume)||configuration_item(out,size,&used,&first,"\"microphone_gain\": %d",a.microphone_gain)||configuration_item(out,size,&used,&first,"\"microphone_muted\": %s",a.muted?"true":"false")||configuration_item(out,size,&used,&first,"\"microphone_mix\": \"%s\"",a.microphone_mix[0]?a.microphone_mix:"beamformer")||configuration_item(out,size,&used,&first,"\"microphone_lane\": %d",a.microphone_lane))return LE_IO;}if(!led_rc){if(configuration_item(out,size,&used,&first,"\"led_r\": %u",l.current.r)||configuration_item(out,size,&used,&first,"\"led_g\": %u",l.current.g)||configuration_item(out,size,&used,&first,"\"led_b\": %u",l.current.b)||configuration_item(out,size,&used,&first,"\"led_brightness\": %d",l.current.brightness)||configuration_item(out,size,&used,&first,"\"led_visualizer_enabled\": %s",l.visualizer_enabled?"true":"false"))return LE_IO;}if(!wake_rc){strncpy(c->configured_wake_word,w.wake_word,sizeof(c->configured_wake_word)-1);c->configured_wake_word[sizeof(c->configured_wake_word)-1]=0;c->configured_wake_sensitivity=w.sensitivity;c->configured_wake_valid=1;}if(!wake_rc||c->configured_wake_valid){json_escape(wake,sizeof(wake),!wake_rc?w.wake_word:c->configured_wake_word);if(configuration_item(out,size,&used,&first,"\"wake_word\": \"%s\"",wake)||configuration_item(out,size,&used,&first,"\"wake_sensitivity\": %d",!wake_rc?w.sensitivity:c->configured_wake_sensitivity))return LE_IO;}if(!network_rc){json_escape(host,sizeof(host),n.hostname);if(configuration_item(out,size,&used,&first,"\"hostname\": \"%s\"",host))return LE_IO;}json_escape(short_action,sizeof(short_action),c->button_short);json_escape(long_action,sizeof(long_action),c->button_long);json_escape(remote_url,sizeof(remote_url),c->privacy_audio_remote_url);if(configuration_item(out,size,&used,&first,"\"ssh\": %s",c->net_ssh?"true":"false")||configuration_item(out,size,&used,&first,"\"api_lan\": %s",c->net_api_lan?"true":"false")||configuration_item(out,size,&used,&first,"\"discoverable\": %s",c->discoverable?"true":"false")||configuration_item(out,size,&used,&first,"\"nearest_answers\": %s",c->nearest_answers?"true":"false")||configuration_item(out,size,&used,&first,"\"button_short\": \"%s\"",short_action)||configuration_item(out,size,&used,&first,"\"button_tones\": %s",c->button_tones?"true":"false")||configuration_item(out,size,&used,&first,"\"button_action\": \"%s\"",c->button_action)||configuration_item(out,size,&used,&first,"\"button_action_long\": \"%s\"",c->button_action_long)||configuration_item(out,size,&used,&first,"\"button_action_sounds\": \"%s\"",c->button_action_sounds)||configuration_item(out,size,&used,&first,"\"button_action_brightness\": %d",c->button_action_brightness)||configuration_item(out,size,&used,&first,"\"button_mute_brightness\": %d",c->button_mute_brightness)||configuration_item(out,size,&used,&first,"\"button_long\": \"%s\"",long_action)||configuration_item(out,size,&used,&first,"\"privacy_local_only\": %s",c->privacy_local_only?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_audio_retention\": %s",!strcmp(c->privacy_audio_mode,"local")?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_telemetry\": %s",c->privacy_telemetry?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_crash_reports\": %s",c->privacy_crash_reports?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_active_ping\": %s",c->privacy_active_ping?"true":"false")||configuration_item(out,size,&used,&first,"\"privacy_log_hours\": %d",c->privacy_log_hours)||configuration_item(out,size,&used,&first,"\"stt_max_utterance_ms\": %d",c->stt_max_utterance_ms)||configuration_item(out,size,&used,&first,"\"stt_end_silence_ms\": %d",c->stt_end_silence_ms)||configuration_item(out,size,&used,&first,"\"stt_vad_floor_rms\": %d",c->stt_vad_floor_rms)||configuration_item(out,size,&used,&first,"\"voice_noise_suppression\": %s",c->voice_noise_suppression?"true":"false")||configuration_item(out,size,&used,&first,"\"timezone\": \"%s\"",c->timezone)||configuration_item(out,size,&used,&first,"\"timezone_name\": \"%s\"",c->timezone_name)||configuration_item(out,size,&used,&first,"\"timezone_source\": \"%s\"",c->timezone_source)||configuration_item(out,size,&used,&first,"\"ui_theme\": \"%s\"",c->ui_theme)||configuration_item(out,size,&used,&first,"\"color_mode\": \"%s\"",c->color_mode)||configuration_item(out,size,&used,&first,"\"room\": \"%s\"",c->room)||configuration_item(out,size,&used,&first,"\"news_enabled\": %s",c->news_enabled?"true":"false")||configuration_item(out,size,&used,&first,"\"home_assistant_url\": \"%s\"",home_assistant_url(c))||configuration_item(out,size,&used,&first,"\"integrations\": %u",c->integrations)||configuration_item(out,size,&used,&first,"\"privacy_audio_mode\": \"%s\"",c->privacy_audio_mode)||configuration_item(out,size,&used,&first,"\"privacy_audio_retention_hours\": %d",c->privacy_audio_retention_hours)||configuration_item(out,size,&used,&first,"\"privacy_audio_max_mb\": %d",c->privacy_audio_max_mb)||configuration_item(out,size,&used,&first,"\"privacy_audio_remote_url\": \"%s\"",remote_url)||configuration_item(out,size,&used,&first,"\"feature_simulation\": %s",c->feature_simulation?"true":"false")||configuration_item(out,size,&used,&first,"\"feature_https\": %s",c->feature_https?"true":"false")||configuration_item(out,size,&used,&first,"\"feature_acoustic_events\": %s",c->feature_acoustic_events?"true":"false")||configuration_item(out,size,&used,&first,"\"do_not_disturb\": %s",c->do_not_disturb?"true":"false")||configuration_item(out,size,&used,&first,"\"mac_wifi\": \"%s\"",c->mac_wifi)||configuration_item(out,size,&used,&first,"\"mac_bt\": \"%s\"",c->mac_bt))return LE_IO;nbytes=snprintf(out+used,size-used,"\n}");return nbytes<0||(size_t)nbytes>=size-used?LE_IO:LE_OK;}
 static int persist_configuration(struct api_context*c)
 {
     char config[8192];
     struct le_esphome_config esphome;
     char mode[48], stt_uri[640], stt_model[256];
-    char tts_uri[640], tts_voice[256], previous_mode[48], esphome_wake[96];
+    char tts_uri[640], tts_voice[256], previous_mode[48], esphome_wake[192];
     size_t length;
     int rc;
 
@@ -1627,6 +1868,11 @@ static int persist_configuration(struct api_context*c)
     esphome_wake[0]=0;
     if(esphome.esphome_active_wake_word_present)
         snprintf(esphome_wake,sizeof esphome_wake,",\n  \"esphome_active_wake_word\": \"%s\"",esphome.esphome_active_wake_word);
+    /* Owner option esphome_server_wake survives HA/web saves; the daemon reads it on start and reload. */
+    if(esphome.esphome_server_wake_present)
+        snprintf(esphome_wake+strlen(esphome_wake),sizeof esphome_wake-strlen(esphome_wake),",\n  \"esphome_server_wake\": %s",esphome.esphome_server_wake?"true":"false");
+    if(esphome.esphome_bluetooth_proxy_present)
+        snprintf(esphome_wake+strlen(esphome_wake),sizeof esphome_wake-strlen(esphome_wake),",\n  \"esphome_bluetooth_proxy\": %s",esphome.esphome_bluetooth_proxy?"true":"false");
     --length;
     if (snprintf(
             config + length, sizeof(config) - length,
@@ -1760,7 +2006,373 @@ static int button_action_valid(const char *action)
                       !strcmp(action, "listen") || !strcmp(action, "playpause") ||
                       !strcmp(action, "disabled"));
 }
-static int import_configuration(struct api_context*c,const char*j,size_t n){char theme_in[16],cmode_in[16];int theme_field=json_get_string(j,"ui_theme",theme_in,sizeof(theme_in)),cmode_field=json_get_string(j,"color_mode",cmode_in,sizeof(cmode_in));if(theme_field<0||cmode_field<0||(theme_field>0&&!ui_theme_valid(theme_in))||(cmode_field>0&&cmode_in[0]&&!color_mode_valid(cmode_in)))return LE_INVALID;char room_in[64];int room_field=json_get_string(j,"room",room_in,sizeof(room_in));if(room_field<0||(room_field>0&&!room_valid(room_in)))return LE_INVALID;char wake[LE_TEXT],hostname[LE_TEXT],short_action[32],long_action[32],button_action[24],action_sounds[192],mode[16]="none",remote_url[256]="",mac_wifi[64],mac_bt[64],canon[24];int acoustic_events,acoustic_events_field,schema,volume,gain,muted,r,g,b,brightness,button_tones,button_action_brightness,button_mute_brightness,button_tones_field,button_action_field,button_action_brightness_field,button_mute_brightness_field,action_sounds_field,visualizer_enabled=1,visualizer_field,sensitivity,ssh,api_lan,local_only,audio_retention,telemetry,crash_reports,log_hours,integrations,max_utterance,end_silence,vad_floor,mode_field,hours_field,max_field,url_field,feature_https,feature_simulation,feature_https_field,feature_simulation_field,mac_wifi_field,mac_bt_field,retention_hours=LE_AUDIO_RETENTION_DEFAULT_HOURS,max_mb=LE_AUDIO_RETENTION_DEFAULT_MAX_MB,rc;if(strcmp(le_backend_mode(c->backend),"mock"))return LE_NOT_SUPPORTED;button_tones=c->button_tones;strcpy(button_action,c->button_action);button_action_brightness=(int)c->button_action_brightness;button_mute_brightness=(int)c->button_mute_brightness;snprintf(action_sounds,sizeof(action_sounds),"%s",c->button_action_sounds);button_tones_field=json_get_bool(j,"button_tones",&button_tones);button_action_field=json_get_string(j,"button_action",button_action,sizeof(button_action));button_action_brightness_field=json_get_int(j,"button_action_brightness",&button_action_brightness);button_mute_brightness_field=json_get_int(j,"button_mute_brightness",&button_mute_brightness);action_sounds_field=json_get_string(j,"button_action_sounds",action_sounds,sizeof(action_sounds));mode_field=json_get_string(j,"privacy_audio_mode",mode,sizeof(mode));hours_field=json_get_int(j,"privacy_audio_retention_hours",&retention_hours);max_field=json_get_int(j,"privacy_audio_max_mb",&max_mb);url_field=json_get_string(j,"privacy_audio_remote_url",remote_url,sizeof(remote_url));feature_https_field=json_get_bool(j,"feature_https",&feature_https);feature_simulation_field=json_get_bool(j,"feature_simulation",&feature_simulation);mac_wifi_field=json_get_string(j,"mac_wifi",mac_wifi,sizeof(mac_wifi));mac_bt_field=json_get_string(j,"mac_bt",mac_bt,sizeof(mac_bt));if(mode_field==0)strcpy(mode,"none");if(mode_field==0&&json_get_bool(j,"privacy_audio_retention",&audio_retention)>0&&audio_retention)strcpy(mode,"local");if(!strcmp(mode,"remote")&&!remote_url[0])return LE_INVALID;if(mode_field<0||hours_field<0||max_field<0||url_field<0||(mode_field>0&&!audio_retention_mode_valid(mode))||(hours_field>0&&!audio_retention_hours_valid(retention_hours))||(max_field>0&&!audio_retention_max_mb_valid(max_mb))||(url_field>0&&remote_url[0]&&!audio_remote_url_valid(remote_url)))return LE_INVALID;visualizer_field=json_get_bool(j,"led_visualizer_enabled",&visualizer_enabled);if(json_duplicate_key(j,n,"feature_acoustic_events")!=0)return LE_INVALID;acoustic_events_field=json_get_top_level_bool(j,n,"feature_acoustic_events",&acoustic_events);if(visualizer_field<0||acoustic_events_field<0||json_get_int(j,"schema_version",&schema)<1||schema!=1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_int(j,"microphone_gain",&gain)<1||gain<0||gain>100||json_get_bool(j,"microphone_muted",&muted)<1||json_get_int(j,"led_r",&r)<1||r<0||r>255||json_get_int(j,"led_g",&g)<1||g<0||g>255||json_get_int(j,"led_b",&b)<1||b<0||b>255||json_get_int(j,"led_brightness",&brightness)<1||brightness<0||brightness>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_string(j,"hostname",hostname,sizeof(hostname))<1||json_get_bool(j,"ssh",&ssh)<1||json_get_bool(j,"api_lan",&api_lan)<1||json_get_string(j,"button_short",short_action,sizeof(short_action))<1||json_get_string(j,"button_long",long_action,sizeof(long_action))<1||button_tones_field<0||button_action_field<0||button_action_brightness_field<0||button_mute_brightness_field<0||action_sounds_field<0||(action_sounds_field>0&&!button_sound_list_valid(action_sounds))||(button_action_field>0&&!button_action_valid(button_action))||(button_action_brightness_field>0&&(button_action_brightness<0||button_action_brightness>100))||(button_mute_brightness_field>0&&(button_mute_brightness<0||button_mute_brightness>100))||json_get_bool(j,"privacy_local_only",&local_only)<1||json_get_bool(j,"privacy_audio_retention",&audio_retention)<1||json_get_bool(j,"privacy_telemetry",&telemetry)<1||json_get_bool(j,"privacy_crash_reports",&crash_reports)<1||json_get_int(j,"privacy_log_hours",&log_hours)<1||(log_hours!=24&&log_hours!=168&&log_hours!=720)||json_get_int(j,"integrations",&integrations)<1||integrations<0||integrations>127||json_get_int(j,"stt_max_utterance_ms",&max_utterance)<1||!stt_max_utterance_valid(max_utterance)||json_get_int(j,"stt_end_silence_ms",&end_silence)<1||!stt_end_silence_valid(end_silence)||json_get_int(j,"stt_vad_floor_rms",&vad_floor)<1||!stt_vad_floor_valid(vad_floor)||feature_https_field<1||feature_simulation_field<1||mac_wifi_field<1||mac_bt_field<1||(mac_wifi_field>0&&mac_wifi[0]&&!mac_override_valid(mac_wifi,canon,sizeof(canon)))||(mac_bt_field>0&&mac_bt[0]&&!mac_override_valid(mac_bt,canon,sizeof(canon))))return LE_INVALID;if((rc=le_set_volume(c->backend,volume))||(rc=le_set_microphone_gain(c->backend,gain))||(rc=le_set_microphone_muted(c->backend,muted))||(rc=le_set_led_colour(c->backend,(uint8_t)r,(uint8_t)g,(uint8_t)b))||(rc=le_set_led_brightness(c->backend,brightness))||(rc=le_set_led_visualizer_enabled(c->backend,visualizer_enabled))||(rc=le_set_wake_word(c->backend,wake))||(rc=le_set_wake_word_sensitivity(c->backend,sensitivity))||(rc=le_set_hostname(c->backend,hostname)))return rc;c->net_ssh=ssh;c->net_api_lan=api_lan;c->privacy_local_only=local_only;c->privacy_audio_retention=strcmp(mode,"none")!=0;snprintf(c->privacy_audio_mode,sizeof(c->privacy_audio_mode),"%s",mode);c->privacy_audio_retention_hours=retention_hours;c->privacy_audio_max_mb=max_mb;snprintf(c->privacy_audio_remote_url,sizeof(c->privacy_audio_remote_url),"%s",remote_url);c->privacy_telemetry=telemetry;c->privacy_crash_reports=crash_reports;{int active_ping;if(json_get_bool(j,"privacy_active_ping",&active_ping)==1)c->privacy_active_ping=active_ping;}c->privacy_log_hours=log_hours;c->integrations=(unsigned)integrations;if(acoustic_events_field>0)c->feature_acoustic_events=acoustic_events;c->stt_max_utterance_ms=max_utterance;c->stt_end_silence_ms=end_silence;c->stt_vad_floor_rms=vad_floor;c->feature_https=feature_https;c->feature_simulation=feature_simulation;if(mac_wifi_field>0){if(!mac_wifi[0])c->mac_wifi[0]=0;else if(mac_override_valid(mac_wifi,canon,sizeof(canon)))snprintf(c->mac_wifi,sizeof(c->mac_wifi),"%s",canon);}if(mac_bt_field>0){if(!mac_bt[0])c->mac_bt[0]=0;else if(mac_override_valid(mac_bt,canon,sizeof(canon)))snprintf(c->mac_bt,sizeof(c->mac_bt),"%s",canon);}strcpy(c->button_short,short_action);strcpy(c->button_long,long_action);if(button_tones_field>0)c->button_tones=button_tones;if(button_action_field>0)strcpy(c->button_action,button_action);if(button_action_brightness_field>0)c->button_action_brightness=(unsigned)button_action_brightness;if(button_mute_brightness_field>0)c->button_mute_brightness=(unsigned)button_mute_brightness;if(action_sounds_field>0)snprintf(c->button_action_sounds,sizeof(c->button_action_sounds),"%s",action_sounds);if(theme_field>0)strcpy(c->ui_theme,theme_in);if(cmode_field>0)strcpy(c->color_mode,cmode_in);if(room_field>0)snprintf(c->room,sizeof(c->room),"%s",room_in);return persist_configuration(c);}
+
+/* A long press takes any action, or "same": no separate long press (#372). */
+static int button_action_long_valid(const char *action)
+{
+    return action && (button_action_valid(action) || !strcmp(action, "same"));
+}
+static int import_configuration(struct api_context*c,const char*j,size_t n){char theme_in[16],cmode_in[16];int theme_field=json_get_string(j,"ui_theme",theme_in,sizeof(theme_in)),cmode_field=json_get_string(j,"color_mode",cmode_in,sizeof(cmode_in));if(theme_field<0||cmode_field<0||(theme_field>0&&!ui_theme_valid(theme_in))||(cmode_field>0&&cmode_in[0]&&!color_mode_valid(cmode_in)))return LE_INVALID;char room_in[64];int room_field=json_get_string(j,"room",room_in,sizeof(room_in));if(room_field<0||(room_field>0&&!room_valid(room_in)))return LE_INVALID;char wake[LE_TEXT],hostname[LE_TEXT],short_action[32],long_action[32],button_action[24],button_action_long[24],action_sounds[192],mode[16]="none",remote_url[256]="",mac_wifi[64],mac_bt[64],canon[24];int acoustic_events,acoustic_events_field,schema,volume,gain,muted,r,g,b,brightness,button_tones,button_action_brightness,button_mute_brightness,button_tones_field,button_action_field,button_action_long_field,button_action_brightness_field,button_mute_brightness_field,action_sounds_field,visualizer_enabled=1,visualizer_field,sensitivity,ssh,api_lan,local_only,audio_retention,telemetry,crash_reports,log_hours,integrations,max_utterance,end_silence,vad_floor,noise_suppression=0,noise_suppression_field=0,mode_field,hours_field,max_field,url_field,feature_https,feature_simulation,feature_https_field,feature_simulation_field,mac_wifi_field,mac_bt_field,retention_hours=LE_AUDIO_RETENTION_DEFAULT_HOURS,max_mb=LE_AUDIO_RETENTION_DEFAULT_MAX_MB,rc;if(strcmp(le_backend_mode(c->backend),"mock"))return LE_NOT_SUPPORTED;button_tones=c->button_tones;strcpy(button_action,c->button_action);strcpy(button_action_long,c->button_action_long);button_action_brightness=(int)c->button_action_brightness;button_mute_brightness=(int)c->button_mute_brightness;snprintf(action_sounds,sizeof(action_sounds),"%s",c->button_action_sounds);button_tones_field=json_get_bool(j,"button_tones",&button_tones);button_action_field=json_get_string(j,"button_action",button_action,sizeof(button_action));button_action_long_field=json_get_string(j,"button_action_long",button_action_long,sizeof(button_action_long));button_action_brightness_field=json_get_int(j,"button_action_brightness",&button_action_brightness);button_mute_brightness_field=json_get_int(j,"button_mute_brightness",&button_mute_brightness);action_sounds_field=json_get_string(j,"button_action_sounds",action_sounds,sizeof(action_sounds));mode_field=json_get_string(j,"privacy_audio_mode",mode,sizeof(mode));hours_field=json_get_int(j,"privacy_audio_retention_hours",&retention_hours);max_field=json_get_int(j,"privacy_audio_max_mb",&max_mb);url_field=json_get_string(j,"privacy_audio_remote_url",remote_url,sizeof(remote_url));feature_https_field=json_get_bool(j,"feature_https",&feature_https);feature_simulation_field=json_get_bool(j,"feature_simulation",&feature_simulation);mac_wifi_field=json_get_string(j,"mac_wifi",mac_wifi,sizeof(mac_wifi));mac_bt_field=json_get_string(j,"mac_bt",mac_bt,sizeof(mac_bt));if(mode_field==0)strcpy(mode,"none");if(mode_field==0&&json_get_bool(j,"privacy_audio_retention",&audio_retention)>0&&audio_retention)strcpy(mode,"local");if(!strcmp(mode,"remote")&&!remote_url[0])return LE_INVALID;if(mode_field<0||hours_field<0||max_field<0||url_field<0||(mode_field>0&&!audio_retention_mode_valid(mode))||(hours_field>0&&!audio_retention_hours_valid(retention_hours))||(max_field>0&&!audio_retention_max_mb_valid(max_mb))||(url_field>0&&remote_url[0]&&!audio_remote_url_valid(remote_url)))return LE_INVALID;visualizer_field=json_get_bool(j,"led_visualizer_enabled",&visualizer_enabled);if(json_duplicate_key(j,n,"feature_acoustic_events")!=0)return LE_INVALID;noise_suppression_field=json_get_top_level_bool(j,n,"voice_noise_suppression",&noise_suppression);if(noise_suppression_field<0)return LE_INVALID;acoustic_events_field=json_get_top_level_bool(j,n,"feature_acoustic_events",&acoustic_events);if(visualizer_field<0||acoustic_events_field<0||json_get_int(j,"schema_version",&schema)<1||schema!=1||json_get_int(j,"volume",&volume)<1||volume<0||volume>100||json_get_int(j,"microphone_gain",&gain)<1||gain<0||gain>100||json_get_bool(j,"microphone_muted",&muted)<1||json_get_int(j,"led_r",&r)<1||r<0||r>255||json_get_int(j,"led_g",&g)<1||g<0||g>255||json_get_int(j,"led_b",&b)<1||b<0||b>255||json_get_int(j,"led_brightness",&brightness)<1||brightness<0||brightness>100||json_get_string(j,"wake_word",wake,sizeof(wake))<1||json_get_int(j,"wake_sensitivity",&sensitivity)<1||sensitivity<0||sensitivity>100||json_get_string(j,"hostname",hostname,sizeof(hostname))<1||json_get_bool(j,"ssh",&ssh)<1||json_get_bool(j,"api_lan",&api_lan)<1||json_get_string(j,"button_short",short_action,sizeof(short_action))<1||json_get_string(j,"button_long",long_action,sizeof(long_action))<1||button_tones_field<0||button_action_field<0||button_action_brightness_field<0||button_mute_brightness_field<0||action_sounds_field<0||(action_sounds_field>0&&!button_sound_list_valid(action_sounds))||(button_action_field>0&&!button_action_valid(button_action))||button_action_long_field<0||(button_action_long_field>0&&!button_action_long_valid(button_action_long))||(button_action_brightness_field>0&&(button_action_brightness<0||button_action_brightness>100))||(button_mute_brightness_field>0&&(button_mute_brightness<0||button_mute_brightness>100))||json_get_bool(j,"privacy_local_only",&local_only)<1||json_get_bool(j,"privacy_audio_retention",&audio_retention)<1||json_get_bool(j,"privacy_telemetry",&telemetry)<1||json_get_bool(j,"privacy_crash_reports",&crash_reports)<1||json_get_int(j,"privacy_log_hours",&log_hours)<1||(log_hours!=24&&log_hours!=168&&log_hours!=720)||json_get_int(j,"integrations",&integrations)<1||integrations<0||integrations>127||json_get_int(j,"stt_max_utterance_ms",&max_utterance)<1||!stt_max_utterance_valid(max_utterance)||json_get_int(j,"stt_end_silence_ms",&end_silence)<1||!stt_end_silence_valid(end_silence)||json_get_int(j,"stt_vad_floor_rms",&vad_floor)<1||!stt_vad_floor_valid(vad_floor)||feature_https_field<1||feature_simulation_field<1||mac_wifi_field<1||mac_bt_field<1||(mac_wifi_field>0&&mac_wifi[0]&&!mac_override_valid(mac_wifi,canon,sizeof(canon)))||(mac_bt_field>0&&mac_bt[0]&&!mac_override_valid(mac_bt,canon,sizeof(canon))))return LE_INVALID;if((rc=le_set_volume(c->backend,volume))||(rc=le_set_microphone_gain(c->backend,gain))||(rc=le_set_microphone_muted(c->backend,muted))||(rc=le_set_led_colour(c->backend,(uint8_t)r,(uint8_t)g,(uint8_t)b))||(rc=le_set_led_brightness(c->backend,brightness))||(rc=le_set_led_visualizer_enabled(c->backend,visualizer_enabled))||(rc=le_set_wake_word(c->backend,wake))||(rc=le_set_wake_word_sensitivity(c->backend,sensitivity))||(rc=le_set_hostname(c->backend,hostname)))return rc;c->net_ssh=ssh;c->net_api_lan=api_lan;{int discoverable;if(json_get_bool(j,"discoverable",&discoverable)==1)c->discoverable=discoverable?1:0;if(json_get_bool(j,"nearest_answers",&discoverable)==1)c->nearest_answers=discoverable?1:0;}c->privacy_local_only=local_only;c->privacy_audio_retention=strcmp(mode,"none")!=0;snprintf(c->privacy_audio_mode,sizeof(c->privacy_audio_mode),"%s",mode);c->privacy_audio_retention_hours=retention_hours;c->privacy_audio_max_mb=max_mb;snprintf(c->privacy_audio_remote_url,sizeof(c->privacy_audio_remote_url),"%s",remote_url);c->privacy_telemetry=telemetry;c->privacy_crash_reports=crash_reports;{int active_ping;if(json_get_bool(j,"privacy_active_ping",&active_ping)==1)c->privacy_active_ping=active_ping;}c->privacy_log_hours=log_hours;c->integrations=(unsigned)integrations;if(acoustic_events_field>0)c->feature_acoustic_events=acoustic_events;c->stt_max_utterance_ms=max_utterance;c->stt_end_silence_ms=end_silence;c->stt_vad_floor_rms=vad_floor;if(noise_suppression_field>0)c->voice_noise_suppression=noise_suppression?1:0;c->feature_https=feature_https;c->feature_simulation=feature_simulation;if(mac_wifi_field>0){if(!mac_wifi[0])c->mac_wifi[0]=0;else if(mac_override_valid(mac_wifi,canon,sizeof(canon)))snprintf(c->mac_wifi,sizeof(c->mac_wifi),"%s",canon);}if(mac_bt_field>0){if(!mac_bt[0])c->mac_bt[0]=0;else if(mac_override_valid(mac_bt,canon,sizeof(canon)))snprintf(c->mac_bt,sizeof(c->mac_bt),"%s",canon);}strcpy(c->button_short,short_action);strcpy(c->button_long,long_action);if(button_tones_field>0)c->button_tones=button_tones;if(button_action_field>0)strcpy(c->button_action,button_action);if(button_action_long_field>0)strcpy(c->button_action_long,button_action_long);if(button_action_brightness_field>0)c->button_action_brightness=(unsigned)button_action_brightness;if(button_mute_brightness_field>0)c->button_mute_brightness=(unsigned)button_mute_brightness;if(action_sounds_field>0)snprintf(c->button_action_sounds,sizeof(c->button_action_sounds),"%s",action_sounds);if(theme_field>0)strcpy(c->ui_theme,theme_in);if(cmode_field>0)strcpy(c->color_mode,cmode_in);if(room_field>0)snprintf(c->room,sizeof(c->room),"%s",room_in);return persist_configuration(c);}
+/* Settings copy (#449). The device the owner is on reads the values of the chosen groups and sends them to one paired device as a signed "settings-copy" packet (peer_settings.h lists the keys). The receiver validates every key before it changes anything, and applies only the keys it knows, so identity, network and secrets never move. */
+#define LE_SETTINGS_FANOUT_MS 3000
+enum { I_WAKE_SENS, I_VOLUME, I_GAIN, I_MAX_UTT, I_END_SIL, I_VAD, I_LED, I_ACTION_BRIGHT, I_MUTE_BRIGHT, I_COUNT };
+static const struct { const char *key; int lo, hi; int (*valid)(int); } settings_ints[I_COUNT] = {
+    [I_WAKE_SENS] = {"wake_sensitivity", 0, 100, NULL},
+    [I_VOLUME] = {"volume", 0, 100, NULL},
+    [I_GAIN] = {"microphone_gain", 0, 100, NULL},
+    [I_MAX_UTT] = {"stt_max_utterance_ms", 0, 0, stt_max_utterance_valid},
+    [I_END_SIL] = {"stt_end_silence_ms", 0, 0, stt_end_silence_valid},
+    [I_VAD] = {"stt_vad_floor_rms", 0, 0, stt_vad_floor_valid},
+    [I_LED] = {"led_brightness", 0, 100, NULL},
+    [I_ACTION_BRIGHT] = {"button_action_brightness", 0, 100, NULL},
+    [I_MUTE_BRIGHT] = {"button_mute_brightness", 0, 100, NULL}
+};
+struct settings_copy { int has[I_COUNT], v[I_COUNT]; int has_wake, has_ha, has_vis, vis; char wake[64], ha[200]; };
+static int settings_int_add(char *b, size_t cap, size_t *used, const char *key, int value)
+{
+    int n = snprintf(b + *used, cap - *used, "%s\"%s\":%d", *used > 1 ? "," : "", key, value);
+    if (n < 0 || (size_t)n >= cap - *used) return -1;
+    *used += (size_t)n;
+    return 0;
+}
+static int settings_text_add(char *b, size_t cap, size_t *used, const char *key, const char *value)
+{
+    char esc[512];
+    int n;
+    json_escape(esc, sizeof esc, value);
+    n = snprintf(b + *used, cap - *used, "%s\"%s\":\"%s\"", *used > 1 ? "," : "", key, esc);
+    if (n < 0 || (size_t)n >= cap - *used) return -1;
+    *used += (size_t)n;
+    return 0;
+}
+static int settings_bool_add(char *b, size_t cap, size_t *used, const char *key, int value)
+{
+    int n = snprintf(b + *used, cap - *used, "%s\"%s\":%s", *used > 1 ? "," : "", key, value ? "true" : "false");
+    if (n < 0 || (size_t)n >= cap - *used) return -1;
+    *used += (size_t)n;
+    return 0;
+}
+/* Sender: the values this device holds for the chosen groups, as a flat JSON object ("{}" when none). Returns the length, or -1. */
+static int settings_copy_body(struct api_context *c, unsigned groups, char *b, size_t cap)
+{
+    struct le_audio_state a;
+    struct le_led_state l;
+    struct le_wake_word_state w;
+    size_t used = 1;
+    if (cap < 4) return -1;
+    b[0] = '{';
+    b[1] = 0;
+    if (groups & LE_SETTINGS_VOICE) {
+        if (le_get_wake_word_state(c->backend, &w)
+            || settings_text_add(b, cap, &used, "wake_word", w.wake_word)
+            || settings_int_add(b, cap, &used, "wake_sensitivity", w.sensitivity)
+            || settings_int_add(b, cap, &used, "stt_max_utterance_ms", c->stt_max_utterance_ms)
+            || settings_int_add(b, cap, &used, "stt_end_silence_ms", c->stt_end_silence_ms)
+            || settings_int_add(b, cap, &used, "stt_vad_floor_rms", c->stt_vad_floor_rms))
+            return -1;
+    }
+    if (groups & LE_SETTINGS_AUDIO) {
+        if (le_get_audio_state(c->backend, &a)
+            || settings_int_add(b, cap, &used, "volume", a.volume)
+            || settings_int_add(b, cap, &used, "microphone_gain", a.microphone_gain))
+            return -1;
+    }
+    if ((groups & LE_SETTINGS_HA) && c->home_assistant_url[0]
+        && settings_text_add(b, cap, &used, "home_assistant_url", c->home_assistant_url))
+        return -1;
+    if (groups & LE_SETTINGS_LED) {
+        if (le_get_led_state(c->backend, &l)
+            || settings_int_add(b, cap, &used, "led_brightness", l.current.brightness)
+            || settings_bool_add(b, cap, &used, "led_visualizer_enabled", l.visualizer_enabled)
+            || settings_int_add(b, cap, &used, "button_action_brightness", c->button_action_brightness)
+            || settings_int_add(b, cap, &used, "button_mute_brightness", c->button_mute_brightness))
+            return -1;
+    }
+    if (used + 2 > cap) return -1;
+    b[used] = '}';
+    b[used + 1] = 0;
+    return (int)used + 1;
+}
+/* Receiver: every member is checked before anything is applied. Keys outside the copy list are ignored; a bad value for a listed key refuses the whole packet. */
+static int settings_parse(const char *body, size_t blen, struct settings_copy *s)
+{
+    struct json_member m[LE_SETTINGS_KEYS_MAX];
+    size_t count = 0, i, k;
+    char key[LE_SETTINGS_KEY_MAX];
+    memset(s, 0, sizeof *s);
+    if (json_object_members(body, blen, m, LE_SETTINGS_KEYS_MAX, &count) < 0) return -1;
+    for (i = 0; i < count; i++) {
+        const char *v = m[i].value;
+        size_t vl = m[i].value_len;
+        if (m[i].name_len >= sizeof key) continue;
+        memcpy(key, m[i].name, m[i].name_len);
+        key[m[i].name_len] = 0;
+        if (!le_settings_key_group(key)) continue;
+        if (!strcmp(key, "wake_word")) {
+            if (json_string_span(v, vl, s->wake, sizeof s->wake) < 1 || !s->wake[0]) return -1;
+            s->has_wake = 1;
+            continue;
+        }
+        if (!strcmp(key, "home_assistant_url")) {
+            if (json_string_span(v, vl, s->ha, sizeof s->ha) < 1 || !home_assistant_url_valid(s->ha)) return -1;
+            s->has_ha = 1;
+            continue;
+        }
+        if (!strcmp(key, "led_visualizer_enabled")) {
+            if (json_bool_span(v, vl, &s->vis) < 1) return -1;
+            s->has_vis = 1;
+            continue;
+        }
+        for (k = 0; k < I_COUNT && strcmp(key, settings_ints[k].key); k++) ;
+        if (k == I_COUNT || json_int_span(v, vl, &s->v[k]) < 1) return -1;
+        if (settings_ints[k].valid ? !settings_ints[k].valid(s->v[k]) : (s->v[k] < settings_ints[k].lo || s->v[k] > settings_ints[k].hi)) return -1;
+        s->has[k] = 1;
+    }
+    return 0;
+}
+static int settings_ok(int rc) { return rc == LE_NOT_SUPPORTED ? LE_OK : rc; }
+static int settings_apply(struct api_context *c, const struct settings_copy *s)
+{
+    int rc = LE_OK;
+    if (s->has_wake && (rc = settings_ok(le_set_wake_word(c->backend, s->wake)))) return rc;
+    if (s->has[I_WAKE_SENS] && (rc = settings_ok(le_set_wake_word_sensitivity(c->backend, s->v[I_WAKE_SENS])))) return rc;
+    if (s->has[I_VOLUME] && (rc = settings_ok(le_set_volume(c->backend, s->v[I_VOLUME])))) return rc;
+    if (s->has[I_GAIN] && (rc = settings_ok(le_set_microphone_gain(c->backend, s->v[I_GAIN])))) return rc;
+    if (s->has[I_LED] && (rc = settings_ok(le_set_led_brightness(c->backend, s->v[I_LED])))) return rc;
+    if (s->has_vis && (rc = settings_ok(le_set_led_visualizer_enabled(c->backend, s->vis)))) return rc;
+    if (s->has[I_MAX_UTT]) c->stt_max_utterance_ms = s->v[I_MAX_UTT];
+    if (s->has[I_END_SIL]) c->stt_end_silence_ms = s->v[I_END_SIL];
+    if (s->has[I_VAD]) c->stt_vad_floor_rms = s->v[I_VAD];
+    if (s->has[I_ACTION_BRIGHT]) c->button_action_brightness = s->v[I_ACTION_BRIGHT];
+    if (s->has[I_MUTE_BRIGHT]) c->button_mute_brightness = s->v[I_MUTE_BRIGHT];
+    if (s->has_ha) snprintf(c->home_assistant_url, sizeof c->home_assistant_url, "%s", s->ha);
+    return persist_configuration(c);
+}
+/* Member side: a sealed "settings-copy" packet, verified, validated and applied once. */
+static void peer_settings(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    const char *body = NULL;
+    size_t blen = 0;
+    struct settings_copy s;
+    int rc;
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        out(r, 409, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_paired\",\"message\":\"This device is not paired with other devices\"}}");
+        return;
+    }
+    if (le_peer_open(&c->peer_key, &c->peer_replay, (long long)time(NULL), LE_GROUP_COMMAND_WINDOW_S, LE_SETTINGS_COPY_TYPE, q->body, q->body_len, &body, &blen) != LE_PEER_OK) {
+        api_log(c, "warning", "Refused a settings copy that did not verify");
+        out(r, 401, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_verified\",\"message\":\"The settings copy did not verify with this device's key\"}}");
+        return;
+    }
+    if (settings_parse(body, blen, &s)) {
+        err(r, 400, LE_INVALID, "The settings copy holds a value this device does not accept");
+        return;
+    }
+    rc = settings_apply(c, &s);
+    if (rc) {
+        err(r, rc == LE_INVALID ? 400 : 503, rc, "The settings could not be applied");
+        return;
+    }
+    api_log(c, "info", "Settings copied from a paired device");
+    ok(r, "{\"applied\":true}");
+}
+/* Owner side: POST /api/v1/network/settings/copy {"address","port","voice","audio","ha","led"}. */
+static void settings_copy_json(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    static const char *names[] = {"voice", "audio", "ha", "led"};
+    char address[32], body[LE_SETTINGS_BODY_MAX], packet[LE_PEER_HEADER_MAX + LE_SETTINGS_BODY_MAX + 16], reply[1024], nonce[LE_PEER_NONCE_HEX + 1], list[32], data[256];
+    struct in_addr a;
+    int port = 0, flag = 0, status = 0, wire = 0, applied_here = 0, n;
+    unsigned groups = LE_SETTINGS_NONE;
+    size_t i, used = 0;
+    const char *result = "unreachable";
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        err(r, 409, LE_BUSY, "Pair this device with the other device before copying settings");
+        return;
+    }
+    if (json_get_string(q->body, "address", address, sizeof address) < 1 || inet_pton(AF_INET, address, &a) != 1 || json_get_int(q->body, "port", &port) < 1 || port < 1 || port > 65535) {
+        err(r, 400, LE_INVALID, "A device needs an IPv4 address and a port");
+        return;
+    }
+    for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+        int rc = json_get_bool(q->body, names[i], &flag);
+        if (rc < 0) {
+            err(r, 400, LE_INVALID, "Each settings group must be true or false");
+            return;
+        }
+        if (rc == 1 && flag) groups |= le_settings_group_from_name(names[i]);
+    }
+    if (!groups) {
+        err(r, 400, LE_INVALID, "Choose at least one settings group");
+        return;
+    }
+    if (own_ipv4(address) && port == c->http_port) {
+        err(r, 400, LE_INVALID, "Choose another device; this device already has these settings");
+        return;
+    }
+    if (settings_copy_body(c, groups, body, sizeof body) < 0) {
+        err(r, 503, LE_IO, "The settings could not be read");
+        return;
+    }
+    if (!strcmp(body, "{}")) {
+        err(r, 409, LE_INVALID, "The chosen groups have no settings to copy");
+        return;
+    }
+    if (le_peer_nonce(nonce) || (wire = le_peer_seal(&c->peer_key, LE_SETTINGS_COPY_TYPE, (long long)time(NULL), nonce, body, strlen(body), packet, sizeof packet)) <= 0) {
+        err(r, 503, LE_IO, "The settings copy could not be sent");
+        return;
+    }
+    if (!le_peer_post(address, (unsigned)port, "/api/v1/peer/settings", packet, (size_t)wire, LE_SETTINGS_FANOUT_MS, &status, reply, sizeof reply)) {
+        if (status == 200 && json_get_bool(reply, "applied", &applied_here) > 0 && applied_here) result = "applied";
+        else if (status == 401 || status == 404 || status == 409) result = "unpaired";
+        else result = "failed";
+    }
+    list[0] = 0;
+    for (i = 0; i < sizeof names / sizeof names[0]; i++) {
+        if (!(groups & le_settings_group_from_name(names[i]))) continue;
+        n = snprintf(list + used, sizeof list - used, "%s%s", used ? "," : "", names[i]);
+        if (n < 0 || (size_t)n >= sizeof list - used) break;
+        used += (size_t)n;
+    }
+    api_log(c, "info", "Settings copy sent to a paired device");
+    n = snprintf(data, sizeof data, "{\"result\":\"%s\",\"groups\":\"%s\",\"address\":\"%s\",\"port\":%d}", result, list, address, port);
+    if (n < 0 || (size_t)n >= sizeof data) {
+        err(r, 503, LE_IO, "The settings copy could not be reported");
+        return;
+    }
+    ok(r, data);
+}
+/* Broadcast (#412, first slice). The owner speaks a short text on every paired device, or on one chosen device, as a signed "announcement" packet (peer_announce.h). A member speaks it once the packet verifies; the text is the only thing it takes from the packet. */
+#define LE_BROADCAST_FANOUT_MS 3000
+#define LE_BROADCAST_TEXT_BYTES 512
+#define LE_BROADCAST_DATA_BYTES 8192
+/* This device's own announcement path, with the same result words as a remote device. */
+static const char *announce_here(struct api_context *c, const char *text)
+{
+    int rc = le_announce(c->backend, text);
+    return rc == LE_OK ? "applied" : rc == LE_NOT_SUPPORTED ? "not_supported" : "failed";
+}
+/* One signed announcement to one remote device. Returns applied, not_supported, unpaired, failed or unreachable. */
+static const char *announce_to(struct api_context *c, const char *address, unsigned port, const char *text, long long deadline)
+{
+    char packet[LE_PEER_HEADER_MAX + LE_ANNOUNCE_TEXT_MAX + 16], reply[512], nonce[LE_PEER_NONCE_HEX + 1];
+    int status = 0, wire = 0, spoken = 0;
+    long long left;
+    if (own_ipv4(address) && port == (unsigned)c->http_port) return announce_here(c, text);
+    left = deadline - group_now_ms();
+    if (left <= 0 || le_peer_nonce(nonce) || (wire = le_peer_seal(&c->peer_key, LE_ANNOUNCE_TYPE, (long long)time(NULL), nonce, text, strlen(text), packet, sizeof packet)) <= 0) return "unreachable";
+    if (le_peer_post(address, port, "/api/v1/peer/announce", packet, (size_t)wire, (int)left, &status, reply, sizeof reply)) return "unreachable";
+    if (status == 200 && json_get_bool(reply, "spoken", &spoken) > 0 && spoken) return "applied";
+    if (status == 501) return "not_supported";
+    if (status == 401 || status == 404 || status == 409) return "unpaired";
+    return "failed";
+}
+/* Member side: a sealed "announcement" packet, verified and spoken once. */
+static void peer_announce(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    const char *body = NULL;
+    size_t blen = 0;
+    char text[LE_ANNOUNCE_TEXT_MAX + 1];
+    int rc;
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        out(r, 409, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_paired\",\"message\":\"This device is not paired with other devices\"}}");
+        return;
+    }
+    if (le_peer_open(&c->peer_key, &c->peer_replay, (long long)time(NULL), LE_GROUP_COMMAND_WINDOW_S, LE_ANNOUNCE_TYPE, q->body, q->body_len, &body, &blen) != LE_PEER_OK) {
+        api_log(c, "warning", "Refused an announcement that did not verify");
+        out(r, 401, "{\"ok\":false,\"data\":null,\"error\":{\"code\":\"not_verified\",\"message\":\"The announcement did not verify with this device's key\"}}");
+        return;
+    }
+    if (!le_announce_body_valid(body, blen)) {
+        err(r, 400, LE_INVALID, "The announcement text is not valid");
+        return;
+    }
+    memcpy(text, body, blen);
+    text[blen] = 0;
+    rc = le_announce(c->backend, text);
+    if (rc) {
+        err(r, rc == LE_NOT_SUPPORTED ? 501 : 503, rc, "This device could not speak the announcement");
+        return;
+    }
+    api_log(c, "info", "Announcement from a paired device spoken");
+    ok(r, "{\"spoken\":true}");
+}
+/* Owner side: POST /api/v1/network/broadcast {"text", "address"?, "port"?}. With an address the text goes to that one device. Without one it goes to every paired device found on the LAN and is spoken here too. Devices of another house, and devices that are off, are skipped or reported. */
+static void broadcast_json(struct api_context *c, const struct api_request *q, struct api_response *r)
+{
+    char text[LE_BROADCAST_TEXT_BYTES], address[32], data[LE_BROADCAST_DATA_BYTES], name[160];
+    struct sockaddr_in dest;
+    struct le_peer list[LE_PEERS_MAX];
+    int self[LE_PEERS_MAX], trust[LE_PEERS_MAX], truncated = 0, have_dest, have_address, port = 0, cnt, n, sent = 0, applied = 0, skipped = 0;
+    size_t i, used = 0;
+    long long deadline;
+    const char *result;
+    struct in_addr a;
+    peer_key_ready(c);
+    if (!c->peer_key.set) {
+        err(r, 409, LE_BUSY, "Pair this device with the others before sending announcements");
+        return;
+    }
+    if (json_get_string(q->body, "text", text, sizeof text) < 1 || !le_announce_body_valid(text, strlen(text))) {
+        err(r, 400, LE_INVALID, "Announcement text must be 1 to 240 characters with no control characters");
+        return;
+    }
+    have_address = json_get_string(q->body, "address", address, sizeof address);
+    if (have_address < 0) {
+        err(r, 400, LE_INVALID, "The address is not valid");
+        return;
+    }
+    deadline = group_now_ms();
+    if (deadline < 0) {
+        err(r, 503, LE_IO, "The announcement could not be sent");
+        return;
+    }
+    deadline += LE_BROADCAST_FANOUT_MS;
+    if (have_address > 0) {
+        if (inet_pton(AF_INET, address, &a) != 1 || json_get_int(q->body, "port", &port) < 1 || port < 1 || port > 65535) {
+            err(r, 400, LE_INVALID, "A device needs an IPv4 address and a port");
+            return;
+        }
+        result = announce_to(c, address, (unsigned)port, text, deadline);
+        sent = 1;
+        applied = !strcmp(result, "applied");
+        n = snprintf(data, sizeof data, "{\"text_length\":%zu,\"this_device\":\"not_included\",\"devices\":[{\"address\":\"%s\",\"port\":%d,\"result\":\"%s\"}],\"sent\":%d,\"applied\":%d,\"skipped\":0,\"truncated\":false}", strlen(text), address, port, result, sent, applied);
+    } else {
+        have_dest = peers_destination(&dest);
+        cnt = le_peers_browse(have_dest ? &dest : NULL, LE_PEERS_BROWSE_MS, list, LE_PEERS_MAX, &truncated);
+        if (cnt < 0) {
+            err(r, 503, LE_IO, "The local network could not be searched");
+            return;
+        }
+        for (i = 0; i < (size_t)cnt; i++) self[i] = peer_is_self(c, &list[i]);
+        le_peer_verify_all(&c->peer_key, list, (size_t)cnt, self, LE_PEER_VERIFY_MS, trust);
+        result = announce_here(c, text);
+        n = snprintf(data, sizeof data, "{\"text_length\":%zu,\"this_device\":\"%s\",\"devices\":[", strlen(text), result);
+        if (n < 0 || (size_t)n >= sizeof data) goto overflow;
+        used = (size_t)n;
+        for (i = 0; i < (size_t)cnt; i++) {
+            if (self[i]) continue;
+            if (trust[i] != LE_PEER_TRUST_PAIRED) { skipped++; continue; }
+            result = announce_to(c, list[i].address, list[i].port, text, deadline);
+            sent++;
+            if (!strcmp(result, "applied")) applied++;
+            json_escape(name, sizeof name, list[i].name);
+            n = snprintf(data + used, sizeof data - used, "%s{\"name\":\"%s\",\"address\":\"%s\",\"port\":%u,\"result\":\"%s\"}", sent > 1 ? "," : "", name, list[i].address, list[i].port, result);
+            if (n < 0 || (size_t)n >= sizeof data - used) goto overflow;
+            used += (size_t)n;
+        }
+        n = snprintf(data + used, sizeof data - used, "],\"sent\":%d,\"applied\":%d,\"skipped\":%d,\"truncated\":%s}", sent, applied, skipped, truncated ? "true" : "false");
+    }
+    if (n < 0 || (size_t)n >= sizeof data) goto overflow;
+    api_log(c, "info", "Announcement sent to paired devices");
+    ok(r, data);
+    return;
+overflow:
+    err(r, 503, LE_IO, "The announcement could not be reported");
+}
 static int read_central_logs(char lines[LE_MAX_LOGS][LE_LOGD_MSG_MAX],size_t*count){FILE*f;char line[LE_LOGD_MSG_MAX],ordered[LE_MAX_LOGS][LE_LOGD_MSG_MAX];size_t next=0,total=0;if(!count)return 0;*count=0;f=fopen(LE_LOGD_FILE,"r");if(!f)return 0;while(fgets(line,sizeof(line),f)){size_t n=strlen(line);if(n&&line[n-1]=='\n')line[n-1]=0;memcpy(lines[next%LE_MAX_LOGS],line,sizeof(lines[0]));next++;if(total<LE_MAX_LOGS)total++;}fclose(f);if(total){size_t i,first=next-total;for(i=0;i<total;i++){memcpy(ordered[i],lines[(first+i)%LE_MAX_LOGS],sizeof(ordered[i]));}for(i=0;i<total;i++)memcpy(lines[i],ordered[i],sizeof(lines[i]));*count=total;}return *count>0;}
 static void logs_json(struct api_context*c,struct api_response*r){char central[LE_MAX_LOGS][LE_LOGD_MSG_MAX],message[256],escaped[512],level[16],service[32];size_t central_count=0,first,i,n=0;int timestamp,boot_seconds;int from_central=read_central_logs(central,&central_count);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"{\"ok\":true,\"data\":{\"entries\":[");if(from_central){for(i=0;i<central_count&&n<sizeof(r->body)-500;i++){timestamp=0;boot_seconds=0;level[0]=0;service[0]=0;message[0]=0;json_get_int(central[i],"ts",&timestamp);json_get_int(central[i],"boot_seconds",&boot_seconds);json_get_string(central[i],"level",level,sizeof(level));json_get_string(central[i],"service",service,sizeof(service));json_get_string(central[i],"msg",message,sizeof(message));if(service[0]&&strncmp(message,service,strlen(service))){char prefixed[256];snprintf(prefixed,sizeof(prefixed),"%s: %s",service,message);strncpy(message,prefixed,sizeof(message)-1);message[sizeof(message)-1]=0;}json_escape(escaped,sizeof(escaped),message);n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s{\"timestamp\":%d,\"boot_seconds\":%d,\"level\":\"%s\",\"message\":\"%s\"}",i?",":"",timestamp,boot_seconds,level[0]?level:"INFO",escaped);}}else{first=c->log_next-c->log_count;for(i=0;i<c->log_count&&n<sizeof(r->body)-500;i++)n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"%s%s",i?",":"",c->logs[(first+i)%LE_MAX_LOGS]);}n+=(size_t)snprintf(r->body+n,sizeof(r->body)-n,"],\"source\":\"%s\",\"bounded\":true,\"capacity\":%d},\"error\":null}",from_central?"central-file":"web-memory",LE_MAX_LOGS);r->status=200;strcpy(r->type,"application/json; charset=utf-8");r->length=n;}
 static void logs_stream_json(struct api_context*c,struct api_response*r){const char*prefix="event: logs\ndata: ",*suffix="\n\n";size_t prefix_len=strlen(prefix),suffix_len=strlen(suffix),n;logs_json(c,r);if(r->status!=200)return;if(r->length>sizeof(r->body)-prefix_len-suffix_len-1){err(r,503,LE_IO,"Log stream is too large");return;}n=r->length;memmove(r->body+prefix_len,r->body,n);memcpy(r->body,prefix,prefix_len);memcpy(r->body+prefix_len+n,suffix,suffix_len);r->length=prefix_len+n+suffix_len;r->body[r->length]=0;strcpy(r->type,"text/event-stream; charset=utf-8");}
@@ -1804,7 +2416,7 @@ static void boot_control_json(struct api_response*r){
     snprintf(body,sizeof(body),"{\"ok\":true,\"data\":%s,\"error\":null}",payload);
     out(r,200,body);
 }
-static void system_json(struct api_context*c,struct api_response*r){time_t now=time(0);int valid=now>=1577836800,linux=!strcmp(le_backend_mode(c->backend),"linux");long synchronized=0,rtc_available=0,rtc_persisted=0,last_sync=0;char state[64]="unavailable",source[64],servers[1100]="",escaped_state[128],escaped_source[128],escaped_servers[2200];const char*tz=getenv("TZ");char escaped_tz[128];strcpy(source,valid?"system-clock":"unset");if(linux){time_status_value("state",state,sizeof(state));time_status_value("source",source,sizeof(source));time_status_value("servers",servers,sizeof(servers));time_status_int("synchronized",&synchronized);time_status_int("rtc_available",&rtc_available);time_status_int("rtc_persisted",&rtc_persisted);time_status_int("last_sync_epoch",&last_sync);if(!rtc_available&&access("/sys/class/rtc/rtc0",F_OK)==0)rtc_available=1;}json_escape(escaped_tz,sizeof(escaped_tz),tz&&tz[0]?tz:"UTC");json_escape(escaped_state,sizeof(escaped_state),state);json_escape(escaped_source,sizeof(escaped_source),source);json_escape(escaped_servers,sizeof(escaped_servers),servers);out(r,200,"{\"ok\":true,\"data\":{\"update_channel\":\"stable\",\"ota\":{\"supported\":false,\"design\":\"A/B\",\"current_slot\":\"A\",\"inactive_slot\":\"B\",\"state\":\"idle\",\"progress\":0,\"rollback_available\":false},\"timezone\":\"%s\",\"boot_estimate_seconds\":null,\"ntp\":%s,\"ntp_state\":\"%s\",\"ntp_servers\":\"%s\",\"last_sync_epoch\":%ld,\"clock_valid\":%s,\"clock_source\":\"%s\",\"rtc_available\":%s,\"rtc_persisted\":%s},\"error\":null}",escaped_tz,synchronized&&valid?"true":"false",escaped_state,escaped_servers,last_sync,valid?"true":"false",escaped_source,rtc_available?"true":"false",rtc_persisted?"true":"false");}
+static void system_json(struct api_context*c,struct api_response*r){time_t now=time(0);int valid=now>=1577836800,linux=!strcmp(le_backend_mode(c->backend),"linux");long synchronized=0,rtc_available=0,rtc_persisted=0,last_sync=0;char state[64]="unavailable",source[64],servers[1100]="",escaped_state[128],escaped_source[128],escaped_servers[2200];const char*tz;char escaped_tz[128];/* The configured zone: daemons that render local time follow it live (timezone.h); the web daemon itself is started without TZ. */timezone_sync_from_file(c);tz=c->timezone;strcpy(source,valid?"system-clock":"unset");if(linux){time_status_value("state",state,sizeof(state));time_status_value("source",source,sizeof(source));time_status_value("servers",servers,sizeof(servers));time_status_int("synchronized",&synchronized);time_status_int("rtc_available",&rtc_available);time_status_int("rtc_persisted",&rtc_persisted);time_status_int("last_sync_epoch",&last_sync);if(!rtc_available&&access("/sys/class/rtc/rtc0",F_OK)==0)rtc_available=1;}json_escape(escaped_tz,sizeof(escaped_tz),tz&&tz[0]?tz:"UTC");json_escape(escaped_state,sizeof(escaped_state),state);json_escape(escaped_source,sizeof(escaped_source),source);json_escape(escaped_servers,sizeof(escaped_servers),servers);out(r,200,"{\"ok\":true,\"data\":{\"update_channel\":\"stable\",\"ota\":{\"supported\":false,\"design\":\"A/B\",\"current_slot\":\"A\",\"inactive_slot\":\"B\",\"state\":\"idle\",\"progress\":0,\"rollback_available\":false},\"timezone\":\"%s\",\"timezone_name\":\"%s\",\"timezone_source\":\"%s\",\"boot_estimate_seconds\":null,\"ntp\":%s,\"ntp_state\":\"%s\",\"ntp_servers\":\"%s\",\"last_sync_epoch\":%ld,\"clock_valid\":%s,\"clock_source\":\"%s\",\"rtc_available\":%s,\"rtc_persisted\":%s},\"error\":null}",escaped_tz,c->timezone_name,c->timezone_source,synchronized&&valid?"true":"false",escaped_state,escaped_servers,last_sync,valid?"true":"false",escaped_source,rtc_available?"true":"false",rtc_persisted?"true":"false");}
 #define LE_AUTH_FAILURE_LIMIT 5
 #define LE_AUTH_FAILURE_WINDOW 60
 #define LE_AUTH_BLOCK_SECONDS 60
@@ -2175,7 +2787,7 @@ static void buttons_json(struct api_context *c, struct api_response *r)
      */
     lamp_state = (fresh && lamp >= 0) ? (lamp ? "true" : "false") : "null";
     button_sounds_available(available, sizeof(available));
-    out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s,\"privacy_latch\":%s,\"lamp_control\":%s,\"tones\":%s,\"action\":\"%s\",\"action_sounds\":\"%s\",\"available_sounds\":%s,\"action_brightness\":%d,\"mute_brightness\":%d},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false", latch, lamp_state, c->button_tones ? "true" : "false", c->button_action, c->button_action_sounds, available, c->button_action_brightness, c->button_mute_brightness);
+    out(r, 200, "{\"ok\":true,\"data\":{\"short_press\":\"%s\",\"long_press\":\"%s\",\"available\":%s,\"state\":\"%s\",\"volume_capable\":%s,\"hardware_mute\":%s,\"action_capable\":%s,\"stale\":%s,\"privacy_latch\":%s,\"lamp_control\":%s,\"tones\":%s,\"action\":\"%s\",\"action_long\":\"%s\",\"action_sounds\":\"%s\",\"available_sounds\":%s,\"action_brightness\":%d,\"mute_brightness\":%d},\"error\":null}", escaped_short, escaped_long, fresh && !strcmp(state, "connected") ? "true" : "false", state, volume ? "true" : "false", mute ? "true" : "false", action ? "true" : "false", !fresh ? "true" : "false", latch, lamp_state, c->button_tones ? "true" : "false", c->button_action, c->button_action_long, c->button_action_sounds, available, c->button_action_brightness, c->button_mute_brightness);
 }
 
 /*
@@ -2237,8 +2849,152 @@ static int timer_id_from_path(const char *path, unsigned *id)
     return 1;
 }
 
+static void alarm_days_text(unsigned mask,char*out,size_t size);
+static int alarm_id_from_path(const char *path, unsigned *id)
+{
+    const char *text = path + strlen("/api/v1/alarms/");
+    const char *it;
+    char *end;
+    unsigned long value;
+
+    if (!text[0])
+        return 0;
+    for (it = text; *it; ++it)
+        if (!isdigit((unsigned char)*it))
+            return 0;
+    errno = 0;
+    value = strtoul(text, &end, 10);
+    if (errno == ERANGE || end == text || *end || value == 0 ||
+        value > UINT_MAX)
+        return 0;
+    if (id)
+        *id = (unsigned)value;
+    return 1;
+}
+
+/* "HH:MM" on a 24-hour clock, strictly: no seconds, no am/pm, no spaces. */
+static int alarm_time_parse(const char *text, int *hour, int *minute)
+{
+    if (strlen(text) != 5 || !isdigit((unsigned char)text[0]) ||
+        !isdigit((unsigned char)text[1]) || text[2] != ':' ||
+        !isdigit((unsigned char)text[3]) || !isdigit((unsigned char)text[4]))
+        return 0;
+    *hour = (text[0] - '0') * 10 + (text[1] - '0');
+    *minute = (text[3] - '0') * 10 + (text[4] - '0');
+    return *hour <= 23 && *minute <= 59;
+}
+
+/* Alarms are the kind=alarm entries of the shared schedule. The wall-clock
+   time is derived from the daemon's remaining seconds, so it is the same
+   instant the daemon will ring at. */
+static void alarms_json(struct api_context*c,struct api_response*r){
+ struct le_timer_list list;char body[4096];char escaped[128];char days_text[48];size_t used=0;int i,written,rc;
+ long long now;
+ rc=le_get_timers(c->backend,&list);
+ /* Read the clock after the daemon, so the remaining seconds it reported cannot
+    push the rendered minute past the one it is due in. */
+ now=(long long)time(NULL);
+ if(rc!=LE_OK){if(rc!=LE_NOT_SUPPORTED){err(r,503,rc,"Alarm list could not be read");return;}memset(&list,0,sizeof(list));}
+ written=snprintf(body,sizeof(body),"{\"available\":%s,\"alarms\":[",list.available?"true":"false");
+ if(written<0||(size_t)written>=sizeof(body)){err(r,500,LE_IO,"Alarm list could not be rendered");return;}
+ used=(size_t)written;
+ for(i=0;i<list.count;i++){
+  time_t due;struct tm local;char hhmm[8];
+  if(strcmp(list.items[i].kind,"alarm"))continue;
+  due=(time_t)(now+list.items[i].seconds_remaining);
+  /* A repeating alarm shows the time it is set for; a snoozed one would
+     otherwise show the snooze instant. */
+  if(list.items[i].repeat_days&&list.items[i].hour>=0&&list.items[i].minute>=0)snprintf(hhmm,sizeof(hhmm),"%02d:%02d",list.items[i].hour,list.items[i].minute);
+  else{if(!localtime_r(&due,&local))continue;snprintf(hhmm,sizeof(hhmm),"%02d:%02d",local.tm_hour,local.tm_min);}
+  alarm_days_text(list.items[i].repeat_days,days_text,sizeof(days_text));
+  json_escape(escaped,sizeof(escaped),list.items[i].label);
+  written=snprintf(body+used,sizeof(body)-used,"%s{\"id\":%u,\"state\":\"%s\",\"time\":\"%s\",\"days\":\"%s\",\"due_epoch\":%lld,\"seconds_remaining\":%ld,\"label\":\"%s\"}",used&&body[used-1]!='['?",":"",list.items[i].id,list.items[i].state,hhmm,days_text,now+list.items[i].seconds_remaining,list.items[i].seconds_remaining,escaped);
+  if(written<0||(size_t)written>=sizeof(body)-used){err(r,500,LE_IO,"Alarm list could not be rendered");return;}
+  used+=(size_t)written;}
+ written=snprintf(body+used,sizeof(body)-used,"]}");
+ if(written<0||(size_t)written>=sizeof(body)-used){err(r,500,LE_IO,"Alarm list could not be rendered");return;}
+ ok(r,body);}
+
+/* Repeat days as a comma list of lower-case three-letter names, or "daily",
+   "weekdays" or "weekends". Empty means a one-off alarm. Returns 0 when the
+   text is not one of those, so the caller can refuse it with a 400. */
+static int alarm_days_parse(const char*text,unsigned*mask){
+ static const struct{const char*name;unsigned bit;}names[]={{"sun",1u<<0},{"mon",1u<<1},{"tue",1u<<2},{"wed",1u<<3},{"thu",1u<<4},{"fri",1u<<5},{"sat",1u<<6}};
+ const char*cursor=text;unsigned days=0;size_t i;
+ if(!strcmp(text,"daily")){*mask=0x7fu;return 1;}
+ if(!strcmp(text,"weekdays")){*mask=0x3eu;return 1;}
+ if(!strcmp(text,"weekends")){*mask=0x41u;return 1;}
+ if(!text[0]){*mask=0;return 1;}
+ while(*cursor){int matched=0;for(i=0;i<sizeof(names)/sizeof(names[0]);i++){size_t n=strlen(names[i].name);if(!strncmp(cursor,names[i].name,n)&&(cursor[n]==','||cursor[n]==0)){days|=names[i].bit;cursor+=n;matched=1;break;}}if(!matched)return 0;if(*cursor==',')cursor++;}
+ *mask=days;return 1;}
+static void alarm_days_text(unsigned mask,char*out,size_t size){
+ static const char*const names[]={"sun","mon","tue","wed","thu","fri","sat"};
+ size_t used=0;int i;
+ if(size)out[0]=0;
+ for(i=0;i<7;i++){if(!(mask&(1u<<i)))continue;if(used&&used+1<size)out[used++]=',';if(used+3<size){memcpy(out+used,names[i],3);used+=3;out[used]=0;}}
+ if(size)out[used<size?used:size-1]=0;}
+
+static void alarm_create_json(struct api_context*c,const struct api_request*q,struct api_response*r){
+ char time_text[8]="",label[48]="",days_text[48]="";unsigned id=0,days=0;int hour=0,minute=0,label_result,time_result,days_result;long long due=0;
+ if(json_duplicate_key(q->body,q->body_len,"time")||json_duplicate_key(q->body,q->body_len,"label")||json_duplicate_key(q->body,q->body_len,"days")){err(r,400,LE_INVALID,"Alarm fields must not be duplicated");return;}
+ time_result=json_get_string_top_level(q->body,"time",time_text,sizeof(time_text));
+ if(time_result!=1||!alarm_time_parse(time_text,&hour,&minute)){err(r,400,LE_INVALID,"time is required as HH:MM on a 24-hour clock");return;}
+ label_result=json_get_string_top_level(q->body,"label",label,sizeof(label));
+ if(label_result<0||!valid_utf8(label,strlen(label))){err(r,400,LE_INVALID,"Alarm label is invalid or too long");return;}
+ days_result=json_get_string_top_level(q->body,"days",days_text,sizeof(days_text));
+ if(days_result<0||(days_result>0&&!alarm_days_parse(days_text,&days))){err(r,400,LE_INVALID,"days must be a list such as mon,wed,fri, or daily, weekdays, weekends; leave it out for a one-off alarm");return;}
+ if(days){
+  if(le_timer_next_repeat_epoch((long long)time(NULL),hour,minute,days,&due)!=LE_TIMER_OK){err(r,409,LE_BUSY,"The clock is not set yet, so an alarm cannot be placed");return;}
+  switch(le_add_repeat_alarm(c->backend,hour,minute,days,label,&id)){
+  case LE_OK:break;
+  case LE_INVALID:err(r,400,LE_INVALID,"Alarm time or days are out of range");return;
+  case LE_BUSY:err(r,409,LE_BUSY,"Alarm capacity is full or the clock is not set yet");return;
+  default:err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}
+  alarm_days_text(days,days_text,sizeof(days_text));
+  out(r,201,"{\"ok\":true,\"data\":{\"id\":%u,\"time\":\"%02d:%02d\",\"days\":\"%s\",\"due_epoch\":%lld},\"error\":null}",id,hour,minute,days_text,due);return;}
+ if(le_timer_next_alarm_epoch((long long)time(NULL),hour,minute,&due)!=LE_TIMER_OK){err(r,409,LE_BUSY,"The clock is not set yet, so an alarm cannot be placed");return;}
+ switch(le_add_alarm(c->backend,due,label,&id)){
+ case LE_OK:break;
+ case LE_INVALID:err(r,400,LE_INVALID,"Alarm time is out of range");return;
+ case LE_BUSY:err(r,409,LE_BUSY,"Alarm capacity is full or the clock is not set yet");return;
+ default:err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}
+ out(r,201,"{\"ok\":true,\"data\":{\"id\":%u,\"time\":\"%02d:%02d\",\"days\":\"\",\"due_epoch\":%lld},\"error\":null}",id,hour,minute,due);}
+
+/* A spoken reminder at HH:MM, once or on the given days. Reminders share the
+   schedule with alarms; they are listed on /api/v1/timers with kind reminder
+   and cancelled through DELETE /api/v1/timers/{id}. */
+static void reminder_create_json(struct api_context*c,const struct api_request*q,struct api_response*r){
+ char time_text[8]="",label[48]="",days_text[48]="";unsigned id=0,days=0;int hour=0,minute=0,label_result,time_result,days_result;long long due=0;
+ if(json_duplicate_key(q->body,q->body_len,"time")||json_duplicate_key(q->body,q->body_len,"label")||json_duplicate_key(q->body,q->body_len,"days")){err(r,400,LE_INVALID,"Reminder fields must not be duplicated");return;}
+ time_result=json_get_string_top_level(q->body,"time",time_text,sizeof(time_text));
+ if(time_result!=1||!alarm_time_parse(time_text,&hour,&minute)){err(r,400,LE_INVALID,"time is required as HH:MM on a 24-hour clock");return;}
+ label_result=json_get_string_top_level(q->body,"label",label,sizeof(label));
+ if(label_result<0||!valid_utf8(label,strlen(label))){err(r,400,LE_INVALID,"Reminder label is invalid or too long");return;}
+ days_result=json_get_string_top_level(q->body,"days",days_text,sizeof(days_text));
+ if(days_result<0||(days_result>0&&!alarm_days_parse(days_text,&days))){err(r,400,LE_INVALID,"days must be a list such as mon,wed,fri, or daily, weekdays, weekends; leave it out for a one-off reminder");return;}
+ if(days?le_timer_next_repeat_epoch((long long)time(NULL),hour,minute,days,&due)!=LE_TIMER_OK:le_timer_next_alarm_epoch((long long)time(NULL),hour,minute,&due)!=LE_TIMER_OK){err(r,409,LE_BUSY,"The clock is not set yet, so a reminder cannot be placed");return;}
+ switch(le_add_reminder(c->backend,hour,minute,days,label,&id)){
+ case LE_OK:break;
+ case LE_INVALID:err(r,400,LE_INVALID,"Reminder time or days are out of range");return;
+ case LE_BUSY:err(r,409,LE_BUSY,"Timer capacity is full or the clock is not set yet");return;
+ default:err(r,503,LE_NOT_SUPPORTED,"Timer service is unavailable");return;}
+ alarm_days_text(days,days_text,sizeof(days_text));
+ out(r,201,"{\"ok\":true,\"data\":{\"id\":%u,\"time\":\"%02d:%02d\",\"days\":\"%s\",\"due_epoch\":%lld},\"error\":null}",id,hour,minute,days_text,due);}
+
+static void alarm_cancel_json(struct api_context*c,const char*path,struct api_response*r){
+ struct le_timer_list list;unsigned id=0;int i,rc,found=0;
+ if(!alarm_id_from_path(path,&id)){err(r,404,LE_INVALID,"Alarm was not found");return;}
+ rc=le_get_timers(c->backend,&list);
+ if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}
+ for(i=0;i<list.count;i++)if(list.items[i].id==id&&!strcmp(list.items[i].kind,"alarm")&&!strcmp(list.items[i].state,"pending"))found=1;
+ if(!found){err(r,404,LE_INVALID,"Alarm was not found");return;}
+ rc=le_cancel_timer(c->backend,id);
+ if(rc==LE_INVALID){err(r,404,LE_INVALID,"Alarm was not found");return;}
+ if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}
+ ok(r,"{\"cancelled\":true}");}
+
 static void timers_json(struct api_context*c,struct api_response*r){
- struct le_timer_list list;char body[4096];char escaped[128];size_t used=0;int i,written,rc;
+ struct le_timer_list list;char body[4096];char escaped[128];char timefield[96];size_t used=0;int i,written,rc;
  rc=le_get_timers(c->backend,&list);
  if(rc!=LE_OK){if(rc!=LE_NOT_SUPPORTED){err(r,503,rc,"Timer service could not be read");return;}memset(&list,0,sizeof(list));}
  written=snprintf(body,sizeof(body),"{\"available\":%s,\"ringing\":%d,\"missed\":%d,\"timers\":[",list.available?"true":"false",list.ringing,list.missed);
@@ -2246,7 +3002,12 @@ static void timers_json(struct api_context*c,struct api_response*r){
  used=(size_t)written;
  for(i=0;i<list.count;i++){
   json_escape(escaped,sizeof(escaped),list.items[i].label);
-  written=snprintf(body+used,sizeof(body)-used,"%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\",\"seconds_remaining\":%ld,\"label\":\"%s\"}",i?",":"",list.items[i].id,list.items[i].kind,list.items[i].state,list.items[i].seconds_remaining,escaped);
+  /* An alarm also carries its local HH:MM, from the device zone, so the page never has to guess. */
+  timefield[0]='\0';
+  if(!strcmp(list.items[i].kind,"alarm")){time_t due=(time_t)((long long)time(NULL)+list.items[i].seconds_remaining);struct tm*lt=localtime(&due);if(lt)snprintf(timefield,sizeof(timefield),",\"time\":\"%02d:%02d\"",lt->tm_hour,lt->tm_min);}
+  /* A reminder reports the time and days it was set for; it is not an alarm, so it never rings. */
+  if(!strcmp(list.items[i].kind,"reminder")&&list.items[i].hour>=0&&list.items[i].minute>=0){char days_text[48];alarm_days_text(list.items[i].repeat_days,days_text,sizeof(days_text));snprintf(timefield,sizeof(timefield),",\"time\":\"%02d:%02d\",\"days\":\"%s\"",list.items[i].hour,list.items[i].minute,days_text);}
+  written=snprintf(body+used,sizeof(body)-used,"%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\",\"seconds_remaining\":%ld,\"label\":\"%s\"%s}",i?",":"",list.items[i].id,list.items[i].kind,list.items[i].state,list.items[i].seconds_remaining,escaped,timefield);
   if(written<0||(size_t)written>=sizeof(body)-used){err(r,500,LE_IO,"Timer list could not be rendered");return;}
   used+=(size_t)written;}
  written=snprintf(body+used,sizeof(body)-used,"]}");
@@ -2267,12 +3028,115 @@ static int history_id_valid(const char*s){size_t i,n;if(!s||!s[0])return 0;n=str
    material; the token comes only from POST /api/v1/sendspin/pairing, which the
    security gate already limits to an authenticated, CSRF-checked request. */
 static const char*sendspin_state_name(const struct le_sendspin_state*s){if(!s->installed)return"unavailable";if(!s->enabled)return"disabled";if(!s->running||!s->listening)return"starting";if(!s->connected)return"waiting";return s->streaming&&s->time_synced?"playing":"connected";}
-static void sendspin_status_json(struct api_context*c,struct api_response*r){struct le_sendspin_state s;char server[160],volume[16];int rc=le_get_sendspin_state(c->backend,&s);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"Sendspin status is unavailable");return;}json_escape(server,sizeof(server),s.server);if(s.running)snprintf(volume,sizeof(volume),"%d",s.volume);else strcpy(volume,"null");out(r,200,"{\"ok\":true,\"data\":{\"installed\":%s,\"enabled\":%s,\"running\":%s,\"state\":\"%s\",\"listening\":%s,\"discoverable\":%s,\"connected\":%s,\"paired\":%s,\"streaming\":%s,\"time_synced\":%s,\"volume\":%s,\"muted\":%s,\"server\":%s%s%s},\"error\":null}",s.installed?"true":"false",(c->integrations&64u)?"true":"false",s.running?"true":"false",sendspin_state_name(&s),s.listening?"true":"false",s.discoverable?"true":"false",s.connected?"true":"false",s.paired?"true":"false",s.streaming?"true":"false",s.time_synced?"true":"false",volume,s.muted?"true":"false",s.server[0]?"\"":"null",s.server[0]?server:"",s.server[0]?"\"":"");}
+static void sendspin_status_json(struct api_context*c,struct api_response*r){struct le_sendspin_state s;char server[160],volume[16];int rc=le_get_sendspin_state(c->backend,&s);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"Sendspin status is unavailable");return;}json_escape(server,sizeof(server),s.server);if(s.running)snprintf(volume,sizeof(volume),"%d",s.volume);else strcpy(volume,"null");out(r,200,"{\"ok\":true,\"data\":{\"installed\":%s,\"enabled\":%s,\"running\":%s,\"state\":\"%s\",\"listening\":%s,\"discoverable\":%s,\"connected\":%s,\"paired\":%s,\"streaming\":%s,\"time_synced\":%s,\"volume\":%s,\"muted\":%s,\"unpaired_access\":%s,\"server\":%s%s%s},\"error\":null}",s.installed?"true":"false",(c->integrations&64u)?"true":"false",s.running?"true":"false",sendspin_state_name(&s),s.listening?"true":"false",s.discoverable?"true":"false",s.connected?"true":"false",s.paired?"true":"false",s.streaming?"true":"false",s.time_synced?"true":"false",volume,s.muted?"true":"false",s.unpaired_access?"true":"false",s.server[0]?"\"":"null",s.server[0]?server:"",s.server[0]?"\"":"");}
+/* Owner's "play without pairing" switch, off by default. The supervisor stores it and restarts the player to apply it. */
+static void sendspin_unpaired_json(struct api_context*c,struct api_response*r,const struct api_request*q){int v=0;if(json_get_bool(q->body,"enabled",&v)<=0){err(r,400,LE_INVALID,"enabled must be true or false");return;}if(le_set_sendspin_unpaired(c->backend,v?1:0)){err(r,503,LE_IO,"Sendspin setting could not be saved");return;}api_log(c,"warning",v?"Sendspin play without pairing enabled":"Sendspin play without pairing disabled");ok(r,v?"{\"unpaired_access\":true}":"{\"unpaired_access\":false}");}
 /* Forget every paired server (allowed while disabled: it only clears state). */
 static void sendspin_unpair_json(struct api_context*c,struct api_response*r){int rc=le_sendspin_reset_pairing(c->backend);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"Sendspin pairing could not be reset");return;}api_log(c,"info","Sendspin paired servers forgotten");ok(r,"{\"reset\":true}");}
 static void sendspin_pairing_json(struct api_context*c,struct api_response*r){char token[160],escaped[200];int rc;if(!(c->integrations&64u)){err(r,409,LE_BUSY,"Enable Sendspin before pairing");return;}rc=le_sendspin_pairing_token(c->backend,token,sizeof(token));if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"The Sendspin player is not ready to pair");return;}json_escape(escaped,sizeof(escaped),token);memset(token,0,sizeof(token));out(r,200,"{\"ok\":true,\"data\":{\"pairing_token\":\"%s\"},\"error\":null}",escaped);memset(escaped,0,sizeof(escaped));}
 static int sendspin_installed(struct api_context*c){struct le_sendspin_state s;return le_get_sendspin_state(c->backend,&s)==LE_OK&&s.installed;}
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if(!strcmp(p,"/api/v1/setup/vendor-import-force-next-boot")){if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;setup_force_next_boot(c,q,r);return;}if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/spotify")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/light")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations/radio/play")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio/stop")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/storage/usb/play")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/storage/usb",19)&&(p[19]==0||p[19]=='?')&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/audio/sample")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/audio/noise")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE"))){method_not_allowed(r);return;}if((!strcmp(p,"/api/v1/timers")&&(strcmp(q->method,"GET")&&strcmp(q->method,"POST")))||(!strcmp(p,"/api/v1/timers/dismiss")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/timers/",15)&&strcmp(p,"/api/v1/timers/dismiss")&&strcmp(q->method,"DELETE"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(persist_auth_sessions(c)&&(le_auth_save_persisted_sessions(&c->auth,c->sessions_path)!=0)){err(r,503,LE_IO,"The session could not be saved after logout");return;}}ok(r,"{\"logged_out\":true}");return;}
+/*
+ * Voice clips: owner-enabled wake near-miss audio kept by voice_clip_store under
+ * /data. Listing and settings are JSON envelopes. A clip is served as its own
+ * audio/wav body, the one exception to the JSON envelope, and is bounded by
+ * LE_VOICE_CLIP_MAX_BYTES, well inside the response buffer.
+ */
+static void voice_clips_list(struct api_response*r){
+    static struct le_voice_clip_entry entries[LE_VOICE_CLIP_LIST_MAX];
+    struct le_voice_clip_settings settings;
+    char data[8192];
+    const char *directory = le_voice_clip_directory();
+    unsigned total = 0;
+    int listed, start, i;
+    size_t used;
+    int first = 1;
+
+    listed = le_voice_clip_list(directory, entries, LE_VOICE_CLIP_LIST_MAX, &total);
+    if (listed < 0) { err(r, 500, LE_IO, "Voice clips could not be read"); return; }
+    (void)le_voice_clip_settings_load(directory, &settings);
+    used = (size_t)snprintf(data, sizeof(data),
+        "{\"near_miss_enabled\":%s,\"count\":%d,\"bytes\":%u,"
+        "\"limits\":{\"max_count\":%u,\"max_bytes\":%u,\"max_samples\":%u,\"sample_rate\":%u},"
+        "\"clips\":[",
+        settings.near_miss_enabled ? "true" : "false", listed, total,
+        LE_VOICE_CLIP_MAX_COUNT, LE_VOICE_CLIP_MAX_BYTES,
+        LE_VOICE_CLIP_MAX_SAMPLES, LE_VOICE_CLIP_SAMPLE_RATE);
+    /* Newest first, at most the store's own bound. */
+    start = listed > (int)LE_VOICE_CLIP_MAX_COUNT ? listed - (int)LE_VOICE_CLIP_MAX_COUNT : 0;
+    for (i = listed - 1; i >= start; --i) {
+        int written = snprintf(data + used, sizeof(data) - used,
+            "%s{\"id\":\"%s\",\"kind\":\"%s\",\"created\":%lld,\"bytes\":%lu}",
+            first ? "" : ",", entries[i].id, entries[i].kind,
+            entries[i].created, entries[i].bytes);
+        if (written < 0 || (size_t)written >= sizeof(data) - used - 3U) {
+            err(r, 500, LE_IO, "Voice clip list is too large to show");
+            return;
+        }
+        used += (size_t)written;
+        first = 0;
+    }
+    strcpy(data + used, "]}");
+    ok(r, data);
+}
+
+static void voice_clips_settings(const struct api_request*q, struct api_response*r){
+    struct le_voice_clip_settings settings;
+    int enabled = 0, found;
+
+    if (!body_ok(q, r)) return;
+    found = json_get_bool(q->body, "near_miss_enabled", &enabled);
+    if (found <= 0) { err(r, 400, LE_INVALID, "near_miss_enabled must be true or false"); return; }
+    settings.near_miss_enabled = enabled ? 1 : 0;
+    if (le_voice_clip_settings_save(le_voice_clip_directory(), &settings) != 0) {
+        err(r, 500, LE_IO, "Voice clip settings could not be saved");
+        return;
+    }
+    ok(r, settings.near_miss_enabled ? "{\"near_miss_enabled\":true}" : "{\"near_miss_enabled\":false}");
+}
+
+static void voice_clip_download(struct api_response*r, const char*id){
+    char path[512];
+    FILE *file;
+    size_t n;
+
+    if (le_voice_clip_path(le_voice_clip_directory(), id, path, sizeof(path)) != 0) {
+        err(r, 404, LE_INVALID, "Voice clip was not found");
+        return;
+    }
+    file = fopen(path, "rb");
+    if (!file) { err(r, 404, LE_INVALID, "Voice clip was not found"); return; }
+    n = fread(r->body, 1, LE_API_RESPONSE_BYTES, file);
+    if (!feof(file) || ferror(file)) {
+        fclose(file);
+        err(r, 500, LE_IO, "Voice clip is larger than the download limit");
+        return;
+    }
+    fclose(file);
+    r->status = 200;
+    strcpy(r->type, "audio/wav");
+    r->length = n;
+}
+
+static void voice_clip_delete_route(struct api_response*r, const char*id){
+    int removed;
+
+    if (!le_voice_clip_id_valid(id)) { err(r, 400, LE_INVALID, "Voice clip id is invalid"); return; }
+    removed = le_voice_clip_delete(le_voice_clip_directory(), id);
+    if (removed < 0) { err(r, 500, LE_IO, "Voice clip could not be deleted"); return; }
+    if (removed == 0) { err(r, 404, LE_INVALID, "Voice clip was not found"); return; }
+    ok(r, "{\"deleted\":true}");
+}
+
+static void voice_clips_clear_route(struct api_response*r){
+    char data[32];
+    int removed = le_voice_clip_clear(le_voice_clip_directory());
+
+    if (removed < 0) { err(r, 500, LE_IO, "Voice clips could not be cleared"); return; }
+    snprintf(data, sizeof(data), "{\"removed\":%d}", removed);
+    ok(r, data);
+}
+
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){const char*p=q->path;int rc=LE_OK,v;if(!security(c,q,r))return;if(!strcmp(p,"/api/v1/setup/vendor-import-force-next-boot")){if(changing(q->method)&&q->body_len&&!body_ok(q,r))return;setup_force_next_boot(c,q,r);return;}if((!strcmp(p,"/api/v1/buttons")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/privacy")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/spotify")&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/light")&&strcmp(q->method,"GET"))||(!strncmp(p,"/api/v1/integrations/",21)&&strncmp(p,"/api/v1/integrations/radio",26)&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/integrations/radio/play")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio/stop")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/integrations/radio")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))||(!strcmp(p,"/api/v1/storage/usb/play")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/storage/usb",19)&&(p[19]==0||p[19]=='?')&&strcmp(q->method,"GET"))||(!strcmp(p,"/api/v1/audio/sample")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/audio/noise")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE"))){method_not_allowed(r);return;}if((!strcmp(p,"/api/v1/alarms")&&strcmp(q->method,"GET")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/alarms/",15)&&strcmp(p,"/api/v1/alarms/snooze")&&strcmp(p,"/api/v1/alarms/sunrise")&&strcmp(q->method,"DELETE"))||(!strcmp(p,"/api/v1/alarms/snooze")&&strcmp(q->method,"POST"))||(!strcmp(p,"/api/v1/alarms/sunrise")&&strcmp(q->method,"GET")&&strcmp(q->method,"PUT"))){method_not_allowed(r);return;}if((!strcmp(p,"/api/v1/timers")&&(strcmp(q->method,"GET")&&strcmp(q->method,"POST")))||(!strcmp(p,"/api/v1/timers/dismiss")&&strcmp(q->method,"POST"))||(!strncmp(p,"/api/v1/timers/",15)&&strcmp(p,"/api/v1/timers/dismiss")&&strcmp(q->method,"DELETE"))){method_not_allowed(r);return;}if(changing(q->method)&&q->body_len&&!peer_command_path(q)&&!body_ok(q,r))return;if(!strcmp(p,"/api/v1/auth/bootstrap")&&!strcmp(q->method,"POST")){auth_bootstrap_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/login")&&!strcmp(q->method,"POST")){auth_login_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"GET")){auth_users_json(c,r);return;}if(!strcmp(p,"/api/v1/auth/users")&& !strcmp(q->method,"POST")){auth_add_user_json(c,q,r);return;}if(!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/"))&& !strcmp(q->method,"DELETE")){auth_remove_user_json(c,q,r);return;}if((!strcmp(p,"/api/v1/auth/users")||!strncmp(p,"/api/v1/auth/users/",strlen("/api/v1/auth/users/")))&&strcmp(q->method,"GET")&&strcmp(q->method,"POST")&&strcmp(q->method,"DELETE")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/auth")&&!strcmp(q->method,"GET")){auth_current_json(c,q,r);return;}if(!strcmp(p,"/api/v1/auth/logout")&&!strcmp(q->method,"POST")){if(!strncmp(q->authorization,"Bearer ",7)){le_auth_logout(&c->auth,q->authorization+7);if(persist_auth_sessions(c)&&(le_auth_save_persisted_sessions(&c->auth,c->sessions_path)!=0)){err(r,503,LE_IO,"The session could not be saved after logout");return;}}ok(r,"{\"logged_out\":true}");return;}
  if(!strcmp(p,"/api/v1/config/export")&&!strcmp(q->method,"GET")){char config[4096];rc=configuration_json(c,config,sizeof(config));if(rc)err(r,501,rc,"Configuration export is unavailable for this backend");else ok(r,config);return;}if(!strcmp(p,"/api/v1/config/import")&&!strcmp(q->method,"POST")){rc=import_configuration(c,q->body,q->body_len);if(rc)err(r,rc==LE_INVALID?400:501,rc,rc==LE_INVALID?"Configuration file is invalid or incomplete":"Configuration restore is unavailable for this backend");else{api_log(c,"warning","Configuration restored from uploaded JSON");ok(r,"{\"restored\":true,\"schema_version\":1}");}return;}
  if(!strcmp(p,"/api/v1/live")){if(!strcmp(q->method,"GET")){live_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){int enabled;if(json_duplicate_key(q->body,q->body_len,"enabled")||json_get_top_level_bool(q->body,q->body_len,"enabled",&enabled)!=1){err(r,400,LE_INVALID,"enabled must be a single top-level boolean");return;}live_result(r,"set_enabled",enabled?"{\"enabled\":true}":"{\"enabled\":false}");return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/assistant")){if(!strcmp(q->method,"GET")){agent_result(r,"status",NULL);return;}if(!strcmp(q->method,"PUT")){agent_result(r,"configure",q->body);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/assistant/history/clear")){if(!strcmp(q->method,"POST")){agent_result(r,"history_clear",NULL);return;}method_not_allowed(r);return;}
@@ -2291,12 +3155,12 @@ void api_handle(struct api_context*c,const struct api_request*q,struct api_respo
  if(!strcmp(p,"/api/v1/assistant/auth/poll")&&!strcmp(q->method,"POST")){agent_result(r,"auth_poll",NULL);return;}
  if(!strcmp(p,"/api/v1/assistant/logout")&&!strcmp(q->method,"POST")){agent_result(r,"logout",NULL);return;}
  if(!strcmp(p,"/api/v1/assistant/respond")&&!strcmp(q->method,"POST")){agent_result(r,"respond",q->body);return;}
- if((!strcmp(p,"/api/v1")||!strcmp(p,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(p,"/api/v1/status")&&!strcmp(q->method,"GET")){status_json(c,r);return;}if(!strcmp(p,"/api/v1/playback")){if(!strcmp(q->method,"GET")){playback_json(c,r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/playback/transport")){if(!strcmp(q->method,"POST")){playback_transport(c,q,r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"GET")){timers_json(c,r);return;}if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"POST")){int seconds_result,label_result;long long seconds=0;char label[48]="";unsigned id=0;if(json_duplicate_key(q->body,q->body_len,"seconds")||json_duplicate_key(q->body,q->body_len,"label")){err(r,400,LE_INVALID,"Timer fields must not be duplicated");return;}if((seconds_result=json_get_int64_top_level(q->body,"seconds",&seconds))!=1||seconds<LE_TIMER_MIN_SECONDS||seconds>LE_TIMER_MAX_SECONDS){err(r,400,LE_INVALID,"Seconds is required or out of range");return;}label_result=json_get_string_top_level(q->body,"label",label,sizeof(label));if(label_result<0||!valid_utf8(label,strlen(label))){err(r,400,LE_INVALID,"Timer label is invalid or too long");return;}rc=le_add_timer(c->backend,seconds,label,&id);if(rc==LE_INVALID){err(r,400,LE_INVALID,"Timer length is out of range");return;}if(rc==LE_BUSY){err(r,409,LE_BUSY,"Timer capacity is full");return;}if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}out(r,201,"{\"ok\":true,\"data\":{\"id\":%u},\"error\":null}",id);return;}if(!strcmp(p,"/api/v1/timers/dismiss")&&!strcmp(q->method,"POST")){int stopped=0;rc=le_dismiss_timers(c->backend,&stopped);if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"dismissed\":%d},\"error\":null}",stopped);return;}if(!strncmp(p,"/api/v1/timers/",15)&&!strcmp(q->method,"DELETE")){unsigned id;if(!timer_id_from_path(p,&id)){err(r,404,LE_INVALID,"Timer was not found");return;}rc=le_cancel_timer(c->backend,id);if(rc==LE_INVALID){err(r,404,LE_INVALID,"Timer was not found");return;}if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}ok(r,"{\"cancelled\":true}");return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"GET")){device_json(c,r);return;}if(!strcmp(p,"/api/v1/ui/preferences")){if(!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",c->ui_theme,c->color_mode);return;}if(!strcmp(q->method,"PUT")){struct json_member m[4];size_t count=0,k;char theme[16],mode[16],old_theme[sizeof(c->ui_theme)],old_mode[sizeof(c->color_mode)];int tf,mf;if(json_object_members(q->body,q->body_len,m,4,&count)||!count){err(r,400,LE_INVALID,"Send ui_theme and/or color_mode");return;}for(k=0;k<count;k++)if(!member_is(&m[k],"ui_theme")&&!member_is(&m[k],"color_mode")){err(r,400,LE_INVALID,"Only ui_theme and color_mode can be set");return;}if(json_duplicate_key(q->body,q->body_len,"ui_theme")||json_duplicate_key(q->body,q->body_len,"color_mode")){err(r,400,LE_INVALID,"Duplicate preference");return;}tf=json_get_string_top_level(q->body,"ui_theme",theme,sizeof(theme));mf=json_get_string_top_level(q->body,"color_mode",mode,sizeof(mode));if(tf<0||mf<0||(tf>0&&!ui_theme_valid(theme))||(mf>0&&mode[0]&&!color_mode_valid(mode))){err(r,400,LE_INVALID,"ui_theme must be classic or setup and color_mode dark, light or empty");return;}strcpy(old_theme,c->ui_theme);strcpy(old_mode,c->color_mode);if(tf>0)strcpy(c->ui_theme,theme);if(mf>0)strcpy(c->color_mode,mode);if(persist_configuration(c)){strcpy(c->ui_theme,old_theme);strcpy(c->color_mode,old_mode);err(r,500,LE_IO,"Appearance could not be saved");return;}out(r,200,"{\"ok\":true,\"data\":{\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",c->ui_theme,c->color_mode);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/local-services")){if(!strcmp(q->method,"GET")){local_services_json(r);return;}if(!strcmp(q->method,"PUT")){int on;if(json_duplicate_key(q->body,q->body_len,"enabled")||json_get_top_level_bool(q->body,q->body_len,"enabled",&on)!=1){err(r,400,LE_INVALID,"enabled must be a single top-level boolean");return;}rc=local_services_set(on);if(rc==LE_BUSY){err(r,409,LE_BUSY,"/data/libreecho/local is not a plain directory; fix it over USB ADB first");return;}if(rc){err(r,500,LE_IO,"Local services could not be switched");return;}api_log(c,"info",on?"Local services enabled":"Local services disabled");local_services_json(r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"PUT")){char room[64],previous[sizeof(c->room)];int rf=json_get_string(q->body,"room",room,sizeof(room));if(rf==0){err(r,400,LE_INVALID,"room is required");return;}if(rf<0||!room_valid(room)){err(r,400,LE_INVALID,"room must be at most 48 bytes on one line, without quotes or backslashes");return;}snprintf(previous,sizeof(previous),"%s",c->room);snprintf(c->room,sizeof(c->room),"%s",room);if(persist_configuration(c)){snprintf(c->room,sizeof(c->room),"%s",previous);err(r,500,LE_IO,"Room could not be saved");return;}api_log(c,"info",room[0]?"Device room updated":"Device room cleared");event_bus_publish(&c->events,"device","{\"changed\":true}");device_json(c,r);return;}if(!strcmp(p,"/api/v1/news")){if(!strcmp(q->method,"GET")){news_json(c,r);return;}if(!strcmp(q->method,"PUT")){int on,old=c->news_enabled;if(json_duplicate_key(q->body,q->body_len,"enabled")||json_get_top_level_bool(q->body,q->body_len,"enabled",&on)!=1){err(r,400,LE_INVALID,"enabled must be a single top-level boolean");return;}c->news_enabled=on;if(persist_configuration(c)){c->news_enabled=old;err(r,500,LE_IO,"News setting could not be saved");return;}if(!on)news_clear();api_log(c,"info",on?"LibreEcho News turned on":"LibreEcho News turned off");news_json(c,r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/news/refresh")){struct news_status st;long long now=(long long)time(NULL);if(strcmp(q->method,"POST")){method_not_allowed(r);return;}if(!c->news_enabled){err(r,409,LE_BUSY,"LibreEcho News is turned off");return;}if(!news_supported()){err(r,501,LE_NOT_SUPPORTED,"This image cannot fetch news");return;}news_status_read(&st);if(news_refreshing(&st,now)||(st.attempt&&now-st.attempt<LE_NEWS_MANUAL)){err(r,429,LE_BUSY,"News was refreshed recently; try again in a few minutes");return;}if(news_start_refresh()){err(r,503,LE_IO,"News refresh could not start");return;}out(r,202,"{\"ok\":true,\"data\":{\"refreshing\":true},\"error\":null}");return;}if(!strcmp(p,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->ui_theme,c->color_mode);return;}
- if(!strcmp(p,"/api/v1/audio")){if(!strcmp(q->method,"GET")){audio_json(c,r);return;}if(!strcmp(q->method,"PUT")){char voice[32];if(json_get_int(q->body,"volume",&v)>0)rc=le_set_volume(c->backend,v);if(!rc&&json_get_int(q->body,"microphone_gain",&v)>0)rc=le_set_microphone_gain(c->backend,v);if(!rc&&json_get_bool(q->body,"microphone_muted",&v)>0)rc=le_set_microphone_muted(c->backend,v);if(!rc&&json_get_string(q->body,"tts_voice",voice,sizeof(voice))>0)rc=le_set_tts_voice(c->backend,voice);if(!rc){int lv=json_get_bool(q->body,"volume_leveling",&v);if(lv<0){err(r,400,LE_INVALID,"volume_leveling must be boolean");return;}if(lv>0)rc=le_set_volume_leveling(c->backend,v);}if(rc){err(r,rc==LE_INVALID?400:501,rc,"Audio setting could not be applied");return;}api_log(c,"info","Audio settings updated");event_bus_publish(&c->events,"audio","{\"changed\":true}");audio_json(c,r);return;}}
+ if((!strcmp(p,"/api/v1")||!strcmp(p,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(p,"/api/v1/status")&&!strcmp(q->method,"GET")){status_json(c,r);return;}if(!strcmp(p,"/api/v1/playback")){if(!strcmp(q->method,"GET")){playback_json(c,r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/playback/transport")){if(!strcmp(q->method,"POST")){playback_transport(c,q,r);return;}method_not_allowed(r);return;}if(sounds_handle(c,q,r))return;if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"GET")){timers_json(c,r);return;}if(!strcmp(p,"/api/v1/timers")&&!strcmp(q->method,"POST")){int seconds_result,label_result;long long seconds=0;char label[48]="";unsigned id=0;if(json_duplicate_key(q->body,q->body_len,"seconds")||json_duplicate_key(q->body,q->body_len,"label")){err(r,400,LE_INVALID,"Timer fields must not be duplicated");return;}if((seconds_result=json_get_int64_top_level(q->body,"seconds",&seconds))!=1||seconds<LE_TIMER_MIN_SECONDS||seconds>LE_TIMER_MAX_SECONDS){err(r,400,LE_INVALID,"Seconds is required or out of range");return;}label_result=json_get_string_top_level(q->body,"label",label,sizeof(label));if(label_result<0||!valid_utf8(label,strlen(label))){err(r,400,LE_INVALID,"Timer label is invalid or too long");return;}rc=le_add_timer(c->backend,seconds,label,&id);if(rc==LE_INVALID){err(r,400,LE_INVALID,"Timer length is out of range");return;}if(rc==LE_BUSY){err(r,409,LE_BUSY,"Timer capacity is full");return;}if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}out(r,201,"{\"ok\":true,\"data\":{\"id\":%u},\"error\":null}",id);return;}if(!strcmp(p,"/api/v1/timers/dismiss")&&!strcmp(q->method,"POST")){int stopped=0;rc=le_dismiss_timers(c->backend,&stopped);if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"dismissed\":%d},\"error\":null}",stopped);return;}if(!strncmp(p,"/api/v1/timers/",15)&&!strcmp(q->method,"DELETE")){unsigned id;if(!timer_id_from_path(p,&id)){err(r,404,LE_INVALID,"Timer was not found");return;}rc=le_cancel_timer(c->backend,id);if(rc==LE_INVALID){err(r,404,LE_INVALID,"Timer was not found");return;}if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}ok(r,"{\"cancelled\":true}");return;}if(!strcmp(p,"/api/v1/reminders")&&!strcmp(q->method,"POST")){reminder_create_json(c,q,r);return;}if(!strcmp(p,"/api/v1/reminders")){method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/alarms")&&!strcmp(q->method,"GET")){alarms_json(c,r);return;}if(!strcmp(p,"/api/v1/alarms")&&!strcmp(q->method,"POST")){alarm_create_json(c,q,r);return;}if(!strcmp(p,"/api/v1/alarms/sunrise")&&!strcmp(q->method,"GET")){int lead=0;rc=le_get_alarm_sunrise(c->backend,&lead);if(rc!=LE_OK){err(r,503,rc,"Alarm service is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"lead_minutes\":%d},\"error\":null}",lead);return;}if(!strcmp(p,"/api/v1/alarms/sunrise")&&!strcmp(q->method,"PUT")){long long lead=0;if(json_duplicate_key(q->body,q->body_len,"lead_minutes")||json_get_int64_top_level(q->body,"lead_minutes",&lead)!=1||(lead!=0&&(lead<5||lead>30))){err(r,400,LE_INVALID,"lead_minutes must be 0 (off) or from 5 to 30");return;}rc=le_set_alarm_sunrise(c->backend,(int)lead);if(rc==LE_INVALID){err(r,400,LE_INVALID,"lead_minutes must be 0 (off) or from 5 to 30");return;}if(rc!=LE_OK){err(r,503,rc,"Alarm service is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"lead_minutes\":%d},\"error\":null}",(int)lead);return;}if(!strcmp(p,"/api/v1/alarms/snooze")&&!strcmp(q->method,"POST")){int snoozed=0;rc=le_snooze_timers(c->backend,&snoozed);if(rc!=LE_OK){err(r,503,rc,"Timer service is unavailable");return;}out(r,200,"{\"ok\":true,\"data\":{\"snoozed\":%d},\"error\":null}",snoozed);return;}if(!strncmp(p,"/api/v1/alarms/",15)&&!strcmp(q->method,"DELETE")){alarm_cancel_json(c,p,r);return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"GET")){device_json(c,r);return;}if(!strcmp(p,"/api/v1/ui/preferences")){if(!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",c->ui_theme,c->color_mode);return;}if(!strcmp(q->method,"PUT")){struct json_member m[4];size_t count=0,k;char theme[16],mode[16],old_theme[sizeof(c->ui_theme)],old_mode[sizeof(c->color_mode)];int tf,mf;if(json_object_members(q->body,q->body_len,m,4,&count)||!count){err(r,400,LE_INVALID,"Send ui_theme and/or color_mode");return;}for(k=0;k<count;k++)if(!member_is(&m[k],"ui_theme")&&!member_is(&m[k],"color_mode")){err(r,400,LE_INVALID,"Only ui_theme and color_mode can be set");return;}if(json_duplicate_key(q->body,q->body_len,"ui_theme")||json_duplicate_key(q->body,q->body_len,"color_mode")){err(r,400,LE_INVALID,"Duplicate preference");return;}tf=json_get_string_top_level(q->body,"ui_theme",theme,sizeof(theme));mf=json_get_string_top_level(q->body,"color_mode",mode,sizeof(mode));if(tf<0||mf<0||(tf>0&&!ui_theme_valid(theme))||(mf>0&&mode[0]&&!color_mode_valid(mode))){err(r,400,LE_INVALID,"ui_theme must be classic or setup and color_mode dark, light or empty");return;}strcpy(old_theme,c->ui_theme);strcpy(old_mode,c->color_mode);if(tf>0)strcpy(c->ui_theme,theme);if(mf>0)strcpy(c->color_mode,mode);if(persist_configuration(c)){strcpy(c->ui_theme,old_theme);strcpy(c->color_mode,old_mode);err(r,500,LE_IO,"Appearance could not be saved");return;}out(r,200,"{\"ok\":true,\"data\":{\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",c->ui_theme,c->color_mode);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/local-services")){if(!strcmp(q->method,"GET")){local_services_json(r);return;}if(!strcmp(q->method,"PUT")){int on;if(json_duplicate_key(q->body,q->body_len,"enabled")||json_get_top_level_bool(q->body,q->body_len,"enabled",&on)!=1){err(r,400,LE_INVALID,"enabled must be a single top-level boolean");return;}rc=local_services_set(on);if(rc==LE_BUSY){err(r,409,LE_BUSY,"/data/libreecho/local is not a plain directory; fix it over USB ADB first");return;}if(rc){err(r,500,LE_IO,"Local services could not be switched");return;}api_log(c,"info",on?"Local services enabled":"Local services disabled");local_services_json(r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/device")&&!strcmp(q->method,"PUT")){char room[64],previous[sizeof(c->room)];int rf=json_get_string(q->body,"room",room,sizeof(room));if(rf==0){err(r,400,LE_INVALID,"room is required");return;}if(rf<0||!room_valid(room)){err(r,400,LE_INVALID,"room must be at most 48 bytes on one line, without quotes or backslashes");return;}snprintf(previous,sizeof(previous),"%s",c->room);snprintf(c->room,sizeof(c->room),"%s",room);if(persist_configuration(c)){snprintf(c->room,sizeof(c->room),"%s",previous);err(r,500,LE_IO,"Room could not be saved");return;}api_log(c,"info",room[0]?"Device room updated":"Device room cleared");event_bus_publish(&c->events,"device","{\"changed\":true}");device_json(c,r);return;}if(!strcmp(p,"/api/v1/news")){if(!strcmp(q->method,"GET")){news_json(c,r);return;}if(!strcmp(q->method,"PUT")){int on,old=c->news_enabled;if(json_duplicate_key(q->body,q->body_len,"enabled")||json_get_top_level_bool(q->body,q->body_len,"enabled",&on)!=1){err(r,400,LE_INVALID,"enabled must be a single top-level boolean");return;}c->news_enabled=on;if(persist_configuration(c)){c->news_enabled=old;err(r,500,LE_IO,"News setting could not be saved");return;}if(!on)news_clear();api_log(c,"info",on?"LibreEcho News turned on":"LibreEcho News turned off");news_json(c,r);return;}method_not_allowed(r);return;}if(!strcmp(p,"/api/v1/news/refresh")){struct news_status st;long long now=(long long)time(NULL);if(strcmp(q->method,"POST")){method_not_allowed(r);return;}if(!c->news_enabled){err(r,409,LE_BUSY,"LibreEcho News is turned off");return;}if(!news_supported()){err(r,501,LE_NOT_SUPPORTED,"This image cannot fetch news");return;}news_status_read(&st);if(news_refreshing(&st,now)||(st.attempt&&now-st.attempt<LE_NEWS_MANUAL)){err(r,429,LE_BUSY,"News was refreshed recently; try again in a few minutes");return;}if(news_start_refresh()){err(r,503,LE_IO,"News refresh could not start");return;}out(r,202,"{\"ok\":true,\"data\":{\"refreshing\":true},\"error\":null}");return;}if(!strcmp(p,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->ui_theme,c->color_mode);return;}
+ if(!strcmp(p,"/api/v1/audio")){if(!strcmp(q->method,"GET")){audio_json(c,r);return;}if(!strcmp(q->method,"PUT")){char voice[32],mix[16];/* Separate reply volume (#409): reply_volume sets the level; reply_volume_custom:false follows the master again. Validated strictly (integer 0-100, no fraction) before any setting is applied. */long long reply_level=0;int reply_custom=1,rv=json_get_int64_top_level(q->body,"reply_volume",&reply_level),rc2=json_get_bool(q->body,"reply_volume_custom",&reply_custom);if(rc2<0||(rc2>0&&reply_custom&&rv<=0)){err(r,400,LE_INVALID,"reply_volume_custom must be false, or true with reply_volume");return;}if(rv<0||(rv>0&&(reply_level<0||reply_level>100))){err(r,400,LE_INVALID,"reply_volume must be an integer 0-100");return;}if(json_get_int(q->body,"volume",&v)>0)rc=le_set_volume(c->backend,v);if(!rc&&json_get_int(q->body,"microphone_gain",&v)>0)rc=le_set_microphone_gain(c->backend,v);if(!rc&&json_get_bool(q->body,"microphone_muted",&v)>0)rc=le_set_microphone_muted(c->backend,v);if(!rc&&json_get_string(q->body,"tts_voice",voice,sizeof(voice))>0)rc=le_set_tts_voice(c->backend,voice);if(!rc&&json_get_string(q->body,"microphone_mix",mix,sizeof(mix))>0)rc=le_set_microphone_mix(c->backend,mix);if(!rc&&json_get_int(q->body,"microphone_lane",&v)>0)rc=le_set_microphone_lane(c->backend,v);if(!rc){int lv=json_get_bool(q->body,"volume_leveling",&v);if(lv<0){err(r,400,LE_INVALID,"volume_leveling must be boolean");return;}if(lv>0)rc=le_set_volume_leveling(c->backend,v);}if(!rc){if(rc2>0&&!reply_custom)rc=le_set_reply_volume(c->backend,0,0);else if(rv>0)rc=le_set_reply_volume(c->backend,1,(int)reply_level);}if(rc){err(r,rc==LE_INVALID?400:501,rc,"Audio setting could not be applied");return;}api_log(c,"info","Audio settings updated");event_bus_publish(&c->events,"audio","{\"changed\":true}");audio_json(c,r);return;}}
  if(!strcmp(p,"/api/v1/baby-monitor")&&!strcmp(q->method,"GET")){baby_monitor_json(c,r);return;}
  if(!strcmp(p,"/api/v1/microphones/beams")&&!strcmp(q->method,"GET")){microphone_beams_json(c,r);return;}
  if(!strcmp(p,"/api/v1/bluetooth/pairing-mode")&&!strcmp(q->method,"POST")){int enabled=1;if(json_get_bool(q->body,"enabled",&enabled)<1)enabled=1;rc=le_bluetooth_set_pairing_mode(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth pairing mode could not be changed");return;}api_log(c,"info",enabled?"Bluetooth pairing mode enabled":"Bluetooth pairing mode disabled");bluetooth_json(c,r);return;}
- if(!strcmp(p,"/api/v1/bluetooth")){if(!strcmp(q->method,"GET")){bluetooth_json(c,r);return;}if(!strcmp(q->method,"PUT")){int changed=0;if(json_get_bool(q->body,"enabled",&v)>0){rc=le_set_bluetooth_enabled(c->backend,v);changed=1;}else if(json_get_bool(q->body,"discoverable",&v)>0){rc=le_bluetooth_set_discoverable(c->backend,v);changed=1;}else if(json_get_bool(q->body,"connectable",&v)>0){rc=le_bluetooth_set_connectable(c->backend,v);changed=1;}if(!changed){err(r,400,LE_INVALID,"A Bluetooth setting is required");return;}if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth setting could not be applied");return;}bluetooth_json(c,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/bluetooth")){if(!strcmp(q->method,"GET")){bluetooth_json(c,r);return;}if(!strcmp(q->method,"PUT")){int changed=0;if(json_get_bool(q->body,"enabled",&v)>0){rc=le_set_bluetooth_enabled(c->backend,v);changed=1;/* The adapter page powers the radio here; record it in the same integration bit the Integrations card uses, so http_server saves it and main.c restores it at boot. */if(!rc){if(v)c->integrations|=8u;else c->integrations&=~8u;}}else if(json_get_bool(q->body,"discoverable",&v)>0){rc=le_bluetooth_set_discoverable(c->backend,v);changed=1;}else if(json_get_bool(q->body,"connectable",&v)>0){rc=le_bluetooth_set_connectable(c->backend,v);changed=1;}if(!changed){err(r,400,LE_INVALID,"A Bluetooth setting is required");return;}if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth setting could not be applied");return;}bluetooth_json(c,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/bluetooth/scan")&&!strcmp(q->method,"POST")){rc=le_bluetooth_scan(c->backend,1);if(rc){err(r,rc==LE_BUSY?409:501,rc,"Bluetooth discovery could not start");return;}bluetooth_json(c,r);return;}
  if(!strcmp(p,"/api/v1/bluetooth/scan/stop")&&!strcmp(q->method,"POST")){rc=le_bluetooth_scan(c->backend,0);if(rc){err(r,501,rc,"Bluetooth discovery could not stop");return;}bluetooth_json(c,r);return;}
  if((!strcmp(p,"/api/v1/bluetooth/pair")||!strcmp(p,"/api/v1/bluetooth/unpair")||!strcmp(p,"/api/v1/bluetooth/disconnect"))&&!strcmp(q->method,"POST")){char address[24];int type=0,io_capability=3;if(json_get_string(q->body,"address",address,sizeof(address))<1){err(r,400,LE_INVALID,"Bluetooth address is required");return;}json_get_int(q->body,"type",&type);if(!strcmp(p,"/api/v1/bluetooth/pair")){json_get_int(q->body,"io_capability",&io_capability);rc=le_bluetooth_pair(c->backend,address,type,io_capability);}else if(!strcmp(p,"/api/v1/bluetooth/unpair"))rc=le_bluetooth_unpair(c->backend,address,type);else rc=le_bluetooth_disconnect(c->backend,address,type);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth device operation failed");return;}bluetooth_json(c,r);return;}
@@ -2445,10 +3309,20 @@ if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_t
   rc=le_set_led_sleep(c->backend,&sr);
   if(rc){err(r,rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,"Sleep light could not be applied");return;}
   api_log(c,"info","Sleep light updated");led_json(c,r);return;}
- if(!strcmp(p,"/api/v1/system/timezone")){if(!strcmp(q->method,"PUT")){char tz[64];if(json_get_string(q->body,"timezone",tz,sizeof(tz))<1||!timezone_valid(tz)){err(r,400,LE_INVALID,"timezone must be a POSIX TZ string such as CST6CDT,M3.2.0,M11.1.0");return;}strcpy(c->timezone,tz);rc=persist_configuration(c);if(rc){err(r,503,rc,"Timezone could not be saved");return;}api_log(c,"info","Timezone updated");out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\",\"applies\":\"after restart\"},\"error\":null}",c->timezone);return;}if(!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\"},\"error\":null}",c->timezone);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/system/timezone")){if(!strcmp(q->method,"PUT")){if(timezone_put(c,q->body,r))return;rc=persist_configuration(c);timezone_put_pinned=0;if(rc){err(r,503,rc,"Timezone could not be saved");return;}api_log(c,"info","Timezone updated");out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\",\"name\":\"%s\",\"source\":\"%s\",\"applies\":\"now\"},\"error\":null}",c->timezone,c->timezone_name,c->timezone_source);return;}if(!strcmp(q->method,"GET")){timezone_sync_from_file(c);out(r,200,"{\"ok\":true,\"data\":{\"timezone\":\"%s\",\"name\":\"%s\",\"source\":\"%s\"},\"error\":null}",c->timezone,c->timezone_name,c->timezone_source);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/dnd")){if(!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"enabled\":%s},\"error\":null}",c->do_not_disturb?"true":"false");return;}if(!strcmp(q->method,"PUT")){int en;if(json_get_bool(q->body,"enabled",&en)<1){err(r,400,LE_INVALID,"enabled must be true or false");return;}rc=le_set_do_not_disturb(c->backend,en);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"Do not disturb could not be applied");return;}c->do_not_disturb=en?1:0;api_log(c,"info",en?"Do not disturb turned on":"Do not disturb turned off");out(r,200,"{\"ok\":true,\"data\":{\"enabled\":%s},\"error\":null}",c->do_not_disturb?"true":"false");return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/led/night")){if(!strcmp(q->method,"PUT")){int en,st,e2;if(json_get_bool(q->body,"enabled",&en)<1||json_get_int(q->body,"start_minute",&st)<1||json_get_int(q->body,"end_minute",&e2)<1||st<0||st>1439||e2<0||e2>1439){err(r,400,LE_INVALID,"Night mode needs enabled, start_minute and end_minute (0-1439)");return;}rc=le_set_led_night(c->backend,en,st,e2);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,"Night mode could not be applied");return;}api_log(c,"info","Night mode updated");led_json(c,r);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/led/profile")&&!strcmp(q->method,"PUT")){char name[24];struct le_led_profile profile;memset(&profile,0,sizeof(profile));if(json_get_string(q->body,"name",name,sizeof(name))<1||json_get_int(q->body,"r",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"A valid LED profile and colour are required");return;}profile.r=(uint8_t)v;if(json_get_int(q->body,"g",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"LED colour is invalid");return;}profile.g=(uint8_t)v;if(json_get_int(q->body,"b",&v)<1||v<0||v>255){err(r,400,LE_INVALID,"LED colour is invalid");return;}profile.b=(uint8_t)v;profile.brightness=100;if(json_get_int(q->body,"brightness",&v)>0){if(v<0||v>100){err(r,400,LE_INVALID,"LED brightness is invalid");return;}profile.brightness=v;}rc=le_set_led_profile(c->backend,name,&profile);if(rc){err(r,rc==LE_INVALID?400:501,rc,"LED profile could not be saved");return;}event_bus_publish(&c->events,"led","{\"changed\":true}");led_json(c,r);return;}
- if(!strcmp(p,"/api/v1/network")){if(!strcmp(q->method,"GET")){net_json(c,r);return;}if(!strcmp(q->method,"PUT")){char host[64];int changed=0;{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result>0&&m[0]&&!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}}}if(json_get_string(q->body,"hostname",host,sizeof(host))>0){rc=le_set_hostname(c->backend,host);changed=1;if(rc){err(r,rc==LE_INVALID?400:501,rc,"Hostname could not be applied");return;}}if(json_get_bool(q->body,"ssh",&v)>0){c->net_ssh=v;changed=1;}if(json_get_bool(q->body,"api_lan",&v)>0){c->net_api_lan=v;changed=1;}{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";char*dst=k?c->mac_bt:c->mac_wifi;size_t cap=k?sizeof(c->mac_bt):sizeof(c->mac_wifi);int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result==0)continue;if(!m[0]){dst[0]=0;changed=1;continue;}if(!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}snprintf(dst,cap,"%s",canon);changed=1;}}if(!changed){err(r,400,LE_INVALID,"No supported network setting was supplied");return;}if(persist_configuration(c)){err(r,503,LE_IO,"Network settings could not be saved");return;}net_json(c,r);return;}}if(!strcmp(p,"/api/v1/network/wifi/scan")&&!strcmp(q->method,"GET")){struct le_wifi_scan s;rc=le_scan_wifi(c->backend,&s);if(rc){err(r,501,rc,"Wi-Fi scan failed");return;}if(wifi_scan_json(r,&s)<0){err(r,503,LE_IO,"Wi-Fi scan response is too large");return;}return;}
+ if(!strcmp(p,"/api/v1/network/pairing")){pairing_handle(c,q,r);return;}
+ if(!strncmp(p,"/api/v1/peer/proof",18)&&(p[18]==0||p[18]=='?')){peer_proof(c,q,r);return;}
+ if(!strcmp(p,"/api/v1/peer/command")){if(!strcmp(q->method,"POST")){peer_command(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/peer/settings")){if(!strcmp(q->method,"POST")){peer_settings(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/peer/announce")){if(!strcmp(q->method,"POST")){peer_announce(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/network/broadcast")){if(!strcmp(q->method,"POST")){broadcast_json(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/network/settings/copy")){if(!strcmp(q->method,"POST")){settings_copy_json(c,q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/network/groups")||!strncmp(p,"/api/v1/network/groups/",23)){groups_handle(c,q,r);return;}
+ if(!strcmp(p,"/api/v1/network/peers")){if(!strcmp(q->method,"GET")||!strcmp(q->method,"HEAD")){peers_json(c,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/network")){if(!strcmp(q->method,"GET")){net_json(c,r);return;}if(!strcmp(q->method,"PUT")){char host[64];int changed=0;{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result>0&&m[0]&&!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}}}if(json_get_string(q->body,"hostname",host,sizeof(host))>0){rc=le_set_hostname(c->backend,host);changed=1;if(rc){err(r,rc==LE_INVALID?400:501,rc,"Hostname could not be applied");return;}}if(json_get_bool(q->body,"ssh",&v)>0){c->net_ssh=v;changed=1;}if(json_get_bool(q->body,"api_lan",&v)>0){c->net_api_lan=v;changed=1;}if(json_get_bool(q->body,"discoverable",&v)>0){c->discoverable=v?1:0;changed=1;}if(json_get_bool(q->body,"nearest_answers",&v)>0){c->nearest_answers=v?1:0;changed=1;}{char m[64],canon[24];int k;for(k=0;k<2;k++){const char*key=k?"bt_mac":"wifi_mac";char*dst=k?c->mac_bt:c->mac_wifi;size_t cap=k?sizeof(c->mac_bt):sizeof(c->mac_wifi);int result=json_get_string(q->body,key,m,sizeof(m));if(result<0){err(r,400,LE_INVALID,"MAC override must be a string no longer than 63 bytes");return;}if(result==0)continue;if(!m[0]){dst[0]=0;changed=1;continue;}if(!mac_override_valid(m,canon,sizeof(canon))){err(r,400,LE_INVALID,"MAC address must be six hex octets and must not be multicast");return;}snprintf(dst,cap,"%s",canon);changed=1;}}if(!changed){err(r,400,LE_INVALID,"No supported network setting was supplied");return;}if(persist_configuration(c)){err(r,503,LE_IO,"Network settings could not be saved");return;}net_json(c,r);return;}}if(!strcmp(p,"/api/v1/network/wifi/scan")&&!strcmp(q->method,"GET")){struct le_wifi_scan s;rc=le_scan_wifi(c->backend,&s);if(rc){err(r,501,rc,"Wi-Fi scan failed");return;}if(wifi_scan_json(r,&s)<0){err(r,503,LE_IO,"Wi-Fi scan response is too large");return;}return;}
  if(!strcmp(p,"/api/v1/network/recovery")){
   if(!strcmp(q->method,"PUT")){
    int enabled,auto_enabled,timeout;
@@ -2475,9 +3349,12 @@ if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_t
   method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/network/wifi/connect")&&!strcmp(q->method,"POST")){struct le_wifi_credentials w;int security_result;memset(&w,0,sizeof(w));if(json_get_string(q->body,"ssid",w.ssid,sizeof(w.ssid))<1){err(r,400,LE_INVALID,"SSID is required");return;}json_get_string(q->body,"password",w.password,sizeof(w.password));security_result=json_get_string(q->body,"security",w.security,sizeof(w.security));if(security_result<0||(security_result>0&&!api_valid_wifi_security(w.security))){memset(w.password,0,sizeof(w.password));err(r,400,LE_INVALID,"security must be open, wpa2, or wpa3");return;}if(security_result==0)strcpy(w.security,"wpa2");rc=le_connect_wifi(c->backend,&w);memset(w.password,0,sizeof(w.password));if(rc){err(r,rc==LE_INVALID?400:503,rc,"Wi-Fi connection failed");return;}event_bus_publish(&c->events,"network","{\"state\":\"connecting\"}");ok(r,"{\"state\":\"connecting\"}");return;}if(!strcmp(p,"/api/v1/network/wifi/disconnect")&&!strcmp(q->method,"POST")){rc=le_disconnect_wifi(c->backend);if(rc)err(r,501,rc,"Wi-Fi disconnect is unavailable");else ok(r,"{\"state\":\"disconnected\"}");return;}
  if(!strcmp(p,"/api/v1/wake-word")){if(!strcmp(q->method,"GET")){wake_json(c,r);return;}if(!strcmp(q->method,"PUT")){char s[64];if(json_get_string(q->body,"wake_word",s,sizeof(s))>0)rc=le_set_wake_word(c->backend,s);if(!rc&&json_get_int(q->body,"sensitivity",&v)>0)rc=le_set_wake_word_sensitivity(c->backend,v);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Wake-word setting could not be applied");return;}/* The boot-time restore already applies wake_sensitivity, but nothing ever wrote it back, so every reboot silently reverted the wake word and sensitivity to the daemon defaults. */rc=persist_configuration(c);if(rc){err(r,503,rc,"Wake-word setting could not be saved");return;}wake_json(c,r);return;}}if(!strcmp(p,"/api/v1/wake-word/test")&&!strcmp(q->method,"POST")){rc=le_test_wake_word(c->backend);if(rc)err(r,409,rc,"Wake-word trigger failed");else ok(r,"{\"detected\":true}");return;}
- if(!strcmp(p,"/api/v1/buttons")){if(!strcmp(q->method,"PUT")){char short_action[32],long_action[32],action_value[24],action_sounds[192];char old_short[sizeof(c->button_short)],old_long[sizeof(c->button_long)],old_action[sizeof(c->button_action)],old_sounds[sizeof(c->button_action_sounds)];int old_tones=c->button_tones,old_action_brightness=c->button_action_brightness,old_mute_brightness=c->button_mute_brightness;int short_field,long_field,sounds_field;int tones,tones_field,action_field,action_brightness_field,mute_brightness_field,action_brightness,mute_brightness;memcpy(old_short,c->button_short,sizeof(old_short));memcpy(old_long,c->button_long,sizeof(old_long));memcpy(old_action,c->button_action,sizeof(old_action));memcpy(old_sounds,c->button_action_sounds,sizeof(old_sounds));short_field=json_get_string(q->body,"short_press",short_action,sizeof(short_action));long_field=json_get_string(q->body,"long_press",long_action,sizeof(long_action));tones_field=json_get_bool(q->body,"tones",&tones);action_field=json_get_string(q->body,"action",action_value,sizeof(action_value));action_brightness_field=json_get_int(q->body,"action_brightness",&action_brightness);sounds_field=json_get_string(q->body,"action_sounds",action_sounds,sizeof(action_sounds));mute_brightness_field=json_get_int(q->body,"mute_brightness",&mute_brightness);if(short_field<0||long_field<0||tones_field<0||action_field<0||action_brightness_field<0||mute_brightness_field<0||(action_field>0&&!button_action_valid(action_value))||sounds_field<0||(sounds_field>0&&!button_sound_list_valid(action_sounds))||(action_brightness_field>0&&(action_brightness<0||action_brightness>100))||(mute_brightness_field>0&&(mute_brightness<0||mute_brightness>100))){err(r,400,LE_INVALID,"Button settings are invalid");return;}if(!(short_field>0||long_field>0||tones_field>0||action_field>0||sounds_field>0||action_brightness_field>0||mute_brightness_field>0)){err(r,400,LE_INVALID,"Button settings are invalid");return;}if(short_field>0)strcpy(c->button_short,short_action);if(long_field>0)strcpy(c->button_long,long_action);{int t;if(json_get_bool(q->body,"tones",&t)>0)c->button_tones=t?1:0;}{char a[24];if(json_get_string(q->body,"action",a,sizeof(a))>0&&button_action_valid(a))strcpy(c->button_action,a);}if(sounds_field>0)snprintf(c->button_action_sounds,sizeof(c->button_action_sounds),"%s",action_sounds);{int ab;if(json_get_int(q->body,"action_brightness",&ab)>0&&ab>=0&&ab<=100)c->button_action_brightness=ab;}{int mb;if(json_get_int(q->body,"mute_brightness",&mb)>0&&mb>=0&&mb<=100)c->button_mute_brightness=mb;}rc=persist_configuration(c);if(rc){memcpy(c->button_short,old_short,sizeof(old_short));memcpy(c->button_long,old_long,sizeof(old_long));memcpy(c->button_action,old_action,sizeof(old_action));memcpy(c->button_action_sounds,old_sounds,sizeof(old_sounds));c->button_tones=old_tones;c->button_action_brightness=old_action_brightness;c->button_mute_brightness=old_mute_brightness;err(r,503,rc,"Button settings could not be saved");return;}}buttons_json(c,r);return;}
+ if(!strcmp(p,"/api/v1/buttons")){if(!strcmp(q->method,"PUT")){char short_action[32],long_action[32],action_value[24],action_long_value[24],action_sounds[192];char old_short[sizeof(c->button_short)],old_long[sizeof(c->button_long)],old_action[sizeof(c->button_action)],old_action_long[sizeof(c->button_action_long)],old_sounds[sizeof(c->button_action_sounds)];int old_tones=c->button_tones,old_action_brightness=c->button_action_brightness,old_mute_brightness=c->button_mute_brightness;int short_field,long_field,sounds_field,action_long_field;int tones,tones_field,action_field,action_brightness_field,mute_brightness_field,action_brightness,mute_brightness;memcpy(old_short,c->button_short,sizeof(old_short));memcpy(old_long,c->button_long,sizeof(old_long));memcpy(old_action,c->button_action,sizeof(old_action));memcpy(old_action_long,c->button_action_long,sizeof(old_action_long));memcpy(old_sounds,c->button_action_sounds,sizeof(old_sounds));short_field=json_get_string(q->body,"short_press",short_action,sizeof(short_action));long_field=json_get_string(q->body,"long_press",long_action,sizeof(long_action));tones_field=json_get_bool(q->body,"tones",&tones);action_field=json_get_string(q->body,"action",action_value,sizeof(action_value));action_long_field=json_get_string(q->body,"action_long",action_long_value,sizeof(action_long_value));action_brightness_field=json_get_int(q->body,"action_brightness",&action_brightness);sounds_field=json_get_string(q->body,"action_sounds",action_sounds,sizeof(action_sounds));mute_brightness_field=json_get_int(q->body,"mute_brightness",&mute_brightness);if(short_field<0||long_field<0||tones_field<0||action_field<0||action_brightness_field<0||mute_brightness_field<0||(action_field>0&&!button_action_valid(action_value))||action_long_field<0||(action_long_field>0&&!button_action_long_valid(action_long_value))||sounds_field<0||(sounds_field>0&&!button_sound_list_valid(action_sounds))||(action_brightness_field>0&&(action_brightness<0||action_brightness>100))||(mute_brightness_field>0&&(mute_brightness<0||mute_brightness>100))){err(r,400,LE_INVALID,"Button settings are invalid");return;}if(!(short_field>0||long_field>0||tones_field>0||action_field>0||action_long_field>0||sounds_field>0||action_brightness_field>0||mute_brightness_field>0)){err(r,400,LE_INVALID,"Button settings are invalid");return;}if(short_field>0)strcpy(c->button_short,short_action);if(long_field>0)strcpy(c->button_long,long_action);{int t;if(json_get_bool(q->body,"tones",&t)>0)c->button_tones=t?1:0;}{char a[24];if(json_get_string(q->body,"action",a,sizeof(a))>0&&button_action_valid(a))strcpy(c->button_action,a);}if(action_long_field>0)strcpy(c->button_action_long,action_long_value);if(sounds_field>0)snprintf(c->button_action_sounds,sizeof(c->button_action_sounds),"%s",action_sounds);{int ab;if(json_get_int(q->body,"action_brightness",&ab)>0&&ab>=0&&ab<=100)c->button_action_brightness=ab;}{int mb;if(json_get_int(q->body,"mute_brightness",&mb)>0&&mb>=0&&mb<=100)c->button_mute_brightness=mb;}rc=persist_configuration(c);if(rc){memcpy(c->button_short,old_short,sizeof(old_short));memcpy(c->button_long,old_long,sizeof(old_long));memcpy(c->button_action,old_action,sizeof(old_action));memcpy(c->button_action_long,old_action_long,sizeof(old_action_long));memcpy(c->button_action_sounds,old_sounds,sizeof(old_sounds));c->button_tones=old_tones;c->button_action_brightness=old_action_brightness;c->button_mute_brightness=old_mute_brightness;err(r,503,rc,"Button settings could not be saved");return;}}buttons_json(c,r);return;}
+ if(!strcmp(p,"/api/v1/voice/clips")){if(!strcmp(q->method,"GET")){voice_clips_list(r);return;}if(!strcmp(q->method,"PUT")){voice_clips_settings(q,r);return;}method_not_allowed(r);return;}
+ if(!strcmp(p,"/api/v1/voice/clips/clear")){if(!strcmp(q->method,"POST")){voice_clips_clear_route(r);return;}method_not_allowed(r);return;}
+ if(!strncmp(p,"/api/v1/voice/clips/",strlen("/api/v1/voice/clips/"))){const char*id=p+strlen("/api/v1/voice/clips/");if(!strcmp(q->method,"GET")){voice_clip_download(r,id);return;}if(!strcmp(q->method,"DELETE")){voice_clip_delete_route(r,id);return;}method_not_allowed(r);return;}
  if(!strcmp(p,"/api/v1/privacy")&&!strcmp(q->method,"PUT")&&json_get_int(q->body,"log_retention_hours",&v)>0&&(v==24||v==168||v==720))c->privacy_log_hours=v;
- if(!strcmp(p,"/api/v1/privacy")){if(!strcmp(q->method,"PUT")){if(json_get_bool(q->body,"local_only",&v)>0)c->privacy_local_only=v;if(json_get_bool(q->body,"diagnostic_telemetry",&v)>0)c->privacy_telemetry=v;if(json_get_bool(q->body,"crash_reports",&v)>0)c->privacy_crash_reports=v;{char retention[16];if(json_get_string(q->body,"audio_retention",retention,sizeof(retention))>0)c->privacy_audio_retention=strcmp(retention,"none")!=0;}}out(r,200,"{\"ok\":true,\"data\":{\"local_only\":%s,\"audio_retention\":\"%s\",\"diagnostic_telemetry\":%s,\"log_retention_hours\":%d,\"crash_reports\":%s},\"error\":null}",c->privacy_local_only?"true":"false",c->privacy_audio_retention?"24h":"none",c->privacy_telemetry?"true":"false",c->privacy_log_hours,c->privacy_crash_reports?"true":"false");return;}if(!strcmp(p,"/api/v1/buttons")){ok(r,"{\"short_press\":\"start_listening\",\"long_press\":\"pairing_mode\",\"hardware_mute\":true}");return;}if(!strcmp(p,"/api/v1/sendspin")){if(strcmp(q->method,"GET")){method_not_allowed(r);return;}sendspin_status_json(c,r);return;}if(!strcmp(p,"/api/v1/sendspin/pairing")){if(strcmp(q->method,"POST")){method_not_allowed(r);return;}sendspin_pairing_json(c,r);return;}if(!strcmp(p,"/api/v1/sendspin/unpair")){if(strcmp(q->method,"POST")){method_not_allowed(r);return;}sendspin_unpair_json(c,r);return;}if(!strncmp(p,"/api/v1/integrations",20)){if(!strcmp(q->method,"PUT")){int enabled;if(json_get_bool(q->body,"enabled",&enabled)<1){err(r,400,LE_INVALID,"Enabled must be a boolean");return;}if(strstr(p,"home-assistant")){if(enabled)c->integrations|=1u;else c->integrations&=~1u;}else if(strstr(p,"mqtt")){if(enabled)c->integrations|=2u;else c->integrations&=~2u;}else if(strstr(p,"rest")){c->net_api_lan=enabled;}else if(strstr(p,"spotify")){rc=le_set_spotify_enabled(c->backend,enabled);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:(rc==LE_INVALID?400:503),rc,"Spotify Connect is not available on this image");return;}if(enabled)c->integrations|=32u;else c->integrations&=~32u;}else if(strstr(p,"airplay2")){rc=le_set_airplay_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"AirPlay 2 control could not be applied");return;}if(enabled)c->integrations|=16u;else c->integrations&=~16u;}else if(strstr(p,"bluetooth")){rc=le_set_bluetooth_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth control could not be applied");return;}if(enabled)c->integrations|=8u;else c->integrations&=~8u;}else if(strstr(p,"sendspin")){rc=le_set_sendspin_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:(rc==LE_NOT_SUPPORTED?501:503),rc,"Sendspin is not available on this image");return;}if(enabled)c->integrations|=64u;else c->integrations&=~64u;}else{err(r,404,LE_INVALID,"Integration was not found");return;}}out(r,200,"{\"ok\":true,\"data\":{\"items\":[{\"id\":\"home-assistant\",\"name\":\"Home Assistant\",\"enabled\":%s},{\"id\":\"mqtt\",\"name\":\"MQTT\",\"enabled\":%s},{\"id\":\"rest\",\"name\":\"Local REST API\",\"enabled\":%s,\"forced\":%s},{\"id\":\"bluetooth\",\"name\":\"Bluetooth audio\",\"enabled\":%s},{\"id\":\"airplay2\",\"name\":\"AirPlay 2\",\"enabled\":%s},{\"id\":\"spotify\",\"name\":\"Spotify Connect\",\"enabled\":%s,\"installed\":%s},{\"id\":\"sendspin\",\"name\":\"Sendspin (Music Assistant)\",\"enabled\":%s,\"installed\":%s}]},\"error\":null}",(c->integrations&1u)?"true":"false",(c->integrations&2u)?"true":"false",(c->allow_insecure_lan||c->net_api_lan)?"true":"false",c->allow_insecure_lan?"true":"false",(c->integrations&8u)?"true":"false",(c->integrations&16u)?"true":"false",(spotify_enabled(c)?"true":"false"),spotify_installed(c)?"true":"false",(c->integrations&64u)?"true":"false",sendspin_installed(c)?"true":"false");return;}
+ if(!strcmp(p,"/api/v1/privacy")){if(!strcmp(q->method,"PUT")){if(json_get_bool(q->body,"local_only",&v)>0)c->privacy_local_only=v;if(json_get_bool(q->body,"diagnostic_telemetry",&v)>0)c->privacy_telemetry=v;if(json_get_bool(q->body,"crash_reports",&v)>0)c->privacy_crash_reports=v;{char retention[16];if(json_get_string(q->body,"audio_retention",retention,sizeof(retention))>0)c->privacy_audio_retention=strcmp(retention,"none")!=0;}}out(r,200,"{\"ok\":true,\"data\":{\"local_only\":%s,\"audio_retention\":\"%s\",\"diagnostic_telemetry\":%s,\"log_retention_hours\":%d,\"crash_reports\":%s},\"error\":null}",c->privacy_local_only?"true":"false",c->privacy_audio_retention?"24h":"none",c->privacy_telemetry?"true":"false",c->privacy_log_hours,c->privacy_crash_reports?"true":"false");return;}if(!strcmp(p,"/api/v1/buttons")){ok(r,"{\"short_press\":\"start_listening\",\"long_press\":\"pairing_mode\",\"hardware_mute\":true}");return;}if(!strcmp(p,"/api/v1/sendspin")){if(strcmp(q->method,"GET")){method_not_allowed(r);return;}sendspin_status_json(c,r);return;}if(!strcmp(p,"/api/v1/sendspin/pairing")){if(strcmp(q->method,"POST")){method_not_allowed(r);return;}sendspin_pairing_json(c,r);return;}if(!strcmp(p,"/api/v1/sendspin/unpaired-access")){if(strcmp(q->method,"PUT")){method_not_allowed(r);return;}sendspin_unpaired_json(c,r,q);return;}if(!strcmp(p,"/api/v1/sendspin/unpair")){if(strcmp(q->method,"POST")){method_not_allowed(r);return;}sendspin_unpair_json(c,r);return;}if(!strncmp(p,"/api/v1/integrations",20)){if(!strcmp(q->method,"PUT")){int enabled;if(json_get_bool(q->body,"enabled",&enabled)<1){err(r,400,LE_INVALID,"Enabled must be a boolean");return;}if(strstr(p,"home-assistant")){if(enabled)c->integrations|=1u;else c->integrations&=~1u;}else if(strstr(p,"mqtt")){if(enabled)c->integrations|=2u;else c->integrations&=~2u;}else if(strstr(p,"rest")){c->net_api_lan=enabled;}else if(strstr(p,"spotify")){rc=le_set_spotify_enabled(c->backend,enabled);if(rc){err(r,rc==LE_NOT_SUPPORTED?501:(rc==LE_INVALID?400:503),rc,"Spotify Connect is not available on this image");return;}if(enabled)c->integrations|=32u;else c->integrations&=~32u;}else if(strstr(p,"airplay2")){rc=le_set_airplay_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"AirPlay 2 control could not be applied");return;}if(enabled)c->integrations|=16u;else c->integrations&=~16u;}else if(strstr(p,"bluetooth")){rc=le_set_bluetooth_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:501,rc,"Bluetooth control could not be applied");return;}if(enabled)c->integrations|=8u;else c->integrations&=~8u;}else if(strstr(p,"sendspin")){rc=le_set_sendspin_enabled(c->backend,enabled);if(rc){err(r,rc==LE_INVALID?400:(rc==LE_NOT_SUPPORTED?501:503),rc,"Sendspin is not available on this image");return;}if(enabled)c->integrations|=64u;else c->integrations&=~64u;}else{err(r,404,LE_INVALID,"Integration was not found");return;}}out(r,200,"{\"ok\":true,\"data\":{\"items\":[{\"id\":\"home-assistant\",\"name\":\"Home Assistant\",\"enabled\":%s},{\"id\":\"mqtt\",\"name\":\"MQTT\",\"enabled\":%s},{\"id\":\"rest\",\"name\":\"Local REST API\",\"enabled\":%s,\"forced\":%s},{\"id\":\"bluetooth\",\"name\":\"Bluetooth audio\",\"enabled\":%s},{\"id\":\"airplay2\",\"name\":\"AirPlay 2\",\"enabled\":%s},{\"id\":\"spotify\",\"name\":\"Spotify Connect\",\"enabled\":%s,\"installed\":%s},{\"id\":\"sendspin\",\"name\":\"Sendspin (Music Assistant)\",\"enabled\":%s,\"installed\":%s}]},\"error\":null}",(c->integrations&1u)?"true":"false",(c->integrations&2u)?"true":"false",(c->allow_insecure_lan||c->net_api_lan)?"true":"false",c->allow_insecure_lan?"true":"false",(c->integrations&8u)?"true":"false",(c->integrations&16u)?"true":"false",(spotify_enabled(c)?"true":"false"),spotify_installed(c)?"true":"false",(c->integrations&64u)?"true":"false",sendspin_installed(c)?"true":"false");return;}
  if(!strcmp(p,"/api/v1/system")&&!strcmp(q->method,"GET")){system_json(c,r);return;}
  if(!strcmp(p,"/api/v1/system/boot")){if(strcmp(q->method,"GET")){method_not_allowed(r);return;}boot_control_json(r);return;}
  if(!strcmp(p,"/api/v1/provenance")&&!strcmp(q->method,"GET")){provenance_json(r);return;}
@@ -2928,8 +3805,222 @@ static int handle_home_assistant(struct api_context *c,const struct api_request 
         after_integration_change((c),(q),(r)); \
     } \
 } while (0)
-int api_request_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){return security(c,q,r)&&(!changing(q->method)||!q->body_len||body_ok(q,r));}
-void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;(void)voice_pipeline_restart_reap();if(!api_request_authorize(c,q,r))return;if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\",\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false",c->ui_theme,c->color_mode);return;}api_handle_inner(c,q,r);}
+int api_request_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){return security(c,q,r)&&(!changing(q->method)||!q->body_len||peer_command_path(q)||body_ok(q,r));}
+/* Owner-staged wake models (docs/OPERATIONS.md). Listing is read-only; upload
+   is chunked because a model is megabytes and a request body is 16 KiB. */
+#define LE_WAKE_MODEL_PREFIX "/api/v1/wake-word/models"
+#define LE_WAKE_MODEL_B64_MAX 11000
+struct wake_model_listing{char*body;size_t used,cap;int first,truncated;};
+static int wake_model_paths_for(const struct api_context*c,struct le_wake_model_paths*p){return c->config_path[0]&&!le_wake_model_paths_from_config(c->config_path,p)?0:-1;}
+static void wake_model_listed(const struct le_wake_model_entry*e,void*opaque){struct wake_model_listing*s=opaque;char name[160],reason[320];int n;json_escape(name,sizeof(name),e->name);json_escape(reason,sizeof(reason),e->reason);n=snprintf(s->body+s->used,s->cap-s->used,"%s{\"name\":\"%s\",\"valid\":%s,\"reason\":\"%s\",\"bytes\":%lu,\"selected\":%s}",s->first?"":",",name,e->valid?"true":"false",reason,e->bytes,e->selected?"true":"false");if(n<0||(size_t)n>=s->cap-s->used){s->truncated=1;return;}s->used+=(size_t)n;s->first=0;}
+static void wake_models_get(struct api_context*c,struct api_response*r){struct le_wake_model_paths p;struct wake_model_listing s;char selected[LE_WAKE_MODEL_NAME_MAX]="",sel_json[LE_WAKE_MODEL_NAME_MAX+4]="null";int sel;s.cap=65536;s.body=malloc(s.cap);if(!s.body){err(r,503,LE_IO,"Wake-word models are not available");return;}s.used=0;s.first=1;s.truncated=0;if(wake_model_paths_for(c,&p)){free(s.body);err(r,503,LE_IO,"Wake-word models are not available");return;}sel=le_wake_model_selection_read(&p,selected,sizeof(selected));if(sel==1)snprintf(sel_json,sizeof(sel_json),"\"%s\"",selected);s.body[0]='\0';(void)le_wake_model_scan(&p,wake_model_listed,&s);s.body[s.used]='\0';out(r,200,"{\"ok\":true,\"data\":{\"stock\":{\"name\":\"%s\",\"wake_word\":\"%s\"},\"selected\":%s,\"selection_error\":%s,\"models\":[%s],\"truncated\":%s,\"limits\":{\"files\":3,\"file_bytes_max\":%lu,\"chunk_bytes_max\":%lu}},\"error\":null}",LE_WAKE_MODEL_STOCK_NAME,LE_WAKE_MODEL_STOCK_PHRASE,sel_json,sel<0?"true":"false",s.body,s.truncated?"true":"false",(unsigned long)LE_WAKE_MODEL_MAX_BYTES,(unsigned long)LE_WAKE_MODEL_STAGE_CHUNK_MAX);free(s.body);}
+static int wake_model_route(struct api_context*c,const struct api_request*q,struct api_response*r){
+    struct le_wake_model_paths p;char name[LE_WAKE_MODEL_NAME_MAX+1],file[32],text[LE_WAKE_MODEL_B64_MAX+1],reason[320],esc[400];const char*rest,*tail,*slash;unsigned char bytes[LE_WAKE_MODEL_STAGE_CHUNK_MAX];long long offset;unsigned long staged=0;int rc,decoded;size_t n;
+    if(!strcmp(q->path,"/api/v1/wake-word/model")){
+        if(strcmp(q->method,"PUT")){method_not_allowed(r);return 1;}
+        if(wake_model_paths_for(c,&p)){err(r,503,LE_IO,"Wake-word models are not available");return 1;}
+        strcpy(name,"\x01");
+        if(json_get_string(q->body,"model",name,sizeof(name))<0||!strcmp(name,"\x01")){err(r,400,LE_INVALID,"The model field is required; use alexa_v0.1 for the stock model");return 1;}
+        rc=le_wake_model_select(&p,name);
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];int stock=!name[0]||!strcmp(name,LE_WAKE_MODEL_STOCK_NAME);json_escape(esc,sizeof(esc),name);snprintf(data,sizeof(data),"{\"selected\":\"%s\",\"restart_required\":true}",esc);if(stock)snprintf(data,sizeof(data),"{\"selected\":null,\"restart_required\":true}");ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_NOT_FOUND){err(r,404,LE_NOT_SUPPORTED,"No model with that name is installed");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){err(r,400,LE_INVALID,"The model name is invalid or the folder does not pass the model check");return 1;}
+        err(r,503,LE_IO,"The wake-word selection could not be saved");return 1;
+    }
+    n=strlen(LE_WAKE_MODEL_PREFIX);
+    if(strncmp(q->path,LE_WAKE_MODEL_PREFIX,n)||(q->path[n]!='\0'&&q->path[n]!='/'))return 0;
+    if(q->path[n]=='\0'){if(strcmp(q->method,"GET")){method_not_allowed(r);return 1;}wake_models_get(c,r);return 1;}
+    if(wake_model_paths_for(c,&p)){err(r,503,LE_IO,"Wake-word models are not available");return 1;}
+    rest=q->path+n+1;slash=strchr(rest,'/');tail=slash?slash+1:"";
+    {size_t length=slash?(size_t)(slash-rest):strlen(rest);if(length>=sizeof(name)){err(r,404,LE_NOT_SUPPORTED,"No model with that name is installed");return 1;}memcpy(name,rest,length);name[length]='\0';}
+    if(!tail[0]){
+        if(strcmp(q->method,"DELETE")){method_not_allowed(r);return 1;}
+        rc=le_wake_model_delete(&p,name);
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];json_escape(esc,sizeof(esc),name);snprintf(data,sizeof(data),"{\"deleted\":\"%s\"}",esc);ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_CONFLICT){err(r,409,LE_BUSY,"The selected model cannot be removed; select the stock model first");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_NOT_FOUND){err(r,404,LE_NOT_SUPPORTED,"No model with that name is installed");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){err(r,400,LE_INVALID,"The model name is invalid");return 1;}
+        err(r,503,LE_IO,"The model could not be removed");return 1;
+    }
+    if(!strcmp(tail,"commit")){
+        if(strcmp(q->method,"POST")){method_not_allowed(r);return 1;}
+        rc=le_wake_model_commit(&p,name,reason,sizeof(reason));
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];json_escape(esc,sizeof(esc),name);snprintf(data,sizeof(data),"{\"installed\":\"%s\",\"restart_required\":true}",esc);ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_CONFLICT){err(r,409,LE_BUSY,"A model with this name already exists");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_NOT_FOUND){err(r,404,LE_NOT_SUPPORTED,"Nothing has been uploaded under this name");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){json_escape(esc,sizeof(esc),reason[0]?reason:"model rejected");char msg[700];snprintf(msg,sizeof(msg),"Model rejected: %s",esc);err(r,422,LE_INVALID,msg);return 1;}
+        err(r,503,LE_IO,"The model could not be installed");return 1;
+    }
+    if(!strncmp(tail,"files/",6)){
+        if(strcmp(q->method,"POST")){method_not_allowed(r);return 1;}
+        if(strlen(tail+6)>=sizeof(file)){err(r,400,LE_INVALID,"Unknown model file");return 1;}
+        strcpy(file,tail+6);
+        offset=-1;(void)json_get_int64(q->body,"offset",&offset);
+        if(offset<0){err(r,400,LE_INVALID,"offset is required");return 1;}
+        if(json_get_string(q->body,"data",text,sizeof(text))<=0){err(r,400,LE_INVALID,"data (base64) is required");return 1;}
+        decoded=le_wake_model_base64_decode(text,strlen(text),bytes,sizeof(bytes));
+        if(decoded<=0){err(r,400,LE_INVALID,"data is not valid base64 or is too large");return 1;}
+        rc=le_wake_model_stage_chunk(&p,name,file,(unsigned long)offset,bytes,(size_t)decoded,&staged);
+        if(rc==LE_WAKE_MODEL_STORE_OK){char data[640];json_escape(esc,sizeof(esc),file);snprintf(data,sizeof(data),"{\"file\":\"%s\",\"staged_bytes\":%lu}",esc,staged);ok(r,data);return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_CONFLICT){err(r,409,LE_BUSY,"A model with this name already exists");return 1;}
+        if(rc==LE_WAKE_MODEL_STORE_INVALID){err(r,400,LE_INVALID,"Chunk rejected: unknown file, wrong offset, or file too large");return 1;}
+        err(r,503,LE_IO,"The chunk could not be stored");return 1;
+    }
+    err(r,404,LE_NOT_SUPPORTED,"Not found");return 1;
+}
+
+/* Owner-supplied HTTPS certificate and private CA trust. Both sets of files live
+   in the configuration directory beside the self-signed pair that main.c
+   manages. A custom certificate is read per TLS connection, so a replacement
+   applies to the next connection without a restart; the trust bundle is read
+   when a service starts (news reads it on each refresh). */
+void api_set_tls_dir(struct api_context*c,const char*dir)
+{
+    if(!c||!dir)return;
+    snprintf(c->tls_dir,sizeof(c->tls_dir),"%s",dir);
+    snprintf(news_trust_dir,sizeof(news_trust_dir),"%s",dir);
+}
+static int tls_file_path(const struct api_context*c,char*out,size_t size,const char*name)
+{
+    int n;
+    if(!c->tls_dir[0])return 0;
+    n=snprintf(out,size,"%s/%s",c->tls_dir,name);
+    return n>0&&(size_t)n<size;
+}
+static const char*system_ca_path(void)
+{
+    static const char*const fallback[]={"/usr/local/share/libreecho/cacert.pem","/etc/ssl/certs/ca-certificates.crt"};
+    const char*env=getenv("LIBREECHO_SYSTEM_CA");
+    size_t i;
+    if(env&&*env)return env;
+    for(i=0;i<sizeof(fallback)/sizeof(fallback[0]);i++)if(!access(fallback[i],R_OK))return fallback[i];
+    return fallback[0];
+}
+static unsigned char*read_bounded_file(const char*path,size_t*len)
+{
+    const long limit=4L*1024*1024;
+    FILE*f;long n;unsigned char*b;size_t got;
+    f=fopen(path,"rb");
+    if(!f)return 0;
+    if(fseek(f,0,SEEK_END)||(n=ftell(f))<0||n>limit||fseek(f,0,SEEK_SET)){fclose(f);return 0;}
+    b=malloc((size_t)n+1);
+    if(!b){fclose(f);return 0;}
+    got=fread(b,1,(size_t)n,f);
+    fclose(f);
+    if(got!=(size_t)n){free(b);return 0;}
+    b[n]=0;
+    *len=(size_t)n;
+    return b;
+}
+static int write_trust_bundle(const struct api_context*c,const char*ca_pem,size_t ca_len)
+{
+    char bundle[384];
+    unsigned char*base,*all;
+    size_t base_len=0,total;
+    int rc=LE_IO;
+    if(!tls_file_path(c,bundle,sizeof(bundle),"trust-bundle.pem"))return LE_IO;
+    base=read_bounded_file(system_ca_path(),&base_len);
+    if(!base)return LE_IO;
+    all=malloc(base_len+ca_len+3);
+    if(all){
+        memcpy(all,base,base_len);
+        total=base_len;
+        all[total++]='\n';
+        memcpy(all+total,ca_pem,ca_len);
+        total+=ca_len;
+        all[total++]='\n';
+        rc=le_tls_install_file(bundle,(const char*)all,total,1);
+        free(all);
+    }
+    free(base);
+    return rc;
+}
+static void https_certificate_report(struct api_context*c,struct api_response*r)
+{
+    char cert[384],marker[384],na[32]={0},fp[128]={0};
+    int custom;
+    if(!tls_file_path(c,cert,sizeof(cert),"https-cert.pem")||!tls_file_path(c,marker,sizeof(marker),LE_TLS_CUSTOM_MARKER)){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    custom=!access(marker,F_OK)&&!access(cert,R_OK);
+    if(!access(cert,R_OK))le_tls_cert_info(cert,na,sizeof(na),fp,sizeof(fp));
+    out(r,200,"{\"ok\":true,\"data\":{\"tls_available\":%s,\"custom\":%s,\"https_expires\":\"%s\",\"https_fingerprint\":\"%s\"},\"error\":null}",le_tls_available()?"true":"false",custom?"true":"false",na,fp);
+}
+static void https_certificate_put(struct api_context*c,const struct api_request*q,struct api_response*r)
+{
+    char cert_path[384],key_path[384],marker[384],*cert,*key;
+    size_t cap=q->body_len+1,cn,kn;
+    int rc;
+    if(!le_tls_available()){err(r,501,LE_NOT_SUPPORTED,"HTTPS is not available in this build");return;}
+    if(!tls_file_path(c,cert_path,sizeof(cert_path),"https-cert.pem")||!tls_file_path(c,key_path,sizeof(key_path),"https-key.pem")||!tls_file_path(c,marker,sizeof(marker),LE_TLS_CUSTOM_MARKER)){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    cert=malloc(cap);
+    key=malloc(cap);
+    if(!cert||!key){free(cert);free(key);err(r,503,LE_IO,"The certificate could not be read");return;}
+    cert[0]=key[0]=0;
+    if(json_get_string(q->body,"certificate_pem",cert,cap)<=0||json_get_string(q->body,"private_key_pem",key,cap)<=0){free(cert);free(key);err(r,400,LE_INVALID,"certificate_pem and private_key_pem are required");return;}
+    cn=strlen(cert);
+    kn=strlen(key);
+    rc=le_tls_check_certificate_pair(cert,cn,key,kn);
+    if(rc!=LE_OK){free(cert);free(key);err(r,400,LE_INVALID,"The certificate and private key must be a matching PEM pair that has not expired");return;}
+    /* Order matters: the marker goes first and comes back last. A crash before
+       the final step leaves no marker, and the next boot regenerates a valid
+       self-signed pair instead of serving a mismatched one. */
+    unlink(marker);
+    rc=le_tls_install_file(key_path,key,kn,0);
+    if(rc==LE_OK)rc=le_tls_install_file(cert_path,cert,cn,1);
+    if(rc==LE_OK)rc=le_tls_install_file(marker,"custom\n",7,0);
+    free(cert);
+    free(key);
+    if(rc!=LE_OK){err(r,503,LE_IO,"The certificate could not be saved");return;}
+    api_log(c,"info","Custom HTTPS certificate installed");
+    https_certificate_report(c,r);
+}
+static void https_certificate_reset(struct api_context*c,struct api_response*r)
+{
+    char cert_path[384],key_path[384],marker[384];
+    if(!le_tls_available()){err(r,501,LE_NOT_SUPPORTED,"HTTPS is not available in this build");return;}
+    if(!tls_file_path(c,cert_path,sizeof(cert_path),"https-cert.pem")||!tls_file_path(c,key_path,sizeof(key_path),"https-key.pem")||!tls_file_path(c,marker,sizeof(marker),LE_TLS_CUSTOM_MARKER)){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    unlink(marker);
+    unlink(cert_path);
+    unlink(key_path);
+    if(le_tls_ensure_self_signed(cert_path,key_path,"libreecho")!=LE_OK){err(r,503,LE_IO,"A self-signed certificate could not be created");return;}
+    api_log(c,"info","Custom HTTPS certificate removed; self-signed certificate restored");
+    https_certificate_report(c,r);
+}
+static void https_private_ca(struct api_context*c,const struct api_request*q,struct api_response*r)
+{
+    char ca_path[384],bundle[384],*pem;
+    size_t cap=q->body_len+1,n;
+    int count,rc;
+    if(!tls_file_path(c,ca_path,sizeof(ca_path),"private-ca.pem")||!tls_file_path(c,bundle,sizeof(bundle),"trust-bundle.pem")){err(r,503,LE_IO,"The configuration directory is unavailable");return;}
+    if(!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"tls_available\":%s,\"configured\":%s},\"error\":null}",le_tls_available()?"true":"false",access(ca_path,R_OK)?"false":"true");return;}
+    if(!strcmp(q->method,"DELETE")){unlink(bundle);unlink(ca_path);api_log(c,"info","Private certificate authority removed");out(r,200,"{\"ok\":true,\"data\":{\"configured\":false},\"error\":null}");return;}
+    if(strcmp(q->method,"PUT")){method_not_allowed(r);return;}
+    if(!le_tls_available()){err(r,501,LE_NOT_SUPPORTED,"HTTPS is not available in this build");return;}
+    pem=malloc(cap);
+    if(!pem){err(r,503,LE_IO,"The certificate could not be read");return;}
+    pem[0]=0;
+    if(json_get_string(q->body,"ca_pem",pem,cap)<=0){free(pem);err(r,400,LE_INVALID,"ca_pem is required");return;}
+    n=strlen(pem);
+    count=le_tls_check_ca_bundle(pem,n);
+    if(count<=0){free(pem);err(r,400,LE_INVALID,"ca_pem must hold one or more PEM CA certificates");return;}
+    rc=write_trust_bundle(c,pem,n);
+    if(rc==LE_OK){rc=le_tls_install_file(ca_path,pem,n,1);if(rc!=LE_OK)unlink(bundle);}
+    free(pem);
+    if(rc!=LE_OK){err(r,503,LE_IO,"The private CA could not be saved; the system CA bundle must be present");return;}
+    api_log(c,"info","Private certificate authority added; news uses it now, LLM, HA and live services on their next start");
+    out(r,200,"{\"ok\":true,\"data\":{\"configured\":true,\"certificates\":%d},\"error\":null}",count);
+}
+static void https_route(struct api_context*c,const struct api_request*q,struct api_response*r)
+{
+    if(!strcmp(q->path,"/api/v1/https/certificate")){
+        if(!strcmp(q->method,"GET"))https_certificate_report(c,r);
+        else if(!strcmp(q->method,"PUT"))https_certificate_put(c,q,r);
+        else if(!strcmp(q->method,"DELETE"))https_certificate_reset(c,r);
+        else method_not_allowed(r);
+        return;
+    }
+    https_private_ca(c,q,r);
+}
+void api_handle(struct api_context*c,const struct api_request*q,struct api_response*r){int rc;(void)voice_pipeline_restart_reap();if(!api_request_authorize(c,q,r))return;if(wake_model_route(c,q,r))return;if(!strcmp(q->path,"/api/v1/https/certificate")||!strcmp(q->path,"/api/v1/https/private-ca")){https_route(c,q,r);return;}if(!strcmp(q->path,"/api/v1/setup")){if(!strcmp(q->method,"GET")){setup_json(c,r);return;}if(!strcmp(q->method,"POST")){rc=setup_apply(c,q->body);if(rc){err(r,rc==LE_BUSY?409:rc==LE_INVALID?400:rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_BUSY?"Initial setup has already been completed":rc==LE_INVALID?"Setup details are invalid or incomplete":rc==LE_NOT_SUPPORTED?"A required hardware adapter is not available":setup_failure_message(c));return;}api_log(c,"info","Initial setup completed; access-point handoff requested");event_bus_publish(&c->events,"device_state","{\"setup_completed\":true}");ok(r,"{\"completed\":true,\"network_state\":\"connecting\",\"ap_mode_exit_required\":true,\"password_stored\":false}");return;}method_not_allowed(r);return;}if((!strcmp(q->path,"/api/v1")||!strcmp(q->path,"/api/v1/"))&&!strcmp(q->method,"GET")){ok(r,"{\"name\":\"LibreEcho API\",\"version\":\"v1\",\"status\":\"/api/v1/status\",\"playback\":\"/api/v1/playback\",\"setup\":\"/api/v1/setup\",\"openapi\":\"/openapi.json\",\"swagger\":\"/swagger.html\"}");return;}if(!strcmp(q->path,"/api/v1/config")&&!strcmp(q->method,"GET")){out(r,200,"{\"ok\":true,\"data\":{\"api_version\":1,\"os_version\":\"%s\",\"csrf_token\":\"%s\",\"authentication\":\"%s\",\"bootstrap_required\":%s,\"user_count\":%zu,\"bind_policy\":\"%s\",\"max_request_body\":16384,\"setup_completed\":%s,\"setup_url\":\"/setup.html\",\"ui_theme\":\"%s\",\"color_mode\":\"%s\"},\"error\":null}",LE_OS_VERSION_STRING,c->csrf_token,api_bootstrap_required_internal(c)?"bootstrap-required":c->auth.enabled?"users":c->auth_token[0]?"bearer-token":"development-disabled",api_bootstrap_required_internal(c)?"true":"false",c->auth.user_count,c->allow_insecure_lan?"lan-development":"loopback-default",c->setup_completed?"true":"false",c->ui_theme,c->color_mode);return;}api_handle_inner(c,q,r);}
 
 int api_persist_configuration(struct api_context*c){(void)voice_pipeline_restart_reap();return persist_configuration(c);}
 int api_diagnostics_kernel_authorize(struct api_context*c,const struct api_request*q,struct api_response*r){if(strcmp(q->method,"GET")){method_not_allowed(r);return 0;}if(!security(c,q,r))return 0;return 1;}

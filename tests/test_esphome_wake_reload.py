@@ -18,7 +18,10 @@ SOURCES = [
     "src/adapter/adapter_server.c", "src/adapter/adapter_client.c",
     "src/adapter/wake_led.c", "src/adapter/voice_stream.c",
     "src/adapter/voice_aec.c", "src/adapter/voice_reference.c",
-    "src/adapter/voice_dsp.c", "src/log.c", "src/json.c",
+    "src/adapter/voice_dsp.c", "src/adapter/clap_detector.c",
+    "src/adapter/smoke_alarm_detector.c",
+    "src/log.c", "src/json.c",
+    "src/adapter/wake_arbiter.c", "src/peer_auth.c",
 ]
 CASES = ["validation", "reload", "failure", "recovery", "queued", "capture",
          "timeout", "retirement"]
@@ -50,7 +53,7 @@ def main():
                 cmd += ["-DLE_WAKE_ENGINE_ONNX"]
             cmd += SOURCES
             if enabled:
-                cmd += ["src/adapter/wake_worker.c"]
+                cmd += ["src/adapter/wake_worker.c", "src/wake_model.c"]
             cmd += speex + ["-lpthread", "-lm", "-o", str(binary)]
             subprocess.run(cmd, cwd=ROOT, check=True, timeout=30)
             for case in cases if enabled else ["disabled"]:

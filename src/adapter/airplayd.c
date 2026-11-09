@@ -39,6 +39,17 @@
 #define INPUT_MAX LE_ADAPTER_MSG_MAX
 #define AIRPLAY_METADATA_FIFO "/run/libreecho-audio/airplay.metadata"
 #define LE_MDNS_BUS_SOCKET "/usr/local/lib/libreecho-mdns/root/run/dbus/system_bus_socket"
+#ifndef LE_MDNS_AVAHI_PIDFILE
+#define LE_MDNS_AVAHI_PIDFILE "/usr/local/lib/libreecho-mdns/root/run/avahi-daemon/pid"
+#endif
+#define AIRPLAY_SANDBOX_BUS_SOCKET "/run/dbus/system_bus_socket"
+/* A replaced responder must stay up this long before Shairport Sync is
+ * started against it: Avahi has a pid before it owns its bus name, and a
+ * Shairport Sync that starts in that gap exits at once. */
+#define AIRPLAY_MDNS_SETTLE_MS 4000u
+#define SHAIRPORT_BACKOFF_MIN_MS 2000u
+#define SHAIRPORT_BACKOFF_MAX_MS 30000u
+#define SHAIRPORT_HEALTHY_RUN_MS 60000u
 #define AIRPLAY_METADATA_ITEM_MAX 8192
 #define AIRPLAY_METADATA_FIELD_MAX 192
 #define AIRPLAY_METADATA_AP2_PLIST_MAX 16384
@@ -49,6 +60,15 @@
 struct airplay_metadata_parser {
     char item[AIRPLAY_METADATA_ITEM_MAX + 1];
     size_t used;
+};
+
+/* Which shared D-Bus/Avahi instance is live: the bus socket inode and the
+ * Avahi daemon's pid. libreecho-mdnsd respawns either one when it dies, and a
+ * watchdog restart replaces both. */
+struct airplay_mdns_generation {
+    dev_t bus_dev;
+    ino_t bus_ino;
+    long avahi_pid;
 };
 
 struct airplay_ctx {
@@ -91,6 +111,18 @@ struct airplay_ctx {
     char artist[AIRPLAY_METADATA_FIELD_MAX + 1];
     char album[AIRPLAY_METADATA_FIELD_MAX + 1];
     struct airplay_metadata_parser metadata_parser;
+    /* The shared responder Shairport Sync registered with (see
+     * airplay_mdns_poll). */
+    struct airplay_mdns_generation shairport_mdns;
+    int shairport_mdns_deferred;
+    /* The responder instance last seen, and since when it has not changed. */
+    struct airplay_mdns_generation mdns_seen;
+    uint64_t mdns_seen_since_ms;
+    /* Shairport Sync is restarted alone after it exits (it cannot run without
+     * Avahi); 0 when it is running or AirPlay is off. */
+    uint64_t shairport_retry_ms;
+    uint64_t shairport_backoff_ms;
+    uint64_t shairport_started_ms;
 };
 
 static volatile sig_atomic_t running = 1;
@@ -112,15 +144,15 @@ static volatile sig_atomic_t running = 1;
 #define SENDSPIN_STATE_FILE "/data/libreecho/config/sendspin-state"
 #endif
 
-/* The AirPlay sandbox reaches ledd through a bind mount of the single socket
- * file (see libreecho-airplayd.init). A bind mount pins the inode, so when
+/* The AirPlay sandbox reaches ledd, and the shared D-Bus, through a bind
+ * mount of the single socket file (see libreecho-airplayd.init). A bind mount pins the inode, so when
  * ledd restarts and creates a new socket the sandbox keeps the deleted one
  * and visualiser frames are silently dropped. Re-point the bind whenever the
  * bridged inode is no longer the live socket.
  *
  * Returns 1 when the bind was (re)created, 0 when nothing needed doing
  * (current, ledd not up, or sandbox /run not prepared yet), -1 on failure. */
-static int airplay_led_bridge_refresh(const char *source, const char *target)
+static int airplay_socket_bridge_refresh(const char *source, const char *target)
 {
     struct stat live, bridged, parent;
     char directory[256];
@@ -173,7 +205,7 @@ static void airplay_led_bridge_poll(const struct airplay_ctx *ctx)
     if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
                  LE_ADAPTER_LED_SOCK) >= (int)sizeof(target))
         return;
-    result = airplay_led_bridge_refresh(LE_ADAPTER_LED_SOCK, target);
+    result = airplay_socket_bridge_refresh(LE_ADAPTER_LED_SOCK, target);
     if (result > 0) {
         le_log_info("airplayd: LED socket bridge re-attached to the live ledd socket");
         last_failed = 0;
@@ -183,6 +215,74 @@ static void airplay_led_bridge_poll(const struct airplay_ctx *ctx)
     } else if (result == 0) {
         last_failed = 0;
     }
+}
+
+static void airplay_mdns_generation_read(const char *bus_socket,
+                                         const char *avahi_pidfile,
+                                         struct airplay_mdns_generation *out)
+{
+    struct stat bus;
+    FILE *pidfile;
+    long pid = 0;
+
+    memset(out, 0, sizeof(*out));
+    if (stat(bus_socket, &bus) == 0 && S_ISSOCK(bus.st_mode)) {
+        out->bus_dev = bus.st_dev;
+        out->bus_ino = bus.st_ino;
+    }
+    pidfile = fopen(avahi_pidfile, "r");
+    if (pidfile) {
+        if (fscanf(pidfile, "%ld", &pid) == 1 && pid > 0)
+            out->avahi_pid = pid;
+        fclose(pidfile);
+    }
+}
+
+/* Shairport Sync holds one Avahi client on the bus it started with. When
+ * libreecho-mdnsd replaces the bus or Avahi it tries once to make a new
+ * client, usually before the new daemon is up, and then never advertises
+ * again: AirPlay plays for a connected sender but no picker lists the
+ * speaker. Restart only Shairport Sync, once the new responder has settled
+ * and no stream is playing. Returns 1 when a restart is due now. */
+static int airplay_mdns_restart_due(const struct airplay_mdns_generation *registered,
+                                    const struct airplay_mdns_generation *live,
+                                    int settled, int playing)
+{
+    if (!settled || !live->bus_ino || !live->avahi_pid)
+        return 0;
+    if (registered->bus_dev == live->bus_dev &&
+        registered->bus_ino == live->bus_ino &&
+        registered->avahi_pid == live->avahi_pid)
+        return 0;
+    return !playing;
+}
+
+/* Records the live responder instance and reports whether it is running and
+ * has stayed the same for AIRPLAY_MDNS_SETTLE_MS. */
+static int airplay_mdns_settled(struct airplay_ctx *ctx,
+                                const struct airplay_mdns_generation *live,
+                                int responder_running, uint64_t now)
+{
+    if (memcmp(&ctx->mdns_seen, live, sizeof(*live)) != 0 ||
+        !ctx->mdns_seen_since_ms) {
+        ctx->mdns_seen = *live;
+        ctx->mdns_seen_since_ms = now ? now : 1;
+    }
+    return responder_running && live->bus_ino && live->avahi_pid &&
+           now - ctx->mdns_seen_since_ms >= AIRPLAY_MDNS_SETTLE_MS;
+}
+
+/* Called when Shairport Sync has exited: schedule its restart. */
+static void airplay_shairport_exited(struct airplay_ctx *ctx, uint64_t now)
+{
+    if (!ctx->shairport_backoff_ms ||
+        now - ctx->shairport_started_ms >= SHAIRPORT_HEALTHY_RUN_MS)
+        ctx->shairport_backoff_ms = SHAIRPORT_BACKOFF_MIN_MS;
+    else if (ctx->shairport_backoff_ms < SHAIRPORT_BACKOFF_MAX_MS)
+        ctx->shairport_backoff_ms *= 2;
+    if (ctx->shairport_backoff_ms > SHAIRPORT_BACKOFF_MAX_MS)
+        ctx->shairport_backoff_ms = SHAIRPORT_BACKOFF_MAX_MS;
+    ctx->shairport_retry_ms = now + ctx->shairport_backoff_ms;
 }
 
 static void on_signal(int signo)
@@ -1299,8 +1399,15 @@ static int reap(struct airplay_ctx *ctx)
             lost = 1;
         }
         if (pid == ctx->shairport_pid) {
+            /* Not fatal: it exits whenever Avahi is unreachable. NQPTP and
+             * the audio bridge stay up, and airplay_mdns_poll starts it
+             * again once discovery has settled. */
             ctx->shairport_pid = -1;
-            lost = 1;
+            if (ctx->enabled) {
+                airplay_shairport_exited(ctx, airplay_monotonic_ms());
+                le_log_warn("airplayd: Shairport Sync exited; restarting it in %llu ms once mDNS is ready",
+                            (unsigned long long)ctx->shairport_backoff_ms);
+            }
         }
         if (pid == ctx->sendspin_pid) {
             /* Not an AirPlay child: never tears the receiver down. A crash
@@ -1401,9 +1508,65 @@ static int sendspin_sink_ready(const struct airplay_ctx *ctx)
 /* The player is a static executable shipped in the payload and runs from the
  * mounted payload outside the sandbox: it needs none of the payload's
  * libraries, and does need audiod's socket and its state file on /data. */
+/* The owner's "play without pairing" choice, one plain file beside the state
+ * file: -1 when the owner has never set it, 1 only for an explicit "1", else 0.
+ * An unset choice is not passed to the player, so a payload that predates the
+ * option still starts. */
+static int sendspin_unpaired_setting(const struct airplay_ctx *ctx)
+{
+    char path[sizeof(ctx->sendspin_state) + 16], value[4] = "";
+    int fd, n;
+
+    if (snprintf(path, sizeof(path), "%s.unpaired", ctx->sendspin_state) >= (int)sizeof(path))
+        return -1;
+    fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0)
+        return -1;
+    n = (int)read(fd, value, sizeof(value) - 1);
+    close(fd);
+    return (n > 0 && value[0] == '1') ? 1 : 0;
+}
+
+static int sendspin_unpaired_access(const struct airplay_ctx *ctx)
+{
+    return sendspin_unpaired_setting(ctx) == 1;
+}
+
+/* Stores the choice atomically, then restarts the player so it applies. */
+static int sendspin_set_unpaired(struct airplay_ctx *ctx, int enabled)
+{
+    char path[sizeof(ctx->sendspin_state) + 16], temp[sizeof(ctx->sendspin_state) + 20];
+    const char *text = enabled ? "1\n" : "0\n";
+    size_t length = strlen(text);
+    int fd;
+
+    if (snprintf(path, sizeof(path), "%s.unpaired", ctx->sendspin_state) >= (int)sizeof(path) ||
+        snprintf(temp, sizeof(temp), "%s.tmp", path) >= (int)sizeof(temp))
+        return -1;
+    fd = open(temp, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0)
+        return -1;
+    if (write(fd, text, length) != (ssize_t)length || fsync(fd) != 0) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    close(fd);
+    if (rename(temp, path) != 0) {
+        unlink(temp);
+        return -1;
+    }
+    if (ctx->sendspin_pid > 0) {
+        stop_child(&ctx->sendspin_pid);
+        le_log_info("airplayd: Sendspin player stopped to apply the pairing setting");
+    }
+    return 0;
+}
+
 static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
 {
     char name[96], path[256];
+    int setting;
     pid_t pid;
 
     /* Advertise the device's own host name, as AirPlay does. */
@@ -1416,8 +1579,14 @@ static pid_t spawn_sendspin(const struct airplay_ctx *ctx)
     pid = fork();
     if (pid != 0)
         return pid;
-    execl(path, path, "--run", "--quiet", "--name", name,
-          "--state-file", ctx->sendspin_state, (char *)NULL);
+    setting = sendspin_unpaired_setting(ctx);
+    if (setting < 0)
+        execl(path, path, "--run", "--quiet", "--name", name,
+              "--state-file", ctx->sendspin_state, (char *)NULL);
+    else
+        execl(path, path, "--run", "--quiet", "--name", name,
+              "--state-file", ctx->sendspin_state,
+              "--unpaired-access", setting ? "on" : "off", (char *)NULL);
     _exit(127);
 }
 
@@ -1516,11 +1685,13 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
                                     (child_alive(ctx->engine_pid) &&
                                      child_alive(ctx->nqptp_pid) &&
                                      child_alive(ctx->audio_pid) &&
-                                     child_alive(ctx->shairport_pid) &&
+                                     (child_alive(ctx->shairport_pid) ||
+                                      ctx->shairport_retry_ms) &&
                                      ctx->metadata_fd >= 0)))
         return 0;
     if (!enabled) {
         stop_child(&ctx->shairport_pid);
+        ctx->shairport_retry_ms = 0;
         stop_child(&ctx->audio_pid);
         (void)airplay_master_end(ctx);
         stop_child(&ctx->nqptp_pid);
@@ -1560,15 +1731,24 @@ static int set_enabled(struct airplay_ctx *ctx, int enabled)
     metadata_reset(ctx);
     if (metadata_fifo_open(ctx) < 0)
         goto fail;
+    airplay_mdns_generation_read(LE_MDNS_BUS_SOCKET, LE_MDNS_AVAHI_PIDFILE,
+                                 &ctx->shairport_mdns);
+    ctx->shairport_mdns_deferred = 0;
+    ctx->shairport_retry_ms = 0;
+    ctx->shairport_backoff_ms = 0;
+    ctx->shairport_started_ms = airplay_monotonic_ms();
     ctx->shairport_pid = spawn_shairport(ctx);
     if (ctx->shairport_pid < 0)
         goto fail;
     /* A successful fork is not a successful enable: a child may reject its
      * configuration or a required runtime mount may still be absent. */
     for (i = 0; i < 20; ++i) {
-        if (!child_running(&ctx->nqptp_pid) || !child_running(&ctx->audio_pid) ||
-            !child_running(&ctx->shairport_pid))
+        if (!child_running(&ctx->nqptp_pid) || !child_running(&ctx->audio_pid))
             goto fail;
+        /* Shairport Sync exits when Avahi is not up yet (boot, a responder
+         * restart): retried by airplay_mdns_poll, not a failed enable. */
+        if (ctx->shairport_pid > 0 && !child_running(&ctx->shairport_pid))
+            airplay_shairport_exited(ctx, airplay_monotonic_ms());
         usleep(100000);
     }
     ctx->enabled = 1;
@@ -1582,10 +1762,74 @@ fail:
     return -1;
 }
 
+static void airplay_shairport_start(struct airplay_ctx *ctx,
+                                    const struct airplay_mdns_generation *live,
+                                    uint64_t now)
+{
+    ctx->shairport_mdns = *live;
+    ctx->shairport_mdns_deferred = 0;
+    ctx->shairport_started_ms = now;
+    ctx->shairport_pid = spawn_shairport(ctx);
+    if (ctx->shairport_pid < 0) {
+        ctx->shairport_pid = -1;
+        airplay_shairport_exited(ctx, now);
+        le_log_warn("airplayd: Shairport Sync could not be started");
+        return;
+    }
+    ctx->shairport_retry_ms = 0;
+}
+
+static void airplay_mdns_poll(struct airplay_ctx *ctx)
+{
+    static uint64_t last_check_ms;
+    char target[256];
+    struct airplay_mdns_generation live;
+    uint64_t now = airplay_monotonic_ms();
+    int result, settled;
+
+    if (last_check_ms && now - last_check_ms < AIRPLAY_LED_BRIDGE_CHECK_MS)
+        return;
+    last_check_ms = now;
+    if (!ctx->enabled)
+        return;
+    if (snprintf(target, sizeof(target), "%s%s", ctx->runtime_root,
+                 AIRPLAY_SANDBOX_BUS_SOCKET) >= (int)sizeof(target))
+        return;
+    result = airplay_socket_bridge_refresh(LE_MDNS_BUS_SOCKET, target);
+    if (result > 0)
+        le_log_info("airplayd: D-Bus socket bridge re-attached to the live shared bus");
+    else if (result < 0)
+        le_log_warn("airplayd: D-Bus socket bridge re-attach failed: %s", strerror(errno));
+    airplay_mdns_generation_read(LE_MDNS_BUS_SOCKET, LE_MDNS_AVAHI_PIDFILE, &live);
+    settled = airplay_mdns_settled(ctx, &live,
+                                   le_mdns_status(ctx->mdns_socket) == 1, now);
+    if (ctx->shairport_pid <= 0) {
+        if (ctx->shairport_retry_ms && settled && now >= ctx->shairport_retry_ms) {
+            airplay_shairport_start(ctx, &live, now);
+            if (ctx->shairport_pid > 0)
+                le_log_info("airplayd: Shairport Sync restarted against the shared mDNS responder");
+        }
+        return;
+    }
+    if (!airplay_mdns_restart_due(&ctx->shairport_mdns, &live, settled,
+                                  ctx->playing)) {
+        if (settled && ctx->playing && !ctx->shairport_mdns_deferred &&
+            memcmp(&ctx->shairport_mdns, &live, sizeof(live)) != 0) {
+            le_log_info("airplayd: shared mDNS responder restarted; re-registering after playback");
+            ctx->shairport_mdns_deferred = 1;
+        }
+        return;
+    }
+    stop_child(&ctx->shairport_pid);
+    airplay_shairport_start(ctx, &live, now);
+    if (ctx->shairport_pid > 0)
+        le_log_info("airplayd: Shairport Sync restarted to re-register with the restarted mDNS responder");
+}
+
 /* A host name change is republished by the shared supervisor, which renders
  * its records from the current host name. This controller no longer owns that
  * stack, so a refresh only reports whether the external dependency is
- * available; libreecho-web asks the supervisor's init script to restart it. */
+ * available. */
 static int refresh_hostname(struct airplay_ctx *ctx)
 {
     if (!ctx->enabled)
@@ -1625,7 +1869,7 @@ static int request(struct airplay_ctx *ctx, char *message,
 #undef RUNTIME_AVAILABLE
         length = snprintf(data, sizeof(data),
                           "{\"available\":%s,\"enabled\":%s,\"engine_running\":%s,\"mdns_running\":%s,\"nqptp_running\":%s,\"audio_running\":%s,\"shairport_running\":%s,"
-                          "\"sendspin_available\":%s,\"sendspin_enabled\":%s,\"sendspin_running\":%s",
+                          "\"sendspin_available\":%s,\"sendspin_enabled\":%s,\"sendspin_running\":%s,\"sendspin_unpaired_access\":%s",
                           available ? "true" : "false",
                           ctx->enabled ? "true" : "false",
                           child_alive(ctx->engine_pid) ? "true" : "false",
@@ -1635,7 +1879,8 @@ static int request(struct airplay_ctx *ctx, char *message,
                           child_alive(ctx->shairport_pid) ? "true" : "false",
                           sendspin_available(ctx) ? "true" : "false",
                           ctx->sendspin_wanted ? "true" : "false",
-                          child_alive(ctx->sendspin_pid) ? "true" : "false");
+                          child_alive(ctx->sendspin_pid) ? "true" : "false",
+                          sendspin_unpaired_access(ctx) ? "true" : "false");
         if (length < 0 || (size_t)length >= sizeof(data))
             return le_adapter_respond_err(response, response_size, id,
                                           "status response overflow");
@@ -1667,6 +1912,20 @@ static int request(struct airplay_ctx *ctx, char *message,
         ctx->sendspin_next_start_ms = 0;
         sendspin_poll(ctx);
         le_log_info("airplayd: Sendspin %s", enabled ? "enabled" : "disabled");
+        return le_adapter_respond_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "set_sendspin_unpaired")) {
+        if (json_bool(args, "enabled", &enabled) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "enabled must be boolean");
+        if (sendspin_set_unpaired(ctx, enabled) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "Sendspin setting could not be stored");
+        ctx->sendspin_backoff_ms = SENDSPIN_BACKOFF_MIN_MS;
+        ctx->sendspin_next_start_ms = 0;
+        sendspin_poll(ctx);
+        le_log_info("airplayd: Sendspin play without pairing %s",
+                    enabled ? "enabled" : "disabled");
         return le_adapter_respond_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "reset_sendspin_pairing")) {
@@ -1826,6 +2085,7 @@ int main(int argc, char **argv)
             (void)metadata_fifo_open(&ctx);
         airplay_master_poll(&ctx);
         airplay_led_bridge_poll(&ctx);
+        airplay_mdns_poll(&ctx);
         sendspin_poll(&ctx);
         pfd[0].fd = ctx.listener;
         pfd[0].events = POLLIN;

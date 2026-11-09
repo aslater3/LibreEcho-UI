@@ -149,6 +149,11 @@ public:
     // full; the caller should wait briefly rather than offer again at once.
     bool last_write_full() const;
     bool open_generation() const;      // armed and accepting audio
+    // True once the engine stopped serving the armed generation on its own (it
+    // refused DATA or PROGRESS with a stale generation or epoch, or the socket
+    // died). The sink is then disarmed: nothing more is offered into that
+    // generation. Cleared by a successful open() or by connect()/disconnect().
+    bool stream_lost() const;
 
 private:
     // --- bounded I/O -------------------------------------------------------
@@ -164,10 +169,12 @@ private:
     void commit_pending_locked();
     void close_socket_locked();
     void fence_locked();
+    void lose_stream_locked();
 
     int fd_ = -1;
     bool connected_ = false;
     bool armed_ = false;
+    bool stream_lost_ = false;
 
     uint32_t epoch_ = 0;
     uint32_t generation_ = 0;

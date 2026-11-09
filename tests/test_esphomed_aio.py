@@ -26,9 +26,11 @@ class PinnedFixture(Fixture):
   client.media_player_command(1,media_url='http://example.invalid/fixture.mp3');await self.wait_for(lambda:any(r['cmd']=='play' for r in self.adapters['radio'].calls),'play URL command');self.assertEqual(self.wait_call('radio','play')['args'],{'url':'http://example.invalid/fixture.mp3'})
   for command,verb in [(MediaPlayerCommand.PAUSE,'pause'),(MediaPlayerCommand.PLAY,'resume'),(MediaPlayerCommand.STOP,'stop')]:
    client.media_player_command(1,command=command);await self.wait_for(lambda:any(r['cmd']==verb for r in self.adapters['radio'].calls),verb)
+  # #404: the pinned client's Cancel request press is accepted while idle (no turn, connection kept).
+  client.button_command(404);await asyncio.sleep(.1)
   client.media_player_command(1,volume=.42);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':42} for r in self.adapters['audio'].calls),'volume command')
   client.media_player_command(1,command=MediaPlayerCommand.MUTE);await self.wait_for(lambda:any(r['cmd']=='set_volume' and r['args']=={'volume':0} for r in self.adapters['audio'].calls),'output mute');await self.wait_for(lambda:any(isinstance(s,MediaPlayerEntityState) and s.muted for s in states),'output muted state')
-  client.media_player_command(1,command=MediaPlayerCommand.UNMUTE);await self.wait_for(lambda:isinstance(states[-2],MediaPlayerEntityState) and not states[-2].muted if len(states)>1 else False,'output unmuted state')
+  mark=len(states);client.media_player_command(1,command=MediaPlayerCommand.UNMUTE);await self.wait_for(lambda:any(isinstance(s,MediaPlayerEntityState) and not s.muted for s in states[mark:]),'output unmuted state')
   client.switch_command(2,True);await self.wait_for(lambda:self.adapters['audio'].muted,'microphone mute');self.privacy.write_text('1\n');await asyncio.sleep(.3);before=sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls);client.switch_command(2,False);await asyncio.sleep(.1);self.assertEqual(sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls),before)
   self.privacy.write_text('0\n');await asyncio.sleep(.3);client.switch_command(2,False);await self.wait_for(lambda:not self.adapters['audio'].muted,'microphone unmute');await asyncio.sleep(.1)
   starts=[];stops=[];audio=[];finished=[]
@@ -71,13 +73,27 @@ class PinnedFixture(Fixture):
   async def run():
    client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',provide_time=False)
    try:
-    await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61)
-    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2});self.assertFalse(services)
+    await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61);self.assertEqual(info.bluetooth_proxy_feature_flags,0,'BLE proxy is opt-in (esphome_bluetooth_proxy), off by default')
+    self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,50,404,10,11,12,13,20,21,22,30,40,41,42,43,70});self.assertEqual(sorted(x.name for x in services),['announce','play_sound','set_ring'])
+    from aioesphomeapi.model import ButtonInfo
+    cancel=next(e for e in entities if isinstance(e,ButtonInfo));self.assertEqual((cancel.key,cancel.object_id,cancel.name),(404,'cancel_request','Cancel request'))
     from aioesphomeapi.model import MediaPlayerEntityFeature,MediaPlayerInfo
     media=next(e for e in entities if isinstance(e,MediaPlayerInfo));self.assertTrue(media.supports_pause);self.assertEqual(media.feature_flags,int(MediaPlayerEntityFeature.PAUSE|MediaPlayerEntityFeature.PLAY|MediaPlayerEntityFeature.STOP|MediaPlayerEntityFeature.VOLUME_SET|MediaPlayerEntityFeature.VOLUME_MUTE|MediaPlayerEntityFeature.PLAY_MEDIA|MediaPlayerEntityFeature.MEDIA_ANNOUNCE))
     await self.exercise_controls_and_voice(client)
     await client._get_connection().send_message_await_response(PingRequest(),PingResponse)
     await client.disconnect()
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),12))
+ def test_pinned_client_time_zone_reaches_config_when_followed(self):
+  """#371: the pinned client answers GetTimeRequest with the zone HA passes as timezone=hass.config.time_zone."""
+  self.s.close();time.sleep(.05);cfg=json.loads(self.config.read_text());cfg['timezone']='UTC';cfg['timezone_source']='home_assistant';self.config.write_text(json.dumps(cfg))
+  async def run():
+   client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',timezone='America/Chicago')
+   try:
+    await client.connect(login=True);client.subscribe_states(lambda state:None)
+    await self.wait_for(lambda:json.loads(self.config.read_text()).get('timezone')!='UTC','time zone from GetTimeResponse')
+    stored=json.loads(self.config.read_text());self.assertEqual(stored['timezone'],'CST6CDT,M3.2.0,M11.1.0');self.assertEqual(stored['timezone_name'],'')
+    await client._get_connection().send_message_await_response(PingRequest(),PingResponse)
    finally:await client.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),12))
  def test_pinned_noise_provision_reconnect_wrong_key(self):
@@ -101,9 +117,89 @@ class PinnedFixture(Fixture):
    await asyncio.sleep(.05)
    good=APIClient('127.0.0.1',self.port,noise_psk=encoded,provide_time=False)
    try:
-    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2})
+    await good.connect(login=True);info=await good.device_info();self.assertFalse(info.api_encryption_provisionable);entities,_=await good.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,50,404,10,11,12,13,20,21,22,30,40,41,42,43,70})
     await self.exercise_controls_and_voice(good)
     await good._get_connection().send_message_await_response(PingRequest(),PingResponse);await good.disconnect()
    finally:await good.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),20))
+ def test_pinned_settings_numbers_have_limits(self):
+  # ListEntitiesNumberResponse: min=6 max=7 step=8 entity_category=10 unit=11 mode=12.
+  # Wrong field numbers once left HA with min=max=step=0 (unusable sliders).
+  self.s.close();time.sleep(.05)
+  async def run():
+   from aioesphomeapi.model import EntityCategory,NumberInfo,NumberMode
+   client=APIClient('127.0.0.1',self.port,provide_time=False)
+   try:
+    await client.connect(login=True);entities,_=await client.list_entities_services()
+    numbers={e.object_id:e for e in entities if isinstance(e,NumberInfo)}
+    self.assertEqual(set(numbers),{'reply_volume','volume','wake_word_sensitivity','led_brightness'})
+    for n in numbers.values():
+     self.assertEqual((n.min_value,n.max_value,n.step),(0,100,1),n.object_id)
+     self.assertEqual((n.entity_category,n.mode),(EntityCategory.CONFIG,NumberMode.SLIDER),n.object_id)
+     self.assertFalse(n.disabled_by_default,n.object_id)
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),20))
+ def test_pinned_reply_volume_number(self):
+  # Separate reply volume (#409): a config number that follows the master until set.
+  self.s.close();time.sleep(.05)
+  async def run():
+   from aioesphomeapi.model import EntityCategory,NumberInfo,NumberMode,NumberState
+   client=APIClient('127.0.0.1',self.port,provide_time=False)
+   try:
+    await client.connect(login=True);entities,_=await client.list_entities_services()
+    number=next(e for e in entities if isinstance(e,NumberInfo))
+    self.assertEqual((number.key,number.object_id,number.name),(50,'reply_volume','Reply volume'))
+    self.assertEqual((number.min_value,number.max_value,number.step,number.unit_of_measurement),(0,100,1,'%'))
+    self.assertEqual(number.entity_category,EntityCategory.CONFIG);self.assertEqual(number.mode,NumberMode.SLIDER)
+    states=[];client.subscribe_states(lambda s:states.append(s) if isinstance(s,NumberState) else None)
+    await self.wait_for(lambda:any(s.state==66 for s in states),'reply volume following the master (66)')
+    client.number_command(50,25)
+    await self.wait_for(lambda:any(r['cmd']=='set_reply_volume' for r in self.adapters['audio'].calls),'set_reply_volume')
+    self.assertEqual(self.wait_call('audio','set_reply_volume')['args'],{'volume':25})
+    await self.wait_for(lambda:states and states[-1].state==25,'reply volume state 25')
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),10))
+# Owner option esphome_server_wake: the pinned client must see a run opened with
+# USE_VAD|USE_WAKE_WORD (3) and no phrase, receive mic audio with no device wake
+# event, and see the run stop on unsubscribe with the status flag cleared.
+class PinnedServerWake(PinnedFixture):
+ config_fields={'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':'','esphome_server_wake':True}
+ def test_pinned_server_wake_streams_and_stops(self):
+  self.s.close();time.sleep(.05)
+  async def run():
+   client=APIClient('127.0.0.1',self.port,client_info='LibreEcho server wake acceptance',provide_time=False)
+   try:
+    await client.connect(login=True)
+    starts=[];stops=[];audio=[]
+    async def start(conversation,flags,settings,wake):starts.append((conversation,flags,wake));return 0
+    async def stop(abort):stops.append(abort)
+    async def capture(data,data2):audio.append((data,data2))
+    async def done(result):pass
+    unsubscribe=client.subscribe_voice_assistant(handle_start=start,handle_stop=stop,handle_audio=capture,handle_announcement_finished=done)
+    a=self.adapters['wake'];a.wait_streams()
+    for i in range(0,6400,320):a.samples(i)
+    await self.wait_for(lambda:len(starts)==1,'server-wake run start without any device wake event')
+    self.assertEqual(starts[0][1],3,'USE_VAD|USE_WAKE_WORD');self.assertFalse(starts[0][2],'no wake phrase is sent in server-wake mode')
+    await self.wait_for(lambda:len(audio)>0,'continuous mic audio while the server run is open')
+    self.assertTrue(json.loads((self.p/'status.json').read_text())['server_wake_streaming'])
+    # Mic mute must end the server run (the client delivers the stop while still subscribed), and unmute must reopen it.
+    client.switch_command(2,True);await self.wait_for(lambda:stops==[True],'server-wake stop on microphone mute')
+    await asyncio.sleep(.1);self.assertFalse(json.loads((self.p/'status.json').read_text())['server_wake_streaming'])
+    client.switch_command(2,False);await self.wait_for(lambda:len(starts)==2,'server-wake restart after unmute')
+    self.assertEqual(starts[1][1],3);self.assertFalse(starts[1][2])
+    unsubscribe();await client.disconnect()
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),12))
+# Owner option esphome_bluetooth_proxy (off by default, see the plain test above): enabling it reports
+# PASSIVE_SCAN|RAW_ADVERTISEMENTS (33) in the device info the pinned client parses.
+class PinnedBluetoothProxy(PinnedFixture):
+ config_fields={'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':'','esphome_bluetooth_proxy':True}
+ def test_pinned_enabled_bluetooth_proxy_reports_flags(self):
+  self.s.close();time.sleep(.05)
+  async def run():
+   client=APIClient('127.0.0.1',self.port,client_info='LibreEcho ble proxy acceptance',provide_time=False)
+   try:
+    await client.connect(login=True);info=await client.device_info();self.assertEqual(info.bluetooth_proxy_feature_flags,33)
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),12))
 if __name__=='__main__':unittest.main(defaultTest='PinnedFixture')

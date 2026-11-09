@@ -27,7 +27,7 @@ with tempfile.TemporaryDirectory(prefix="test-esphome-control-", dir=SCRATCH) as
     binary = fixture / "control"
     run(flags + ['-DLE_TEST_ROOT="' + str(fixture) + '"', "tests/test_esphome_control.c",
                  "src/backend.c", "src/json.c", "src/config_store.c", "src/service_env.c",
-                 "src/event_bus.c", "src/log.c", "src/adapter/wyoming_client.c", "-o", str(binary)])
+                 "src/event_bus.c", "src/log.c", "src/adapter/wyoming_client.c", "src/adapter/timer_schedule.c", "-o", str(binary)])
     daemon = daemon_binary(fixture)
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))

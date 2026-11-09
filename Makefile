@@ -39,7 +39,7 @@ MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamfo
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
 	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
 	src/adapter/led_music_director.c src/adapter/led_music_render.c
-BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/adapter_client.c src/json.c src/log.c
+BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c src/adapter/adapter_client.c src/json.c src/log.c
 WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/json.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c src/adapter/mic_array_render.c
 RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_opus.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
@@ -53,17 +53,18 @@ RADIOD_OPUS_LIBS ?= $(if $(strip $(RADIOD_OPUS_PREFIX)),\
 	$(RADIOD_OPUS_PREFIX)/lib/libopusfile.a $(RADIOD_OPUS_PREFIX)/lib/libopus.a $(RADIOD_OPUS_PREFIX)/lib/libogg.a)
 RADIOD_OPUS_CPPFLAGS = $(if $(strip $(RADIOD_OPUS_PREFIX)),\
 	-DLE_RADIOD_ENABLE_OPUS -I$(RADIOD_OPUS_PREFIX)/include/opus -I$(RADIOD_OPUS_PREFIX)/include)
-BTD_SOURCES = src/adapter/btd.c src/adapter/bt_profile.c src/adapter/radio_resample.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
+BTD_SOURCES = src/adapter/btd.c src/adapter/bt_adv_proxy.c src/adapter/bt_profile.c src/adapter/radio_resample.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TIMERD_SOURCES = src/adapter/timerd.c src/adapter/timer_schedule.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
 TTSD_SHERPA_CXX_SOURCES = src/adapter/tts_engine_sherpa.cpp
 STTD_SOURCES = src/adapter/sttd.c src/adapter/stt_engine_mock.c src/adapter/adapter_server.c src/log.c
 STTD_SHERPA_CXX_SOURCES = src/adapter/stt_engine_sherpa.cpp
-AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/timer_intent.c src/adapter/llm_provider.c \
+AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/timer_intent.c src/adapter/timer_schedule.c src/adapter/llm_provider.c \
 	src/adapter/llm_codex.c src/adapter/llm_openai.c src/adapter/llm_http.c src/adapter/llm_store.c \
 	src/adapter/voice_reply.c src/adapter/voice_playback.c \
-	src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+	src/adapter/voice_pipeline.c src/adapter/voice_stream.c src/adapter/voice_ns.c \
+	src/adapter/voice_whisper.c \
 	src/adapter/voice_history.c \
 	src/adapter/voice_listening_led.c \
 	src/adapter/spoken_time.c \
@@ -80,10 +81,10 @@ ESPHOMED_TLS_LIBS ?= $(if $(strip $(ESPHOMED_TLS_PREFIX)),$(ESPHOMED_TLS_PREFIX)
 ifneq ($(strip $(ESPHOMED_TLS_PREFIX)),)
 override CPPFLAGS += -I$(ESPHOMED_TLS_PREFIX)/include
 endif
-ESPHOMED_SOURCES = src/adapter/esphomed.c src/adapter/esphome_proto.c \
+ESPHOMED_SOURCES = src/adapter/esphomed.c src/adapter/esphome_proto.c src/adapter/esphome_ble_proxy.c \
 	src/adapter/esphome_frame.c src/adapter/esphome_noise.c src/adapter/esphome_playback.c \
 	src/adapter/radio_resample.c src/adapter/mdns_client.c src/adapter/mdns_lease.c \
-	src/config_store.c src/json.c
+	src/adapter/voice_ns.c src/config_store.c src/json.c
 ESPHOMED_TEST_TLS_PREFIX ?= $(ESPHOMED_TLS_PREFIX)
 ESPHOMED_CRYPTO_PYTHON ?= python3
 ESPHOMED_AIO_PYTHON ?= python3
@@ -94,12 +95,12 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 	src/adapter/live_transport_realtime.c src/adapter/live_audio_out.c \
 	src/adapter/live_tools.c src/adapter/timer_intent.c src/adapter/radio_resample.c \
 	src/adapter/live_b64.c src/adapter/ws_client.c src/adapter/live_dns.c \
-	src/adapter/llm_store.c \
+	src/adapter/llm_store.c src/adapter/live_ha.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c src/peer_settings.c src/peer_announce.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -187,7 +188,7 @@ $(BUILD)/libreecho-sttd: $(STTD_OBJECTS)
 
 $(BUILD)/libreecho-agentd: $(AGENTD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AGENTD_OBJECTS) $(LDFLAGS) \
-		-lpthread -o $@
+		-lpthread -lm -o $@
 
 # The shared supervisor ships in the image like the other daemons, so it is
 # built with the same language level, warnings and feature macros rather than a
@@ -207,6 +208,46 @@ test-mdns:
 	python3 tests/test_mdns_wyoming.py
 	python3 tests/test_mdns_esphome.py
 	python3 tests/test_mdns_sendspin.py
+	python3 tests/test_mdns_libreecho.py
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_peers.c src/peers.c -o $(BUILD)/test-peers
+	./$(BUILD)/test-peers
+
+# Signed device-to-device messages (#450): HMAC, pairing code, key file,
+# forged/replayed packets refused, device-list proof.
+.PHONY: test-peer-auth
+test-peer-auth:
+	mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_peer_auth.c src/peer_auth.c src/peer_link.c src/json.c -o $(BUILD)/test-peer-auth
+	./$(BUILD)/test-peer-auth
+
+# Only the nearest device answers (#408): claim format, ranking, timing,
+# switch and pairing, forged/replayed claims refused, over loopback UDP.
+.PHONY: test-wake-arbiter
+test-wake-arbiter:
+	mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_wake_arbiter.c src/adapter/wake_arbiter.c src/peer_auth.c src/json.c -lm -o $(BUILD)/test-wake-arbiter
+	./$(BUILD)/test-wake-arbiter
+
+# Device groups (#448): store, malformed files, the action names.
+.PHONY: test-peer-group
+test-peer-group:
+	mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_peer_group.c src/peer_group.c -o $(BUILD)/test-peer-group
+	./$(BUILD)/test-peer-group
+
+# Broadcast announcements (#412): the body rules for the spoken text.
+.PHONY: test-peer-announce
+test-peer-announce:
+	mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_peer_announce.c src/peer_announce.c -o $(BUILD)/test-peer-announce
+	./$(BUILD)/test-peer-announce
+
+# Settings copy (#449): the copy list and its boundary (no identity, network or secrets).
+.PHONY: test-peer-settings
+test-peer-settings:
+	mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_peer_settings.c src/peer_settings.c -o $(BUILD)/test-peer-settings
+	./$(BUILD)/test-peer-settings
 
 # Sendspin adapter contract: dependency-free, safe for the default suite. It pins
 # the offline/player-only CMake shape and that the heavy SDK lane stays opt-in.
@@ -262,6 +303,7 @@ test-sendspin-sink:
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_ack_validation.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-ack-validation
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_session_concurrency.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-session-concurrency
+	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_stream_recovery.cpp $(BUILD)/sendspin-engine_sink_session.o $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-stream-recovery
 	$(CROSS_COMPILE)$(CXX) $(SENDPIN_CXXFLAGS) -Isrc/adapter/sendspin -I"$(SENDPIN_AIRPLAY)" -Itests tests/test_sendspin_late_credit.cpp $(BUILD)/sendspin-engine_sink.o $(BUILD)/sendspin-audio_sink.o $(SENDPIN_LDLIBS) -o $(BUILD)/test-sendspin-late-credit
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc -Isrc/adapter -c src/adapter/adapter_client.c -o $(BUILD)/sendspin-adapter_client.o
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L $(SENDPIN_C99FLAGS) -Isrc -c src/log.c -o $(BUILD)/sendspin-log.o
@@ -288,6 +330,7 @@ test-sendspin-sink:
 	$(BUILD)/test-sendspin-ack-validation
 	$(BUILD)/test-sendspin-session
 	$(BUILD)/test-sendspin-session-concurrency
+	$(BUILD)/test-sendspin-stream-recovery
 
 test-sendspin-sink-sanitize: SENDPIN_CXXFLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
 test-sendspin-sink-sanitize: SENDPIN_C99FLAGS += -fsanitize=address,undefined -fno-omit-frame-pointer
@@ -395,7 +438,14 @@ $(BUILD)/test-live-session: tests/test_live_session.c src/adapter/live_session.c
 
 $(BUILD)/test-live-tools: tests/test_live_tools.c src/adapter/live_tools.c \
 		src/adapter/timer_intent.c src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/adapter/live_ha.c src/adapter/live_dns.c \
 		src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
+
+$(BUILD)/test-live-ha: tests/test_live_ha.c src/adapter/live_tools.c src/adapter/live_ha.c \
+		src/adapter/live_dns.c src/adapter/timer_intent.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) $(LIVE_TEST_CFLAGS) $^ -o $@
 $(BUILD)/test-live-audio-out: tests/test_live_audio_out.c \
@@ -418,11 +468,12 @@ $(BUILD)/test-lived: tests/test_lived.c $(BUILD)/libreecho-lived
 	$(CC) $(LIVE_TEST_CFLAGS) tests/test_lived.c -o $@
 
 test-lived: $(BUILD)/test-live-ring $(BUILD)/test-live-session \
-		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
+		$(BUILD)/test-live-tools $(BUILD)/test-live-ha $(BUILD)/test-live-audio-out \
 		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived
 	./$(BUILD)/test-live-ring
 	./$(BUILD)/test-live-session
 	./$(BUILD)/test-live-tools
+	./$(BUILD)/test-live-ha
 	./$(BUILD)/test-live-audio-out
 	./$(BUILD)/test-ws-client
 	./$(BUILD)/test-live-dns
@@ -456,22 +507,50 @@ $(BUILD)/test-boot-control: tests/test_boot_control.c \
 
 
 $(BUILD)/test-buttond-privacy: tests/test_buttond_privacy.c \
-	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
-		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 		src/adapter/adapter_client.c src/json.c src/log.c -o $@
 
 $(BUILD)/test-buttond-events: tests/test_buttond_events.c \
-	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 	src/adapter/adapter_client.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
-		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
+		src/adapter/adapter_client.c src/json.c src/log.c -o $@
+
+$(BUILD)/test-buttond-actions: tests/test_buttond_actions.c \
+	tests/buttond_fixture.h src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
+	src/adapter/adapter_client.c src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-Isrc -Isrc/adapter $< src/adapter/buttond_timing.c src/adapter/buttond_gesture.c \
 		src/adapter/adapter_client.c src/json.c src/log.c -o $@
 
 $(BUILD)/test-action-sample: tests/test_action_sample.c \
+	src/adapter/audiod.c src/adapter/adapter_client.c \
+	src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
+$(BUILD)/test-sound-store: tests/test_sound_store.c src/sound_store.c src/sound_store.h src/adapter/event_sound.h
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc tests/test_sound_store.c src/sound_store.c -o $@
+
+$(BUILD)/test-event-sound: tests/test_event_sound.c \
+	src/adapter/audiod.c src/adapter/event_sound.h src/adapter/adapter_client.c \
+	src/adapter/adapter_server.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+		-lm -o $@
+
+$(BUILD)/test-dnd-audio: tests/test_dnd_audio.c \
 	src/adapter/audiod.c src/adapter/adapter_client.c \
 	src/adapter/adapter_server.c src/log.c
 	@mkdir -p $(BUILD)
@@ -490,6 +569,11 @@ $(BUILD)/test-cue-rate-limit: tests/test_cue_rate_limit.c \
 $(BUILD)/test-buttond-timing: tests/test_buttond_timing.c \
 	src/adapter/buttond_timing.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-buttond-gesture: tests/test_buttond_gesture.c \
+	src/adapter/buttond_gesture.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-watchdog-policy: tests/test_watchdog_policy.c \
 		src/adapter/watchdog_policy.c
@@ -510,11 +594,23 @@ $(BUILD)/test-service-cancel-linux: tests/test_service_cancel_linux.c \
 # Drives the real worker, queue, thread and decoder against scripted score
 # sequences; the test supplies its own le_wake_engine, so no ONNX runtime or
 # model is needed to exercise the decoding rules.
+$(BUILD)/test-voice-clip-store: tests/test_voice_clip_store.c \
+	src/adapter/voice_clip_store.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
+		$^ -o $@
+
 $(BUILD)/test-wake-decode: tests/test_wake_decode.c \
-	src/adapter/wake_worker.c
+	src/adapter/wake_worker.c src/wake_model.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter \
 		$^ -lpthread -lm -o $@
+
+$(BUILD)/test-wake-model: tests/test_wake_model.c src/wake_model.c \
+	src/wake_model_store.c src/config_store.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc \
+		$^ -o $@
 
 $(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c src/service_env.c
 	@mkdir -p $(BUILD)
@@ -522,11 +618,11 @@ $(BUILD)/test-wake-health: tests/test_wake_health.c src/json.c src/log.c src/ser
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $^ -o $@
 
-$(BUILD)/test-noise-playback: tests/test_noise_playback.c src/api.c src/json.c
+$(BUILD)/test-noise-playback: tests/test_noise_playback.c src/api.c src/wake_model.c src/wake_model_store.c src/json.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CSTD) $(WARN) \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter tests/test_noise_playback.c src/json.c -lm -o $@
+		-Isrc -Isrc/adapter tests/test_noise_playback.c src/json.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c -lm -o $@
 
 $(BUILD)/test-wake-health-api: tests/test_wake_health_api.c \
 	$(filter-out $(BUILD)/main.o $(BUILD)/http_server.o,$(OBJECTS))
@@ -569,7 +665,7 @@ $(BUILD)/test-timer-json: tests/test_timer_json.c \
 		-Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-backend-mock-timers: tests/test_backend_mock_timers.c \
-	src/backend_mock.c src/config_store.c src/json.c src/log.c
+	src/backend_mock.c src/adapter/timer_schedule.c src/config_store.c src/json.c src/log.c
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L -DLE_DEV_CONTROLS -DLE_MOCK_TESTING $(CSTD) $(WARN) \
 		-Werror -ffunction-sections -fdata-sections -Wl,--gc-sections \
@@ -597,6 +693,17 @@ $(BUILD)/test-gateway-probe: tests/test_gateway_probe.c \
 $(BUILD)/test-bt-mgmt-events: tests/test_bt_mgmt_events.c \
 		src/adapter/bt_mgmt_events.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-bt-adv-proxy: tests/test_bt_adv_proxy.c \
+		src/adapter/bt_adv_proxy.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-esphome-ble-proxy: tests/test_esphome_ble_proxy.c \
+		src/adapter/esphome_ble_proxy.c src/adapter/esphome_proto.c \
+		src/json.c
+	# esphome_proto.c's one-line `if` style trips -Wmisleading-indentation on
+	# newer GCC; that file is not touched here, so only that warning is off.
+	$(CC) $(CSTD) $(WARN) -Werror -Wno-misleading-indentation -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-bt-pairing-events: tests/test_bt_pairing_events.c \
 		src/adapter/bt_pairing_events.c
@@ -905,6 +1012,20 @@ $(BUILD)/libreecho-sttd-sherpa-arm32: $(BUILD)/sttd.arm.o \
 		-Wl,--start-group $(ORT_ARCHIVES) $(ORT_ABSEIL) -Wl,--end-group \
 		-lpthread -ldl -lm -o $@
 
+$(BUILD)/test-voice-ns: tests/test_voice_ns.c src/adapter/voice_ns.c src/adapter/voice_ns.h
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -Isrc/adapter $(filter %.c,$^) -lm -o $@
+
+$(BUILD)/test-voice-pipeline-noise: tests/test_voice_pipeline_noise.c \
+		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c src/adapter/voice_whisper.c src/adapter/voice_listening_led.c \
+		src/adapter/adapter_client.c src/adapter/adapter_server.c \
+		src/json.c src/log.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -Isrc/adapter $^ -lpthread -lm -o $@
+
 $(BUILD)/test-voice-aec: tests/test_voice_aec.c src/adapter/voice_aec.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
@@ -923,6 +1044,18 @@ $(BUILD)/test-sbc-codec: tests/test_sbc_codec.c $(BUILD)/adapter/bt-sbc/sbc.o \
 $(BUILD)/test-sdp-wire-format: tests/test_sdp_wire_format.c \
 		$(BUILD)/adapter/bt_profile.o $(BUILD)/adapter/radio_resample.o \
 		$(BUILD)/log.o \
+		$(BUILD)/adapter/bt-sbc/sbc.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_neon.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_armv6.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_sse.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_mmx.o \
+		$(BUILD)/adapter/bt-sbc/sbc_primitives_iwmmxt.o
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc $^ -lm -o $@
+
+$(BUILD)/test-bt-a2dp-source: tests/test_bt_a2dp_source.c \
+		src/adapter/bt_a2dp_source.c \
 		$(BUILD)/adapter/bt-sbc/sbc.o \
 		$(BUILD)/adapter/bt-sbc/sbc_primitives.o \
 		$(BUILD)/adapter/bt-sbc/sbc_primitives_neon.o \
@@ -967,6 +1100,16 @@ $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_re
 $(BUILD)/test-spoken-time: tests/test_spoken_time.c src/adapter/spoken_time.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-timezone: tests/test_timezone.c src/timezone.h
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_timezone.c -o $@
+
+$(BUILD)/test-clap-detector: tests/test_clap_detector.c src/adapter/clap_detector.c src/adapter/clap_detector.h
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< src/adapter/clap_detector.c -lm -o $@
+
+$(BUILD)/test-smoke-alarm-detector: tests/test_smoke_alarm_detector.c src/adapter/smoke_alarm_detector.c src/adapter/smoke_alarm_detector.h
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< src/adapter/smoke_alarm_detector.c -lm -o $@
 
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
@@ -1047,36 +1190,59 @@ $(BUILD)/mock-voice-source: tests/mock_voice_source.c \
 
 $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c \
+		src/adapter/voice_whisper.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
 		src/json.c $(BUILD)/libreecho-sttd $(BUILD)/mock-voice-source
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c \
+		src/adapter/voice_whisper.c \
 		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
-		src/json.c src/log.c -lpthread -o $@
+		src/json.c src/log.c -lpthread -lm -o $@
+
+$(BUILD)/test-voice-pipeline-stop-window: tests/test_voice_pipeline_stop_window.c \
+		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c src/adapter/voice_whisper.c \
+		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/json.c $(BUILD)/libreecho-sttd
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_voice_pipeline_stop_window.c \
+		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+		src/adapter/voice_ns.c src/adapter/voice_whisper.c \
+		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/adapter/adapter_server.c src/json.c src/log.c -lpthread -lm -o $@
+
+$(BUILD)/test-voice-whisper: tests/test_voice_whisper.c \
+		src/adapter/voice_whisper.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc tests/test_voice_whisper.c \
+		src/adapter/voice_whisper.c -o $@
 
 $(BUILD)/test-voice-pipeline-restart: tests/test_voice_pipeline_restart.c \
-	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
+	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/voice_clip_store.c -o $@
 
 $(BUILD)/test-voice-pipeline-env-isolation: tests/test_voice_pipeline_env_isolation.c \
-	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c
+	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c -o $@
+		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c src/service_env.c src/adapter/voice_clip_store.c -o $@
 
 $(BUILD)/test-home-assistant-discovery: tests/test_home_assistant_discovery_lifecycle.c \
-	src/api.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c \
-	src/service_env.c
+	src/api.c src/wake_model.c src/wake_model_store.c src/backend.c src/json.c src/config_store.c src/adapter/wyoming_client.c \
+	src/service_env.c src/adapter/timer_schedule.c
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -ffunction-sections -fdata-sections -Wl,--gc-sections \
 		-Isrc -Isrc/adapter $< src/backend.c src/json.c src/config_store.c \
-		src/service_env.c src/adapter/wyoming_client.c -o $@
+		src/service_env.c src/adapter/wyoming_client.c src/adapter/voice_clip_store.c -o $@
 
 $(BUILD)/test-voice-listening-feedback: \
 		tests/test_voice_listening_feedback.c \
@@ -1090,17 +1256,19 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
-		src/adapter/voice_stream.c \
+		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
+		src/adapter/smoke_alarm_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
-		src/adapter/adapter_server.c src/log.c src/json.c
+		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$(filter %.c,$^) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
-		src/adapter/voice_stream.c \
-		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c
+		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
+		src/adapter/smoke_alarm_detector.c \
+		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
 		-ffunction-sections -fdata-sections -Wall -Wextra \
@@ -1150,9 +1318,14 @@ $(BUILD)/%.wake.arm.o: src/adapter/%.c
 $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
 	src/adapter/voice_aec.h src/adapter/voice_dsp.h \
 	src/adapter/voice_reference.h src/adapter/voice_stream.h \
+	src/adapter/clap_detector.h src/adapter/wake_arbiter.h \
+	src/adapter/smoke_alarm_detector.h \
 	src/adapter/wake_led.h \
 	src/adapter/wake_worker.h src/json.h
+$(BUILD)/wake_arbiter.wake.arm.o: src/adapter/wake_arbiter.h src/peer_auth.h
 $(BUILD)/voice_aec.wake.arm.o: src/adapter/voice_aec.h
+$(BUILD)/clap_detector.wake.arm.o: src/adapter/clap_detector.h
+$(BUILD)/smoke_alarm_detector.wake.arm.o: src/adapter/smoke_alarm_detector.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
 $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
@@ -1160,6 +1333,21 @@ $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
 $(BUILD)/wake_engine_onnx.arm.o: src/adapter/wake_engine.h
 
 $(BUILD)/log.wake.arm.o: src/log.c
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L \
+		-DLE_WAKE_ENGINE_ONNX -std=c99 -O3 -march=armv7-a \
+		-mfpu=neon-vfpv4 -mfloat-abi=hard -ffunction-sections \
+		-fdata-sections -Wall -Wextra -Wpedantic -Werror \
+		-Isrc -Isrc/adapter -c $< -o $@
+
+$(BUILD)/wake_model.wake.arm.o: src/wake_model.c src/wake_model.h
+	@mkdir -p $(BUILD)
+	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 -march=armv7-a \
+		-mfpu=neon-vfpv4 -mfloat-abi=hard -ffunction-sections \
+		-fdata-sections -Wall -Wextra -Wpedantic -Werror \
+		-Isrc -Isrc/adapter -c $< -o $@
+
+$(BUILD)/peer_auth.wake.arm.o: src/peer_auth.c src/peer_auth.h src/le_sha256.h
 	@mkdir -p $(BUILD)
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L \
 		-DLE_WAKE_ENGINE_ONNX -std=c99 -O3 -march=armv7-a \
@@ -1176,16 +1364,22 @@ $(BUILD)/json.wake.arm.o: src/json.c src/json.h
 		-Isrc -Isrc/adapter -c $< -o $@
 
 WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
+	$(BUILD)/clap_detector.wake.arm.o \
+	$(BUILD)/smoke_alarm_detector.wake.arm.o \
 	$(BUILD)/voice_aec.wake.arm.o \
 	$(BUILD)/voice_reference.wake.arm.o \
 	$(BUILD)/voice_dsp.wake.arm.o \
 	$(BUILD)/voice_stream.wake.arm.o \
 	$(BUILD)/wake_worker.wake.arm.o \
 	$(BUILD)/wake_led.wake.arm.o \
+	$(BUILD)/wake_arbiter.wake.arm.o \
+	$(BUILD)/peer_auth.wake.arm.o \
+	$(BUILD)/voice_clip_store.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
 	$(BUILD)/adapter_server.wake.arm.o \
 	$(BUILD)/log.wake.arm.o \
 	$(BUILD)/json.wake.arm.o \
+	$(BUILD)/wake_model.wake.arm.o \
 	$(BUILD)/wake_engine_onnx.arm.o
 
 $(BUILD)/libreecho-waked-onnx-arm32: $(WAKE_DAEMON_ARM_OBJECTS)
@@ -1200,7 +1394,7 @@ adapters: $(ADAPTER_TARGETS)
 
 $(BUILD)/adapter/watchdogd.o $(BUILD)/adapter/esphomed.o $(BUILD)/api.o: src/esphome_health.h src/json.h
 $(BUILD)/test-voice-pipeline-restart $(BUILD)/test-voice-pipeline-env-isolation $(BUILD)/test-home-assistant-discovery: tests/esphome_process_fixture.h src/esphome_health.h | $(BUILD)/libreecho-esphomed
-$(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32: src/json.h src/adapter/wake_worker.h
+$(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32: src/json.h src/adapter/wake_worker.h src/adapter/wake_arbiter.h src/peer_auth.h
 
 # -MMD -MP records which headers each object was built from, so editing a
 # header rebuilds what included it.  Without this the tree compiled
@@ -1286,10 +1480,13 @@ clean:
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
+		$(BUILD)/test-voice-ns $(BUILD)/test-voice-pipeline-noise \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
-		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-timing \
+		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-actions \
+		$(BUILD)/test-buttond-timing \
 		$(BUILD)/test-action-sample \
+		$(BUILD)/test-dnd-audio \
 		$(BUILD)/test-networkd-health $(BUILD)/test-networkd-ap-scan \
 		$(BUILD)/test-backend-linux-wifi-emission \
 		$(BUILD)/test_network_recovery $(BUILD)/test-networkd-recovery \
@@ -1301,7 +1498,7 @@ clean:
 		$(BUILD)/test-radiod-mp3-frames \
 		$(BUILD)/test-http-worker-registry $(BUILD)/test-http-client-state \
 		$(BUILD)/test-wake-decode \
-		$(BUILD)/test-wake-led $(BUILD)/test-spoken-time \
+		$(BUILD)/test-wake-led $(BUILD)/test-clap-detector $(BUILD)/test-smoke-alarm-detector $(BUILD)/test-spoken-time $(BUILD)/test-timezone \
 		$(BUILD)/test-voice-stream \
 		$(BUILD)/test-sttd $(BUILD)/test-llm-provider \
 		$(BUILD)/test-llm-http $(BUILD)/mock-llm-curl \
@@ -1313,15 +1510,17 @@ clean:
 		$(BUILD)/test-agentd \
 		$(BUILD)/test-agentd-voice-history-race \
 		$(BUILD)/test-live-ring $(BUILD)/test-live-session \
-		$(BUILD)/test-live-tools $(BUILD)/test-live-audio-out \
+		$(BUILD)/test-live-tools $(BUILD)/test-live-ha $(BUILD)/test-live-audio-out \
 		$(BUILD)/test-ws-client $(BUILD)/test-live-dns $(BUILD)/test-lived \
 		$(BUILD)/test-voice-reply \
 		$(BUILD)/test-voice-playback \
 		$(BUILD)/test-voice-listening-feedback \
 		$(BUILD)/test-voice-pipeline-restart \
+		$(BUILD)/test-voice-whisper \
 		$(BUILD)/test-service-env-isolation \
 		$(BUILD)/test-service-cancel-linux \
 		$(BUILD)/test-voice-pipeline-env-isolation \
+		$(BUILD)/test-voice-pipeline-stop-window \
 		$(BUILD)/test-home-assistant-discovery \
 		$(BUILD)/libreecho-sttd-sherpa-arm32 \
 		$(BUILD)/sttd.arm.o $(BUILD)/stt_engine_sherpa.arm.o \

@@ -1,5 +1,5 @@
 """Isolated real-daemon sockets/FIFO fixtures; no host device access."""
-import contextlib,json,os,pathlib,socket,struct,subprocess,tempfile,threading,time,unittest,wave,io
+import contextlib,json,math,os,pathlib,random,socket,struct,subprocess,tempfile,threading,time,unittest,wave,io
 from http.server import BaseHTTPRequestHandler,ThreadingHTTPServer
 BIN=os.environ.get('ESPHOMED_BIN',str(pathlib.Path(__file__).parents[1]/'build/libreecho-esphomed'))
 def var(v):
@@ -29,7 +29,7 @@ def receive(s):
  return t,bytes(b)
 class Adapter:
  def __init__(self,path,kind):
-  self.kind=kind;self.calls=[];self.streams={};self.stop=False;self.clients=[];self.muted=False;self.fail=False
+  self.kind=kind;self.calls=[];self.streams={};self.stop=False;self.clients=[];self.muted=False;self.fail=False;self.reply=None
   self.sock=socket.socket(socket.AF_UNIX);self.sock.bind(str(path));self.sock.listen();self.sock.settimeout(.1)
   self.thread=threading.Thread(target=self.run);self.thread.start()
  def run(self):
@@ -49,8 +49,17 @@ class Adapter:
    if self.kind=='wake' and cmd in ('subscribe','stream_audio'):
     self.streams[cmd]=c;data={'subscribed':True} if cmd=='subscribe' else {'streaming':True,'format':'pcm_s16_le','sample_rate':16000,'channels':1,'frame_header_bytes':24,'sample_indexed':True}
     c.sendall((json.dumps({'v':1,'id':req['id'],'ok':True,'data':data})+'\n').encode());return
+   if getattr(self,'track',False):
+    # Opt-in (#396): daemon state follows the setters so read-back tests see the change.
+    if cmd=='set_volume':self.volume=req['args']['volume']
+    if cmd=='set_brightness' and getattr(self,'status',None) is not None:self.status['brightness']=req['args']['brightness']
+    if cmd=='set_sensitivity' and getattr(self,'status',None) is not None:self.status['sensitivity']=req['args']['sensitivity']
    if cmd=='set_mute' and not self.fail:self.muted=req['args']['muted']
-   data={'muted':self.muted,'volume':66,'output_available':True} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
+   if cmd=='set_reply_volume' and not self.fail:self.reply=req['args'].get('volume')
+   data={'muted':self.muted,'volume':getattr(self,'volume',66),'output_available':True,**({'reply_volume':self.reply,'reply_volume_custom':True} if self.reply is not None else {})} if self.kind=='audio' else {'playing':False,'paused':False,'url':'','title':'','station':''}
+   if cmd=='status' and getattr(self,'status',None) is not None:data=self.status
+   # Voice-history generation (#398): tests set .generation to model a history clear.
+   if cmd=='voice_history_generation' and getattr(self,'generation',None) is not None:data={'history_generation':self.generation}
    c.sendall((json.dumps({'v':1,'id':req['id'],'ok':not self.fail,'data':data})+'\n').encode())
   except (OSError,ValueError):pass
   finally:
@@ -61,6 +70,8 @@ class Adapter:
   assert len(self.streams)==2,self.calls
  def samples(self,first,count=320):
   self.streams['stream_audio'].sendall(struct.pack('<IHHQII',0x3153564c,1,0,first,count,0)+struct.pack('<'+'h'*count,*[(first+i)%30000 for i in range(count)]))
+ def pcm(self,first,values):
+  self.streams['stream_audio'].sendall(struct.pack('<IHHQII',0x3153564c,1,0,first,len(values),0)+struct.pack('<'+'h'*len(values),*values))
  def wake(self,sample):self.streams['subscribe'].sendall((json.dumps({'v':1,'event':'wake_detected','data':{'detection_sample':sample,'score':1,'model':'Alexa'}})+'\n').encode())
  def close(self):
   self.stop=True;self.thread.join(2);self.sock.close()
@@ -72,7 +83,7 @@ class Daemon(unittest.TestCase):
   self.tmp=tempfile.TemporaryDirectory(prefix='esphomed-',dir=os.environ.get('TMPDIR'));self.p=pathlib.Path(self.tmp.name)
   self.config=self.p/'config.json';self.config.write_text(json.dumps(getattr(self,'config_fields',{'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':''})))
   self.privacy=self.p/'privacy';self.privacy.write_text('0\n');self.bus=self.p/'system.pcm';os.mkfifo(self.bus);self.busfd=os.open(self.bus,os.O_RDONLY|os.O_NONBLOCK);self.busbytes=bytearray()
-  self.adapters={k:Adapter(self.p/(k+'.sock'),k) for k in ('audio','wake','radio','timer','led')}
+  self.adapters={k:Adapter(self.p/(k+'.sock'),k) for k in ('audio','wake','radio','timer','led','agent')}
   s=socket.socket();s.bind(('127.0.0.1',0));self.port=s.getsockname()[1];s.close();self.clients=[]
   cmd=[BIN,'--port',str(self.port),'--bind','127.0.0.1']+(['--plaintext'] if getattr(self,'plaintext',True) else [])+['--config',str(self.config),'--status-file',str(self.p/'status.json'),'--privacy-state',str(self.privacy),'--audio-bus',str(self.bus),'--mdns-socket',str(self.p/'missing-mdns')]
   for k in self.adapters:cmd+=['--'+k+'-socket',str(self.p/(k+'.sock'))]
@@ -95,7 +106,9 @@ class Fixture(Daemon):
  def test_hello_auth_device_list_ping_disconnect(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertIn(b'fixture-satellite',b);self.assertIn(num(17,61),b)
   self.assertNotIn(var((16<<3)|2),b,'no room configured: DeviceInfo has no suggested_area')
-  self.s.sendall(frame(11));self.assertEqual([receive(self.s)[0] for _ in range(3)],[63,17,19]);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
+  self.s.sendall(frame(11));listed=[receive(self.s) for _ in range(21)];self.assertEqual([t for t,_ in listed],[63,17,61,49,17,49,49,49,107,107,107,107,107,107,107,15,18,41,41,41,19])
+  button=listed[2][1];self.assertIn(b'\x15'+struct.pack('<I',404),button);self.assertIn(text(3,'Cancel request'),button)
+  self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.s.sendall(frame(5));self.assertEqual(receive(self.s),(6,b''))
  def test_oversize_malformed_and_client_limit(self):
   self.hello();s2=self.connect();s3=self.connect();self.assertEqual(s3.recv(1),b'');s2.sendall(b'\0'+var(65537)+var(1));self.assertEqual(s2.recv(1),b'')
   time.sleep(.05);s4=self.connect();s4.sendall(frame(9,b'\x08'+b'\xff'*10));self.assertEqual(s4.recv(1),b'')
@@ -205,6 +218,34 @@ class Fixture(Daemon):
    with wave.open(wav,'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000);w.writeframes(struct.pack('<h',sample)*count)
    urls.append(self.http_audio(wav.getvalue()))
   self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,urls[1])+text(3,urls[0])));self.wait_completion();self.assertEqual(self.busbytes,struct.pack('<h',900)*2000+struct.pack('<h',1800)*2400)
+ def time_zone_exchange(self,source,*zones):
+  """Subscribe states, answer the device's GetTimeRequest (36) like HA does (GetTimeResponse 37), return the stored config."""
+  cfg=json.loads(self.config.read_text())
+  if source is not None:cfg['timezone_source']=source
+  cfg['timezone']='UTC';self.config.write_text(json.dumps(cfg))
+  self.hello();self.s.sendall(frame(20));end=time.monotonic()+3
+  while time.monotonic()<end:
+   t,_=receive(self.s)
+   if t==36:break
+  else:self.fail('no GetTimeRequest after subscribing states')
+  for zone in zones:
+   self.s.sendall(frame(37,b'\x0d'+struct.pack('<I',int(time.time()))+text(2,zone)));time.sleep(.15)
+   self.s.sendall(frame(7));end=time.monotonic()+3
+   while time.monotonic()<end:
+    if receive(self.s)[0]==8:break
+   else:self.fail('client did not stay connected after GetTimeResponse')
+  return json.loads(self.config.read_text())
+ def test_time_zone_from_home_assistant_when_followed(self):
+  cfg=self.time_zone_exchange('home_assistant','CST6CDT,M3.2.0,M11.1.0')
+  self.assertEqual(cfg['timezone'],'CST6CDT,M3.2.0,M11.1.0');self.assertEqual(cfg['timezone_name'],'');self.assertEqual(cfg['hostname'],'fixture-satellite')
+ def test_time_zone_from_home_assistant_rewrites_angle_bracket_names(self):
+  self.assertEqual(self.time_zone_exchange('home_assistant','<+04>-4')['timezone'],'LST-4')
+ def test_time_zone_from_home_assistant_ignored_without_source(self):
+  self.assertEqual(self.time_zone_exchange(None,'CST6CDT,M3.2.0,M11.1.0')['timezone'],'UTC')
+ def test_time_zone_from_home_assistant_ignored_when_manual(self):
+  self.assertEqual(self.time_zone_exchange('manual','CST6CDT,M3.2.0,M11.1.0')['timezone'],'UTC')
+ def test_time_zone_from_home_assistant_rejects_unusable_zone(self):
+  self.assertEqual(self.time_zone_exchange('home_assistant','UTC;reboot','A'*90,'','<+04')['timezone'],'UTC')
  def test_adapter_failure_does_not_claim_unmute_or_volume(self):
   self.hello();self.adapters['audio'].fail=True;self.adapters['audio'].muted=True
   self.s.sendall(frame(33,b'\x0d'+struct.pack('<I',2)+num(2,1)));self.wait_call('audio','set_mute')
@@ -215,7 +256,7 @@ class Fixture(Daemon):
   for _ in range(16):
    try:t,b=receive(self.s)
    except EOFError:break
-   self.assertIn(t,(26,64)) # A state broadcast already queued before rejection may drain.
+   self.assertIn(t,(26,27,36,50,64)) # A state broadcast (or the GetTimeRequest sent on subscribe) already queued before rejection may drain.
   else:self.fail('malformed volume did not close the client')
  def test_announcement_error_reports_failure_and_resets_playback(self):
   wav=io.BytesIO()
@@ -291,4 +332,167 @@ class RoomUnsafeNotSent(Daemon):
  config_fields=dict(ROOM_BASE,room='Hall\nsecond line')
  def test_unsafe_room_is_not_sent(self):
   self.hello();self.s.sendall(frame(3)+frame(9));t,b=receive(self.s);self.assertEqual(t,10);self.assertNotIn(var((16<<3)|2),b);self.assertIn(b'fixture-satellite',b)
+CANCELLED=(90,num(1,0))
+class CancelRequest(Daemon):
+ # #404: the Action button, Home Assistant's "Cancel request" button and a
+ # second wake word end a request quietly; nothing of the stopped run plays.
+ def setUp(self):
+  self.ctl_dir=tempfile.mkdtemp(prefix='esc-',dir='/tmp');self.ctl=os.path.join(self.ctl_dir,'c.sock');self.extra_args=['--control-socket',self.ctl];super().setUp()
+ def tearDown(self):
+  super().tearDown();self.assertFalse(os.path.exists(self.ctl),'control socket is removed on exit');os.rmdir(self.ctl_dir)
+ def start(self,thinking):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  time.sleep(.1);a.wake(4000);t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b);self.s.sendall(frame(91))
+  if thinking:self.s.sendall(frame(92,num(1,12)))
+  end=time.monotonic()+2
+  while time.monotonic()<end:
+   t,b=receive(self.s)
+   if not thinking or (t==106 and num(2,1) in b):break
+  self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress']);return a
+ def cancelled(self):
+  end=time.monotonic()+2
+  while time.monotonic()<end:
+   if receive(self.s)==CANCELLED:break
+  else:self.fail('no pipeline stop sent to Home Assistant')
+  status=json.loads((self.p/'status.json').read_text());self.assertFalse(status['in_progress']);self.assertEqual(status['last_result'],'cancelled')
+  time.sleep(.1);led=[r['args'] for r in self.adapters['led'].calls if r['cmd']=='pattern'];self.assertEqual(led[-1].get('name'),'stop','ring returns to idle');self.assertNotIn('flash',[x.get('name') for x in led],'a cancel is not an error')
+ def no_reply(self,url):
+  # Late events from the stopped run start no playback and no new turn.
+  self.s.sendall(frame(92,num(1,8)+text(2,text(1,'url')+text(2,url)))+frame(92,num(1,2)));self.s.settimeout(.4)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  self.s.settimeout(3);time.sleep(.2)
+  with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
+  self.assertFalse(self.busbytes,'no reply audio after a cancel');self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress'])
+ def wav_url(self):
+  wav=io.BytesIO()
+  with wave.open(wav,'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000);w.writeframes(struct.pack('<h',1200)*4800)
+  data=wav.getvalue()
+  class HTTP(BaseHTTPRequestHandler):
+   def do_GET(self):self.send_response(200);self.send_header('Content-Length',str(len(data)));self.end_headers();self.wfile.write(data)
+   def log_message(self,*a):pass
+  server=ThreadingHTTPServer(('127.0.0.1',0),HTTP);thread=threading.Thread(target=server.serve_forever);thread.start()
+  self.addCleanup(server.server_close);self.addCleanup(thread.join,2);self.addCleanup(server.shutdown);return f'http://127.0.0.1:{server.server_port}/tts.wav'
+ def control(self,message=b'cancel'):
+  c=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM);c.sendto(message,self.ctl);c.close()
+ def test_ha_button_cancels_while_thinking(self):
+  self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',404)));self.cancelled();self.no_reply(self.wav_url())
+ def test_ha_button_with_wrong_key_is_rejected(self):
+  self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',405)))
+  for _ in range(16):
+   try:t,b=receive(self.s)
+   except EOFError:break
+   self.assertIn(t,(24,25,26,27,36,50,64,106,108)) # Only state broadcasts, the GetTimeRequest sent on subscribe, or microphone audio (106) of the open turn already queued before rejection may drain.
+  else:self.fail('the connection was not closed after a button press with an unknown key')
+ def test_action_button_cancels_while_listening(self):
+  a=self.start(False);self.control(b'other');time.sleep(.1);self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'],'only "cancel" is a command')
+  self.control();self.cancelled()
+  a.samples(6400);a.wake(6600);self.s.settimeout(.4)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  self.s.settimeout(3);time.sleep(1.4);a.wake(30000);t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b,'after the guard a wake starts a fresh request')
+ def test_action_button_cancels_while_replying(self):
+  self.start(True);url=self.wav_url();self.s.sendall(frame(92,num(1,8)+text(2,text(1,'url')+text(2,url))));end=time.monotonic()+2
+  while time.monotonic()<end and not self.busbytes:
+   with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
+   time.sleep(.01)
+  self.assertTrue(self.busbytes,'the reply was playing');self.control();self.cancelled()
+  with contextlib.suppress(BlockingIOError):os.read(self.busfd,1<<20)
+  self.busbytes=bytearray();self.s.sendall(frame(92,num(1,2)));time.sleep(.3)
+  with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
+  self.assertFalse(self.busbytes,'playback stops at the cancel')
+ def test_wake_word_cancels_while_thinking(self):
+  a=self.start(True);a.samples(6400);a.wake(6600);self.cancelled();self.no_reply(self.wav_url())
+ def test_wake_word_while_listening_does_not_cancel(self):
+  a=self.start(False);a.samples(6400);a.wake(6600);time.sleep(.3);self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'])
+ def test_cancel_when_idle_is_ignored(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));time.sleep(.1);self.control();self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',404)));self.s.settimeout(.3)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  self.assertNotEqual(json.loads((self.p/'status.json').read_text())['last_result'],'cancelled')
+# #401: steady room noise in, what Home Assistant receives out.
+def steady_noise(count,seed=401):
+ r=random.Random(seed);return [max(-32768,min(32767,int(r.gauss(0,800)))) for _ in range(count)]
+def rms(values):return math.sqrt(sum(v*v for v in values)/len(values))
+class NoiseSuppressionCase(Daemon):
+ def streamed_audio(self):
+  noise=steady_noise(48000);self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,40000,320):a.pcm(i,noise[i:i+320])
+  time.sleep(.2);a.wake(38000);t,b=receive(self.s);self.assertEqual(t,90);self.s.sendall(frame(91))
+  for i in range(40000,48000,320):a.pcm(i,noise[i:i+320])
+  heard=[]
+  while len(heard)<6400:
+   t,b=receive(self.s)
+   if t==106 and b[:1]==b'\x0a':
+    n,k,shift=0,1,0
+    while True:
+     n|=(b[k]&0x7f)<<shift;k+=1;shift+=7
+     if not b[k-1]&0x80:break
+    heard+=struct.unpack('<'+'h'*(n//2),b[k:k+n])
+  return noise,heard
+class NoiseSuppressionOff(NoiseSuppressionCase):
+ config_fields=dict(ROOM_BASE)
+ def test_default_sends_microphone_audio_unchanged(self):
+  noise,heard=self.streamed_audio();start=38000-3200
+  self.assertEqual(heard[:6400],noise[start:start+6400],'with the setting absent the audio must be untouched')
+class NoiseSuppressionOn(NoiseSuppressionCase):
+ config_fields=dict(ROOM_BASE,voice_noise_suppression=True)
+ def test_enabled_suppresses_steady_noise_sent_to_home_assistant(self):
+  noise,heard=self.streamed_audio();before,after=rms(noise[34800:41200]),rms(heard[:6400])
+  self.assertLess(after,before*0.5,'steady noise must be at least 6 dB quieter, got %.1f -> %.1f RMS'%(before,after))
+  self.assertGreater(after,before*0.1,'noise must not be cut past the 15 dB floor')
+# esphome_server_wake (off by default): Home Assistant runs wake detection on a
+# continuous mic stream. The daemon opens a run with USE_VAD|USE_WAKE_WORD (3)
+# and no phrase, streams without any device wake event, and stops on mute or
+# unsubscribe. With the option absent, on-device wake remains the only starter.
+SERVER_WAKE_CONFIG=dict(API_HA_CONFIG,esphome_server_wake=True)
+def server_wake_status(p):return json.loads((p/'status.json').read_text())
+class ServerWakeStreams(Daemon):
+ config_fields=SERVER_WAKE_CONFIG
+ def test_server_run_streams_without_device_wake_and_stops_on_unsubscribe(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b);self.assertIn(num(3,3),b);self.assertNotIn(b'Alexa',b)
+  self.s.sendall(frame(91));t,b=receive(self.s);self.assertEqual(t,106)
+  self.assertTrue(server_wake_status(self.p)['server_wake_streaming'])
+  self.s.sendall(frame(89,num(1,0)))
+  while True:
+   t,b=receive(self.s)
+   if t==90:break
+  self.assertNotIn(num(1,1),b);self.assertFalse(server_wake_status(self.p)['server_wake_streaming'])
+class ServerWakeIgnoresDeviceWake(Daemon):
+ config_fields=SERVER_WAKE_CONFIG
+ def test_device_wake_does_not_start_a_second_run_while_server_wake_is_on(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  t,b=receive(self.s);self.assertEqual(t,90)
+  self.s.sendall(frame(91));self.s.sendall(frame(92,num(1,2)));time.sleep(.1);a.wake(4000)
+  # The run restarts after the server-wake retry delay, never from the device wake.
+  messages=[]
+  while True:
+   t,b=receive(self.s);messages.append((t,b))
+   if t==90:break
+  self.assertIn(num(3,3),messages[-1][1]);self.assertNotIn(b'Alexa',messages[-1][1])
+class ServerWakeMuteStops(Daemon):
+ config_fields=SERVER_WAKE_CONFIG
+ def test_mute_stops_the_stream_and_unmute_resumes_it(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  t,b=receive(self.s);self.assertEqual(t,90);self.s.sendall(frame(91));t,b=receive(self.s);self.assertEqual(t,106)
+  self.s.sendall(frame(33,num(1,2)+num(2,1)))
+  while True:
+   t,b=receive(self.s)
+   if t==90:break
+  self.assertNotIn(num(1,1),b)
+  self.s.sendall(frame(33,num(1,2)))
+  while True:
+   t,b=receive(self.s)
+   if t==90:break
+  self.assertIn(num(1,1),b);self.assertIn(num(3,3),b)
+class ServerWakeDefaultOff(Daemon):
+ config_fields=API_HA_CONFIG
+ def test_default_off_never_streams_without_device_wake(self):
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));a=self.adapters['wake'];a.wait_streams()
+  for i in range(0,6400,320):a.samples(i)
+  time.sleep(.3);self.s.settimeout(.3)
+  with self.assertRaises(TimeoutError):receive(self.s)
+  a.wake(4000);self.s.settimeout(3);t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b);self.assertNotIn(num(3,3),b)
 if __name__=='__main__':unittest.main()

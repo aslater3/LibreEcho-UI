@@ -106,6 +106,10 @@ int main(void)
           "GET button response is valid JSON");
     CHECK(strstr(response.body, "\"action\":\"sound\"") != NULL,
           "GET exposes default action setting");
+    /* #372: no separate long press unless one is chosen, so an upgrade keeps
+       the button acting the moment it is pressed. */
+    CHECK(strstr(response.body, "\"action_long\":\"same\"") != NULL,
+          "GET exposes the default long-press setting as same");
 
     /*
      * privacy_latch: the mute button's lamp follows the kernel privacy latch, so
@@ -202,6 +206,18 @@ int main(void)
     CHECK(request(&context, "PUT", "{\"action\":\"playpause\",\"action_sounds\":\"doorbell,listen\"}",
                   &response) == 200,
           "listen and playpause actions remain accepted");
+    CHECK(request(&context, "PUT", "{\"action_long\":\"listen\"}", &response) == 200 &&
+          !strcmp(context.button_action_long, "listen") &&
+          !strcmp(context.button_action, "playpause") &&
+          strstr(response.body, "\"action_long\":\"listen\"") != NULL,
+          "a long-press action is accepted on its own and reported");
+    {
+        char saved[16384], action[24] = "";
+        CHECK(config_read(config_path, saved, sizeof(saved)) > 0 &&
+              json_get_string(saved, "button_action_long", action, sizeof(action)) > 0 &&
+              !strcmp(action, "listen"),
+              "the long-press action is persisted for buttond");
+    }
     CHECK(!strcmp(context.button_action, "playpause") &&
           !strcmp(context.button_action_sounds, "doorbell,listen"),
           "generic sound names remain accepted");
@@ -261,6 +277,17 @@ int main(void)
                                     "{\"action\":\"other\"}",
                                     "unknown action is rejected");
     expect_invalid_without_mutation(&context,
+                                    "{\"action\":\"same\"}",
+                                    "same is a long-press setting only");
+    expect_invalid_without_mutation(&context,
+                                    "{\"action_long\":\"reboot\"}",
+                                    "unknown long-press action is rejected");
+    expect_invalid_without_mutation(&context,
+                                    "{\"action_long\":false}",
+                                    "long-press type mismatch is rejected");
+    CHECK(!strcmp(context.button_action_long, "listen"),
+          "a rejected long press leaves the saved one in place");
+    expect_invalid_without_mutation(&context,
                                     "{\"action_sounds\":\"action-1,,action-2\"}",
                                     "empty sound entry is rejected");
     expect_invalid_without_mutation(&context,
@@ -297,6 +324,9 @@ int main(void)
       CHECK(request(&context, "PUT", "{\"tones\":false}", &response) == 503,
             "failed persistence returns 503");
       CHECK(context.button_tones == 1, "failed persistence preserves context");
+      CHECK(request(&context, "PUT", "{\"action_long\":\"noise\"}", &response) == 503 &&
+            !strcmp(context.button_action_long, "listen"),
+            "failed persistence restores the long-press action");
       snprintf(context.config_path, sizeof(context.config_path), "%s", original_path);
     }
     CHECK(le_backend_init(&restarted_backend, "mock", NULL, NULL, 8) == LE_OK &&
@@ -308,18 +338,19 @@ int main(void)
           restarted.button_action_brightness == 33 &&
           restarted.button_mute_brightness == 22 &&
           !strcmp(restarted.button_short, "say \"hi\"") &&
-          !strcmp(restarted.button_long, "path\\test"),
+          !strcmp(restarted.button_long, "path\\test") &&
+          !strcmp(restarted.button_action_long, "listen"),
           "restart restores button settings and legacy fields");
     request(&restarted, "GET", NULL, &response);
     CHECK(json_valid_object(response.body, response.length),
           "restarted GET response is valid JSON");
 
     CHECK(config_write_atomic(config_path,
-                              "{\"button_tones\":\"false\",\"button_action\":\"bad\","
+                              "{\"button_tones\":\"false\",\"button_action\":\"bad\",\"button_action_long\":\"bad\","
                               "\"button_action_sounds\":\"action-9\","
                               "\"button_action_brightness\":101,"
                               "\"button_mute_brightness\":-1}",
-                              strlen("{\"button_tones\":\"false\",\"button_action\":\"bad\","
+                              strlen("{\"button_tones\":\"false\",\"button_action\":\"bad\",\"button_action_long\":\"bad\","
                                      "\"button_action_sounds\":\"action-9\","
                                      "\"button_action_brightness\":101,"
                                      "\"button_mute_brightness\":-1}")) == 0,
@@ -328,6 +359,8 @@ int main(void)
           api_init(&corrupt, corrupt_backend, 1, 1, NULL, NULL, csrf,
                    config_path, NULL) == 0,
           "initialise context with corrupt persisted settings");
+    CHECK(!strcmp(corrupt.button_action_long, "same"),
+          "a corrupt long-press action falls back to same");
     CHECK(corrupt.button_tones == 1 && !strcmp(corrupt.button_action, "sound") &&
           !strcmp(corrupt.button_action_sounds, "action-9") &&
           corrupt.button_action_brightness == 70 &&

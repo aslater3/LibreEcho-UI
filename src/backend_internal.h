@@ -28,7 +28,7 @@ struct le_backend_ops {
     shift every op after it. A backend that leaves it null reports the
     feature unsupported, which is the right answer for the mock. */
  int (*sound_sample)(struct le_backend*,const char*);
- int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*);
+ int (*timers)(struct le_backend*,struct le_timer_list*); int (*timer_add)(struct le_backend*,int,const char*,unsigned*); int (*timer_cancel)(struct le_backend*,unsigned); int (*timer_dismiss)(struct le_backend*,int*); int (*timer_add_alarm)(struct le_backend*,long long,const char*,unsigned*);
  /* Extended noise, sleep lighting and recovery. Appended last for the same
     positional-init reason as everything above; a backend that leaves one null
     reports the feature unsupported. */
@@ -53,6 +53,25 @@ struct le_backend_ops {
  int (*sendspin_set)(struct le_backend*,int);
  int (*sendspin_pairing_token)(struct le_backend*,char*,size_t);
  int (*sendspin_reset_pairing)(struct le_backend*);
+ /* Separate reply volume: (custom, volume); custom 0 follows the master. Appended last for the positional-init reason; null reports unsupported. */
+ int (*reply_volume)(struct le_backend*,int,int);
+ /* Mic array mixing mode ("beamformer", "average", "single"). Appended last for the positional-init reason; null reports unsupported. */
+ int (*microphone_mix)(struct le_backend*,const char*);
+ /* Single-mode array lane, -1 for automatic. Appended after microphone_mix; null reports unsupported. */
+ int (*microphone_lane)(struct le_backend*,int);
+ /* Repeating alarms and snooze. Appended last: the backends initialise this
+    struct positionally. A backend that leaves one null reports the feature
+    unsupported. */
+ int (*timer_add_repeat)(struct le_backend*,int,int,unsigned,const char*,unsigned*);
+ int (*timer_snooze)(struct le_backend*,int*);
+ /* Spoken reminders. Appended last, like the alarm entries above. */
+ int (*timer_add_reminder)(struct le_backend*,int,int,unsigned,const char*,unsigned*);
+ /* Sunrise wake light lead time (UI #447). Appended last, see above. */
+ int (*timer_sunrise_get)(struct le_backend*,int*);
+ int (*timer_sunrise_set)(struct le_backend*,int);
+ int (*sendspin_set_unpaired)(struct le_backend*,int);
+ /* Do-not-disturb switch. Appended last for the positional-init reason above; null reports unsupported. */
+ int (*do_not_disturb)(struct le_backend*,int);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

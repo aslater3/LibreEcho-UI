@@ -101,8 +101,10 @@ int main(void)
     assert(kind_of("Alexa, stop!") == LE_TIMER_INTENT_DISMISS);
     assert(kind_of("dismiss") == LE_TIMER_INTENT_DISMISS);
     assert(kind_of("turn off the timer") == LE_TIMER_INTENT_DISMISS);
-    assert(kind_of("snooze") == LE_TIMER_INTENT_NONE);
-    assert(kind_of("snooze the timer") == LE_TIMER_INTENT_NONE);
+    /* Snooze is its own request now; the daemon decides whether an alarm
+       is ringing to snooze. */
+    assert(kind_of("snooze") == LE_TIMER_INTENT_SNOOZE);
+    assert(kind_of("snooze the timer") == LE_TIMER_INTENT_SNOOZE);
 
     /* Cancelling something that has not gone off is a different request. */
     assert(kind_of("cancel my timer") == LE_TIMER_INTENT_CANCEL);
@@ -325,6 +327,87 @@ int main(void)
         assert(strstr(speech, "2 minutes and 5 seconds") != NULL);
     }
 
+    /* Alarms: a clock time with am or pm is an alarm, and the 24-hour time
+       comes out exactly. */
+    {
+        struct le_timer_intent intent;
+        char speech[160];
+
+        assert(le_timer_intent_parse("set an alarm for 7am", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 7 && intent.alarm_minute == 0);
+        assert(!intent.alarm_only);
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(strcmp(speech, "Alarm set for 7:00 am.") == 0);
+
+        assert(le_timer_intent_parse("set an alarm for 7:30 pm", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 19 && intent.alarm_minute == 30);
+
+        assert(le_timer_intent_parse("wake me at seven thirty in the morning",
+                                     &intent) == LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 7 && intent.alarm_minute == 30);
+
+        assert(le_timer_intent_parse("set an alarm for 12 am", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 0);
+        assert(le_timer_intent_parse("set an alarm for 12 pm", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 12);
+
+        assert(le_timer_intent_parse("set an alarm for 6 a.m.", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 6);
+
+        assert(le_timer_intent_parse("set an alarm for 19:15", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 19 && intent.alarm_minute == 15);
+
+        /* No am or pm: the caller must ask, never guess. */
+        assert(le_timer_intent_parse("set an alarm for 7", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == -1);
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(strstr(speech, "What time") != NULL);
+
+        /* An alarm noun with no time is still an alarm request to ask about. */
+        assert(le_timer_intent_parse("set an alarm", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == -1);
+
+        /* A duration stays a countdown, whatever the noun. */
+        assert(le_timer_intent_parse("set an alarm for ten minutes", &intent) ==
+               LE_TIMER_INTENT_SET);
+        assert(intent.seconds == 600);
+
+        /* Not a request: negated, and a question about the schedule. */
+        assert(le_timer_intent_parse("don't set an alarm for 7am", &intent) ==
+               LE_TIMER_INTENT_NONE);
+        assert(le_timer_intent_parse("what is the time", &intent) ==
+               LE_TIMER_INTENT_NONE);
+        assert(le_timer_intent_parse("I need the alarm clock fixed",
+                                     &intent) == LE_TIMER_INTENT_NONE);
+
+        /* Cancellation of alarms is restricted to alarms, and a timer word
+           lifts the restriction. */
+        assert(le_timer_intent_parse("cancel my alarm", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.alarm_only);
+        le_timer_intent_speech(&intent, 1, 0, speech, sizeof(speech));
+        assert(strcmp(speech, "Alarm cancelled.") == 0);
+        le_timer_intent_speech(&intent, -1, 0, speech, sizeof(speech));
+        assert(strstr(speech, "Which alarm") != NULL);
+        assert(le_timer_intent_parse("cancel my timer", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.alarm_only);
+        assert(le_timer_intent_parse("cancel all alarms", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.alarm_only && intent.cancel_all);
+        assert(le_timer_intent_parse("cancel all timers and alarms", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(!intent.alarm_only && intent.cancel_all);
+    }
+
     /* A long transcript must not overflow anything. */
     {
         char big[1024];
@@ -333,6 +416,112 @@ int main(void)
         memset(big, 'a', sizeof(big) - 1);
         big[sizeof(big) - 1] = '\0';
         (void)le_timer_intent_parse(big, &intent);
+    }
+
+    /* Snooze is recognised as its own request, with or without a duration
+       elsewhere in the sentence. The daemon decides whether anything rings. */
+    {
+        struct le_timer_intent intent;
+
+        assert(le_timer_intent_parse("snooze", &intent) == LE_TIMER_INTENT_SNOOZE);
+        assert(le_timer_intent_parse("snooze the alarm", &intent) ==
+               LE_TIMER_INTENT_SNOOZE);
+        assert(le_timer_intent_parse("please snooze it", &intent) ==
+               LE_TIMER_INTENT_SNOOZE);
+    }
+
+    /* Weekly alarms: the day mask is taken from the request. Bit 0 is Sunday. */
+    {
+        struct le_timer_intent intent;
+
+        assert(le_timer_intent_parse("set an alarm for 7am every day", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 7 && intent.alarm_minute == 0 &&
+               intent.alarm_days == 0x7fU);
+
+        assert(le_timer_intent_parse("set an alarm for 6:30am on weekdays", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_hour == 6 && intent.alarm_minute == 30 &&
+               intent.alarm_days == 0x3eU);
+
+        assert(le_timer_intent_parse("wake me at 8am on weekends", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_days == 0x41U);
+
+        assert(le_timer_intent_parse(
+                   "set an alarm for 7am every monday and wednesday", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_days == ((1U << 1) | (1U << 3)));
+
+        /* No day named is still a one-off alarm. */
+        assert(le_timer_intent_parse("set an alarm for 7am", &intent) ==
+               LE_TIMER_INTENT_ALARM);
+        assert(intent.alarm_days == 0U);
+    }
+
+    /* Reminders: "remind me to X at TIME" and "remind me <days> at TIME to X".
+       The label is the words, never the time, and "stop" inside a reminder is
+       part of the label, not a silence request. */
+    {
+        struct le_timer_intent intent;
+        char speech[LE_TIMER_INTENT_SPEECH_MAX];
+
+        assert(le_timer_intent_parse("remind me to take pills at 6pm", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour == 18 && intent.alarm_minute == 0);
+        assert(intent.alarm_days == 0U);
+        assert(!strcmp(intent.label, "take pills"));
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "Reminder set for 6:00 pm: take pills."));
+
+        assert(le_timer_intent_parse(
+                   "remind me every weekday at 8 am to take pills", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour == 8 && intent.alarm_minute == 0);
+        assert(intent.alarm_days == 0x3eU);
+        assert(!strcmp(intent.label, "take pills"));
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "Reminder set for 8:00 am, on weekdays: take pills."));
+
+        /* The last "at" ends the label, so a name keeps its own "at". */
+        assert(le_timer_intent_parse(
+                   "remind me to call dad at the office at 6 30 pm", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour == 18 && intent.alarm_minute == 30);
+        assert(!strcmp(intent.label, "call dad at the office"));
+
+        assert(le_timer_intent_parse("remind me every day to stretch at 7am",
+                                     &intent) == LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_days == 0x7fU && !strcmp(intent.label, "stretch"));
+
+        /* A reminder whose verb is a silence or cancel word is still a reminder. */
+        assert(le_timer_intent_parse("remind me to stop smoking at 9pm", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(!strcmp(intent.label, "stop smoking"));
+
+        /* No time gives the model the request; so does a negated one. */
+        assert(kind_of("remind me to take pills") == LE_TIMER_INTENT_NONE);
+        assert(kind_of("don't remind me to take pills at 6pm") ==
+               LE_TIMER_INTENT_NONE);
+        /* No am or pm: asked, never guessed. */
+        assert(le_timer_intent_parse("remind me to take pills at 6", &intent) ==
+               LE_TIMER_INTENT_REMINDER);
+        assert(intent.alarm_hour < 0);
+        le_timer_intent_speech(&intent, 0, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "What time should the reminder be?"));
+
+        /* Cancelling reminders is separate from cancelling alarms. */
+        assert(le_timer_intent_parse("cancel my reminder", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.reminder_only == 1 && intent.alarm_only == 0);
+        le_timer_intent_speech(&intent, 1, 0, speech, sizeof(speech));
+        assert(!strcmp(speech, "Reminder cancelled."));
+        assert(le_timer_intent_parse("cancel all my reminders", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.reminder_only == 1 && intent.cancel_all == 1);
+        assert(le_timer_intent_parse("cancel my alarm", &intent) ==
+               LE_TIMER_INTENT_CANCEL);
+        assert(intent.alarm_only == 1 && intent.reminder_only == 0);
     }
 
     printf("timer intent: ok\n");

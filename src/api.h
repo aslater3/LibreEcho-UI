@@ -3,6 +3,8 @@
 #include "backend.h"
 #include "auth.h"
 #include "event_bus.h"
+#include "peer_auth.h"
+#include "peer_group.h"
 #include <stddef.h>
 struct api_request{char method[8],path[256],host[256],origin[256],authorization[256],csrf[96],confirm[96];const char*body;size_t body_len;int https;};
 /*
@@ -33,7 +35,7 @@ struct api_response{int status;char type[64];char body[LE_API_RESPONSE_BYTES];si
 #define LE_UPDATE_STAGE_PARENT "/data"
 /* Room the installer needs beside the package it is unpacking. */
 #define LE_UPDATE_STAGE_MARGIN_BYTES (4u * 1024u * 1024u)
-struct api_context{struct le_backend*backend;struct le_event_bus events;struct le_auth_db auth;int dev_controls,allow_insecure_lan,setup_completed,setup_failure_stage,privacy_local_only,privacy_audio_retention,privacy_telemetry,privacy_crash_reports,privacy_active_ping,privacy_log_hours,privacy_audio_retention_hours,privacy_audio_max_mb,net_ssh,net_api_lan;unsigned integrations,auth_failures;time_t auth_window_started,auth_blocked_until;char privacy_audio_mode[8],privacy_audio_remote_url[256];/* Where the owner's Home Assistant lives, for the web UI's "Set up in Home Assistant" link. */char home_assistant_url[200];/* Button press cues, on by default: the buttons are on top of the device where the ring cannot be seen, so silence reads as a dead button. *//* Action button: which behaviour, and how bright its ring flash is. Only one behaviour is implemented; the rest are placeholders so the choice is visible before the wiring exists. */int button_mute_brightness;char button_action[24];/* Sounds the action button rotates through, comma-separated, in play order. Curated in the UI so a press walks only what is switched on. */char button_action_sounds[192];int button_action_brightness;int button_tones;const char*buttond_status_path;char button_short[32],button_long[32],auth_token[192],allowed_origin[256],csrf_token[65],config_path[384],users_path[384];char voice_pipeline_mode[24],voice_pipeline_previous_mode[24],stt_wyoming_uri[320],stt_wyoming_model[128],tts_wyoming_uri[320],tts_wyoming_voice[128];int voice_pipeline_previous_valid,stt_max_utterance_ms,stt_end_silence_ms,stt_vad_floor_rms;/* Appearance (#188), cosmetic and public: "classic"|"setup" and ""|"dark"|"light" ("" = not chosen on the device). */char ui_theme[8],color_mode[8];/* Optional free-text room this device is in (#64): told to the assistant and offered to Home Assistant as the suggested area. Empty means unset. */char room[49];/* LibreEcho News (#121): off until the owner turns it on, since it contacts the network on its own. */int news_enabled;char timezone[64];int feature_simulation;int feature_https,feature_acoustic_events,https_port;char https_cert[384];
+struct api_context{char tls_dir[320];struct le_backend*backend;int do_not_disturb;struct le_event_bus events;struct le_auth_db auth;int dev_controls,allow_insecure_lan,setup_completed,setup_failure_stage,privacy_local_only,privacy_audio_retention,privacy_telemetry,privacy_crash_reports,privacy_active_ping,privacy_log_hours,privacy_audio_retention_hours,privacy_audio_max_mb,net_ssh,net_api_lan;unsigned integrations,auth_failures;time_t auth_window_started,auth_blocked_until;char privacy_audio_mode[8],privacy_audio_remote_url[256];/* Where the owner's Home Assistant lives, for the web UI's "Set up in Home Assistant" link. */char home_assistant_url[200];/* Button press cues, on by default: the buttons are on top of the device where the ring cannot be seen, so silence reads as a dead button. *//* Action button: which behaviour, and how bright its ring flash is. Only one behaviour is implemented; the rest are placeholders so the choice is visible before the wiring exists. */int button_mute_brightness;char button_action[24];/* What a long press of the action button does (#372): an action name, or "same" (the default) for no separate long press. */char button_action_long[24];/* Sounds the action button rotates through, comma-separated, in play order. Curated in the UI so a press walks only what is switched on. */char button_action_sounds[192];int button_action_brightness;int button_tones;const char*buttond_status_path;char button_short[32],button_long[32],auth_token[192],allowed_origin[256],csrf_token[65],config_path[384],users_path[384];char voice_pipeline_mode[24],voice_pipeline_previous_mode[24],stt_wyoming_uri[320],stt_wyoming_model[128],tts_wyoming_uri[320],tts_wyoming_voice[128];int voice_pipeline_previous_valid,stt_max_utterance_ms,stt_end_silence_ms,stt_vad_floor_rms;/* Noise suppression on the speech sent to the assistant (#401); off by default. */int voice_noise_suppression;/* Appearance (#188), cosmetic and public: "classic"|"setup" and ""|"dark"|"light" ("" = not chosen on the device). */char ui_theme[8],color_mode[8];/* Optional free-text room this device is in (#64): told to the assistant and offered to Home Assistant as the suggested area. Empty means unset. */char room[49];/* LibreEcho News (#121): off until the owner turns it on, since it contacts the network on its own. */int news_enabled;char timezone[64];/* Time zone picker (#371): the IANA name shown again in the picker ("" when unknown) and who sets the zone, "manual" or "home_assistant". */char timezone_name[64],timezone_source[16];int feature_simulation;int feature_https,feature_acoustic_events,https_port;char https_cert[384];
 char configured_wake_word[LE_TEXT];int configured_wake_sensitivity,configured_wake_valid;
 /* First-boot provisioning, applied before the listener starts and finished
    from the HTTP server's tick. provision_started is the deadline anchor for
@@ -59,10 +61,28 @@ char radio_last_word[32];char logs[LE_MAX_LOGS][256];size_t log_count,log_next;
    treated as fresh.  recovery_portal_active is 0 unless networkd reports the
    recovery AP actively serving; recovery_portal_ok records whether the last
    probe was answered at all. */
-int recovery_portal_active;char recovery_portal_address[32];long recovery_portal_checked;int recovery_portal_ok;};
+int recovery_portal_active;char recovery_portal_address[32];long recovery_portal_checked;int recovery_portal_ok;
+/* Device list (#413). discoverable is the owner's choice to advertise this
+   control centre as _libreecho._tcp; http_port/http_lan describe the plain
+   HTTP listener (lan is 0 for a loopback-only bind, which is never
+   advertised). discovery_fd holds the mDNS supervisor lease while the record
+   should exist; discovery_sent is the registration it carries. */
+int discoverable,http_port,http_lan,discovery_fd;long discovery_retry,discovery_checked;char discovery_sent[384];
+/* Device pairing (#450). peer_key is the house key shared by paired devices,
+   loaded on first use from peer_key_path (peer.key beside the config file).
+   Without a key this device signs nothing and trusts no device. */
+struct le_peer_key peer_key;char peer_key_path[512];int peer_key_loaded;
+/* Nearest-device answering (#408), off by default. Persisted here; waked
+   reads it from the saved config and needs the pairing key as well. */
+int nearest_answers;/* Replay cache for group commands (#448). */struct le_peer_replay peer_replay;/* Device groups (#448), kept in peer-groups beside the config file. */struct le_group_set groups;char groups_path[512];int groups_loaded;};
 int api_request_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_bootstrap_required(const struct api_context*);
 void api_set_https_active(struct api_context*,int);
+/* Once-a-second upkeep of this device's _libreecho._tcp advertisement. Never
+   blocks: registration is one nonblocking seqpacket send. */
+void api_discovery_tick(struct api_context*);
+/* Records the plain HTTP listener so the advertisement names the right port. */
+void api_set_http_listener(struct api_context*,int port,int lan);
 int api_init(struct api_context*,struct le_backend*,int,int,const char*,const char*,const char*,const char*,const char*);int api_apply_persisted_configuration(struct api_context*,char*,size_t);int api_persist_configuration(struct api_context*);void api_log(struct api_context*,const char*,const char*);void api_handle(struct api_context*,const struct api_request*,struct api_response*);
 int api_diagnostics_kernel_authorize(struct api_context*,const struct api_request*,struct api_response*);int api_baby_monitor_stream_authorize(struct api_context*,const struct api_request*,struct api_response*,int*,int*,int*,int*,int*);
 size_t le_update_max_upload_bytes(void);
@@ -84,10 +104,13 @@ int api_provision_start(struct api_context*);
    once networkd reports an association with an address. */
 void api_provision_poll(struct api_context*);
 int api_update_upload_authorize(struct api_context*,const struct api_request*,struct api_response*);
+/* PUT /api/v1/sounds/<event>: route, method and security checks for the streamed upload (#410). */
+int api_sound_upload_authorize(struct api_context*,const struct api_request*,struct api_response*,int*index);
 int api_update_fetch_authorize(struct api_context*,const struct api_request*,struct api_response*);
 int api_update_channel_authorize(struct api_context*,const struct api_request*,struct api_response*,char*,size_t);
 /* 1 iff networkd reports the recovery AP actively serving (mode
    \"recovery-ap\"), filling address with the portal IPv4.  Cached ~1s. */
 int api_recovery_portal(struct api_context*,char*,size_t);
 void diagnostics_export_json(struct api_context*,struct api_response*);
+void api_set_tls_dir(struct api_context*,const char*);
 #endif

@@ -8,6 +8,8 @@
 #define LE_MASTER_VOLUME_PATH LE_MASTER_VOLUME_DIR "/master.volume"
 #define LE_SOUND_DIR "/tmp/libreecho-audiod-review-sounds"
 #define LE_VOLUME_LEVELING_PATH "/tmp/libreecho-audiod-review-volume-leveling"
+#define LE_REPLY_VOLUME_PATH "/tmp/libreecho-audiod-review-reply-volume"
+#define LE_REPLY_VOLUME_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/reply.volume"
 #define LE_AVL_DISABLED_DIR "/tmp/libreecho-audiod-review-run"
 #define LE_AVL_DISABLED_PATH LE_AVL_DISABLED_DIR "/avl.disabled"
 #include <sys/syscall.h>
@@ -757,6 +759,99 @@ static void test_pending_restore_beats_stale_config(void)
     unlink(LE_AIRPLAY_RESTORE_PATH);
 }
 
+static int read_small(const char *path, char *text, size_t size)
+{
+    int fd = open(path, O_RDONLY);
+    ssize_t n;
+    if (fd < 0) return -1;
+    n = read(fd, text, size - 1);
+    close(fd);
+    if (n < 0) return -1;
+    text[n] = '\0';
+    return (int)n;
+}
+
+/* Separate reply volume (#409): persisted owner level drives reply.volume. */
+static void test_reply_volume(void)
+{
+    struct audio_hw audio;
+    struct stat st;
+    char response[1024], text[16];
+    int level = -1;
+
+    unlink(LE_REPLY_VOLUME_PATH); unlink(LE_REPLY_VOLUME_RUNTIME_PATH);
+    require_condition(reply_volume_load(&level) < 0, "missing choice means replies follow the master");
+    require_condition(reply_volume_publish(0, 0) == 0 && access(LE_REPLY_VOLUME_RUNTIME_PATH, F_OK) != 0,
+                      "following publishes no reply.volume");
+    memset(&audio, 0, sizeof(audio)); audio.volume = 40; audio.notification_volume = 40;
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"reply_volume\":40,\"reply_volume_custom\":false") != NULL,
+                      "status reports the master as the reply level while following");
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"volume\":72}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.reply_volume_custom == 1 &&
+                      audio.reply_volume == 72, "reply level set");
+    require_condition(read_small(LE_REPLY_VOLUME_RUNTIME_PATH, text, sizeof(text)) == 3 && !strcmp(text, "72\n"),
+                      "reply.volume published for the engine");
+    require_condition(stat(LE_REPLY_VOLUME_PATH, &st) == 0 && (st.st_mode & 0777) == 0600, "reply level persisted 0600");
+    require_condition(reply_volume_load(&level) == 0 && level == 72, "persisted level survives a restart");
+    require_condition(audio.volume == 40, "the master volume is untouched");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"reply_volume\":72,\"reply_volume_custom\":true") != NULL &&
+                      strstr(response, "\"notification_volume\":72") != NULL && strstr(response, "\"volume\":40") != NULL,
+                      "status reports the separate level");
+
+    /* A reboot clears /run; the poll re-publishes, and fixes stale content. */
+    unlink(LE_REPLY_VOLUME_RUNTIME_PATH);
+    audio.last_reply_check_ms = 0;
+    reply_volume_reconcile(&audio, 1000);
+    require_condition(read_small(LE_REPLY_VOLUME_RUNTIME_PATH, text, sizeof(text)) == 3 && !strcmp(text, "72\n"),
+                      "missing reply.volume re-published");
+    { int fd = open(LE_REPLY_VOLUME_RUNTIME_PATH, O_WRONLY | O_TRUNC); require_condition(fd >= 0 && write(fd, "9\n", 2) == 2, "stale write"); close(fd); }
+    reply_volume_reconcile(&audio, 1000 + VOLUME_GUARD_POLL_MS);
+    require_condition(read_small(LE_REPLY_VOLUME_RUNTIME_PATH, text, sizeof(text)) == 3 && !strcmp(text, "72\n"),
+                      "stale reply.volume corrected");
+
+    {
+        static const char *const bad[] = {
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"volume\":101}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"volume\":-1}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"custom\":true}}"
+        };
+        size_t k;
+        for (k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+            mock_audiod_ipc(&audio, bad[k], response, sizeof(response));
+            require_condition(strstr(response, "\"ok\":false") != NULL && audio.reply_volume == 72 &&
+                              audio.reply_volume_custom == 1, "invalid reply level rejected without change");
+        }
+    }
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"custom\":false}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.reply_volume_custom == 0,
+                      "replies return to the master");
+    require_condition(access(LE_REPLY_VOLUME_RUNTIME_PATH, F_OK) != 0 && access(LE_REPLY_VOLUME_PATH, F_OK) != 0,
+                      "following removes reply.volume and the persisted choice");
+    { int fd = open(LE_REPLY_VOLUME_RUNTIME_PATH, O_WRONLY | O_CREAT, 0640); require_condition(fd >= 0 && write(fd, "50\n", 3) == 3, "stray write"); close(fd); }
+    reply_volume_reconcile(&audio, 1000 + 2 * VOLUME_GUARD_POLL_MS);
+    require_condition(access(LE_REPLY_VOLUME_RUNTIME_PATH, F_OK) != 0, "a stray reply.volume is removed while following");
+
+    /* Persisted content is validated strictly at startup. */
+    {
+        static const char *const bad[] = { "abc\n", "101\n", "-1\n", "7x\n", "\n", " 5\n" };
+        size_t k;
+        for (k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+            int fd = open(LE_REPLY_VOLUME_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            require_condition(fd >= 0 && write(fd, bad[k], strlen(bad[k])) == (ssize_t)strlen(bad[k]), "bad write");
+            close(fd);
+            require_condition(reply_volume_load(&level) < 0, "malformed persisted reply level means follow");
+        }
+    }
+    unlink(LE_REPLY_VOLUME_PATH); unlink(LE_REPLY_VOLUME_RUNTIME_PATH);
+}
+
 /* Music volume leveling: persisted owner choice drives the engine's RAM flag. */
 static void test_volume_leveling(void)
 {
@@ -920,6 +1015,7 @@ int main(void)
     test_logical_restart_input();
     test_logical_master_status();
     test_volume_leveling();
+    test_reply_volume();
     test_airplay_restore();
     test_airplay_restart_recovery();
     test_pending_restore_beats_stale_config();

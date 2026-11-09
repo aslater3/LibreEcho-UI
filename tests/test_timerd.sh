@@ -103,6 +103,26 @@ case "$out" in
 esac
 echo "  timer survives a restart: ok"
 
+# --- a reminder is persisted as its own record kind and survives a restart ----
+# Three hours ahead, so it cannot fire during this test. An older daemon skips
+# the record (it does not know the kind); this daemon must load it back.
+rh=$(date -d '+3 hours' '+%-H')
+rmin=$(date '+%-M')
+out=$(call add_reminder "{\"hour\":$rh,\"minute\":$rmin,\"days\":0,\"label\":\"pills\"}")
+case "$out" in *'"id":'*) ;; *) echo "FAIL: reminder not added: $out"; exit 1 ;; esac
+reminder_id=$(printf '%s' "$out" | sed -n 's/.*"id":\([0-9]*\).*/\1/p')
+grep -q '^v5 reminder ' "$state" || { echo "FAIL: reminder not persisted as a v5 record"; cat "$state"; exit 1; }
+stop_daemon
+start_daemon
+out=$(call status '{}')
+case "$out" in
+    *'"kind":"reminder"'*'"label":"pills"'*) ;;
+    *) echo "FAIL: reminder did not survive a restart: $out"; exit 1 ;;
+esac
+out=$(call cancel "{\"id\":$reminder_id}")
+case "$out" in *'"ok":true'*) ;; *) echo "FAIL: reminder not cancelled: $out"; exit 1 ;; esac
+echo "  reminder survives a restart and cancels: ok"
+
 # --- a due timer rings on the audio daemon --------------------------------
 : > "$bus"
 out=$(call add '{"seconds":600,"label":"shared"}')

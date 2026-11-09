@@ -13,6 +13,17 @@ code=$(curl -sS -o /tmp/le-light-head.out -w '%{http_code}' -I "$URL/api/v1/ligh
 [ "$code" = 405 ]
 code=$(curl -sS -o /tmp/le-light-get.out -w '%{http_code}' "$URL/api/v1/light")
 [ "$code" = 501 ]
+# Do not disturb: GET reports the switch, PUT persists it (mock backend).
+curl -fsS "$URL/api/v1/dnd" | jq -e '.ok and .data.enabled == false' >/dev/null
+code=$(curl -sS -o /tmp/le-dnd-post.out -w '%{http_code}' -X POST "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 405 ]
+code=$(curl -sS -o /tmp/le-dnd-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/dnd" -H 'Content-Type: application/json' --data '{"enabled":true}')
+[ "$code" = 403 ]
+code=$(curl -sS -o /tmp/le-dnd-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":"true"}')
+[ "$code" = 400 ]
+curl -fsS -X PUT "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":true}' | jq -e '.ok and .data.enabled == true' >/dev/null
+curl -fsS "$URL/api/v1/dnd" | jq -e '.ok and .data.enabled == true' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/dnd" -H "$CSRF" -H 'Content-Type: application/json' --data '{"enabled":false}' | jq -e '.ok and .data.enabled == false' >/dev/null
 curl -fsS "$URL/api/v1/network" | jq -e '.ok and .data.connectivity == "healthy" and .data.recovery_stage == "none" and .data.gateway_reachable == true and .data.liveness_failures == 0' >/dev/null
 expect "$(curl -fsS "$URL/api/v1/device")" "\"os_version\":\"LibreEcho OS $OS_VERSION\""
 curl -fsS "$URL/api/v1/config" | jq -e --arg version "LibreEcho OS $OS_VERSION" '.ok and .data.os_version == $version' >/dev/null
@@ -55,6 +66,33 @@ curl -sS -X POST "$URL/api/v1/assistant/respond" -H "$CSRF" -H 'Content-Type: ap
 respond_pid=$!
 timeout 1 curl -fsS "$URL/api/v1/assistant/latency" | jq -e '.ok and (.data.turns | length == 0)' >/dev/null
 wait "$respond_pid"
+# Owner-staged wake models: listing, the selection and chunk rejections, and a
+# staged folder that fails the check is refused and cleaned up. The test
+# server keeps its configuration in ./build, so models live in ./build/wakeword-models.
+curl -fsS "$URL/api/v1/wake-word/models" | jq -e '.ok and .data.stock.name == "alexa_v0.1" and .data.stock.wake_word == "Alexa" and (.data.models | type == "array")' >/dev/null
+code=$(curl -sS -o /tmp/le-wake-model-csrf.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H 'Content-Type: application/json' --data '{"model":"alexa_v0.1"}')
+[ "$code" = 403 ]
+code=$(curl -sS -o /tmp/le-wake-model-missing.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{"model":"no-such-word"}')
+[ "$code" = 404 ]
+code=$(curl -sS -o /tmp/le-wake-model-traversal.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{"model":"../etc"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-model-nofield.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-model-stock.out -w '%{http_code}' -X PUT "$URL/api/v1/wake-word/model" -H "$CSRF" -H 'Content-Type: application/json' --data '{"model":"alexa_v0.1"}')
+[ "$code" = 200 ]
+code=$(curl -sS -o /tmp/le-wake-chunk-name.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/bad%20name/files/alexa_v0.1.onnx" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"AAAA"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-chunk-file.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/files/other.bin" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"AAAA"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-chunk-b64.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/files/alexa_v0.1.onnx" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"a!b"}')
+[ "$code" = 400 ]
+code=$(curl -sS -o /tmp/le-wake-chunk.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/files/melspectrogram.onnx" -H "$CSRF" -H 'Content-Type: application/json' --data '{"offset":0,"data":"AAAA"}')
+[ "$code" = 200 ]
+code=$(curl -sS -o /tmp/le-wake-commit.out -w '%{http_code}' -X POST "$URL/api/v1/wake-word/models/test-word/commit" -H "$CSRF" -H 'Content-Type: application/json' --data '{}')
+[ "$code" = 422 ]
+grep -q 'Model rejected' /tmp/le-wake-commit.out
+code=$(curl -sS -o /tmp/le-wake-delete.out -w '%{http_code}' -X DELETE "$URL/api/v1/wake-word/models/test-word" -H "$CSRF")
+[ "$code" = 404 ]
 expect "$(curl -fsS "$URL/api/v1/setup")" '"completed":false'
 expect "$(curl -fsS "$URL/")" 'First-boot setup'
 code=$(curl -sS -o /tmp/le-bad-setup.out -w '%{http_code}' -X POST "$URL/api/v1/setup" -H "$CSRF" -H 'Content-Type: application/json' --data '{"hostname":"bad host"}')
@@ -298,6 +336,33 @@ code=$(curl -sS -o /tmp/le-invalid-listening-atomic.out -w '%{http_code}' \
 [ "$code" = 400 ]
 curl -fsS "$URL/api/v1/voice-pipeline" |
     jq -e '.data.listening.max_utterance_ms == 6000' >/dev/null
+# #401: noise suppression on the assistant audio is off by default, a
+# boolean only, persisted as voice_noise_suppression, and leaves the other
+# listening settings alone.
+curl -fsS "$URL/api/v1/voice-pipeline" |
+    jq -e '.data.listening.noise_suppression == false' >/dev/null
+jq -e '.voice_noise_suppression == false' "$CFG" >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"local","noise_suppression":true}' |
+    jq -e '.ok and .data.listening.noise_suppression == true and
+           .data.listening.max_utterance_ms == 6000' >/dev/null
+jq -e '.voice_noise_suppression == true' "$CFG" >/dev/null
+for body in '{"mode":"local","noise_suppression":"true"}' \
+            '{"mode":"local","noise_suppression":1}' \
+            '{"mode":"local","noise_suppression":false,"noise_suppression":true}'; do
+    code=$(curl -sS -o /tmp/le-invalid-noise-suppression.out -w '%{http_code}' \
+        -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+        -H 'Content-Type: application/json' --data "$body")
+    [ "$code" = 400 ] || { echo "noise_suppression accepted: $body" >&2; exit 1; }
+done
+curl -fsS "$URL/api/v1/voice-pipeline" |
+    jq -e '.data.listening.noise_suppression == true' >/dev/null
+curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
+    -H 'Content-Type: application/json' \
+    --data '{"mode":"local","noise_suppression":false}' |
+    jq -e '.data.listening.noise_suppression == false' >/dev/null
+jq -e '.voice_noise_suppression == false' "$CFG" >/dev/null
 curl -fsS -X PUT "$URL/api/v1/voice-pipeline" -H "$CSRF" \
     -H 'Content-Type: application/json' \
     --data '{"mode":"custom","stt_wyoming_uri":"tcp://127.0.0.1:10300","stt_model":"whisper-small","tts_wyoming_uri":"tcp://127.0.0.1:10200","tts_voice":"en_GB-alan-medium"}' |
@@ -475,6 +540,73 @@ curl -fsS "$URL/api/v1/audio" | grep -q '"volume_leveling":true'
 code=$(curl -sS -o /tmp/le-leveling-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":"on"}')
 [ "$code" = 400 ] || { echo "volume_leveling accepted a non-boolean ($code)" >&2; exit 1; }
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"volume_leveling":false}' | grep -q '"volume_leveling":false'
+# Separate reply volume (#409): follows the master until set, own level, back to following, validated.
+curl -fsS "$URL/api/v1/audio" | grep -q '"reply_volume_custom":false'
+master=$(curl -fsS "$URL/api/v1/audio" | sed -n 's/.*"data":{"volume":\([0-9]*\).*/\1/p')
+curl -fsS "$URL/api/v1/audio" | grep -q "\"reply_volume\":$master,"
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"reply_volume":35}' | grep -q '"reply_volume":35,"reply_volume_custom":true'
+curl -fsS "$URL/api/v1/audio" | grep -q "\"data\":{\"volume\":$master,"
+# A bad reply level is rejected before any other field in the same request is applied.
+for bad in '{"reply_volume":101}' '{"reply_volume":-1}' '{"reply_volume":"loud"}' '{"reply_volume":35.5}' '{"reply_volume":4294967346}' '{"reply_volume_custom":true}' '{"reply_volume_custom":"no"}' '{"volume":7,"reply_volume":101}' '{"volume":7,"reply_volume_custom":"no"}'; do
+  code=$(curl -sS -o /tmp/le-reply-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data "$bad")
+  [ "$code" = 400 ] || { echo "reply volume accepted $bad ($code)" >&2; exit 1; }
+done
+curl -fsS "$URL/api/v1/audio" | grep -q '"reply_volume":35,"reply_volume_custom":true'
+curl -fsS "$URL/api/v1/audio" | grep -q "\"data\":{\"volume\":$master,"
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"reply_volume_custom":false}' | grep -q "\"reply_volume\":$master,\"reply_volume_custom\":false"
 code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
 [ "$code" = 400 ]
+# Microphone mixing: beamformer by default, persisted choice, unknown mode rejected.
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_mix":"beamformer"'
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"average"}' | grep -q '"microphone_mix":"average"'
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_mix":"average"'
+code=$(curl -sS -o /tmp/le-mix-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"echo"}')
+[ "$code" = 400 ] || { echo "microphone_mix accepted an unknown mode ($code)" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"beamformer"}' | grep -q '"microphone_mix":"beamformer"'
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_lane":-1'
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"single","microphone_lane":3}' | grep -q '"microphone_lane":3'
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_lane":3'
+code=$(curl -sS -o /tmp/le-lane-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_lane":7}')
+[ "$code" = 400 ] || { echo "microphone_lane accepted an out-of-range lane ($code)" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"beamformer","microphone_lane":-1}' | grep -q '"microphone_lane":-1'
+# Wake near-miss clips (issue #407): off by default, bounded, deletable, and
+# stored owner-only. The suite points the daemon at a private directory.
+voice_dir="${LIBREECHO_VOICE_CLIP_DIR:?voice clip directory is not set}"
+rm -rf "$voice_dir"
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.ok and .data.near_miss_enabled == false and .data.count == 0 and (.data.clips | length == 0) and .data.limits.max_count == 32' >/dev/null
+code=$(curl -sS -o /tmp/le-clip-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/voice/clips" -H "$CSRF" -H 'Content-Type: application/json' --data '{"near_miss_enabled":"yes"}')
+[ "$code" = 400 ] || { echo "voice clips accepted a non-boolean ($code)" >&2; exit 1; }
+code=$(curl -sS -o /tmp/le-clip-nocsrf.out -w '%{http_code}' -X PUT "$URL/api/v1/voice/clips" -H 'Content-Type: application/json' --data '{"near_miss_enabled":true}')
+[ "$code" = 403 ] || { echo "voice clips accepted a write without CSRF ($code)" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/voice/clips" -H "$CSRF" -H 'Content-Type: application/json' --data '{"near_miss_enabled":true}' | jq -e '.data.near_miss_enabled == true' >/dev/null
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.data.near_miss_enabled == true' >/dev/null
+# Stand in for the device writer: one valid 1280-sample WAV at mode 0600.
+python3 - "$voice_dir" <<'PY'
+import os, struct, sys
+d = sys.argv[1]
+os.makedirs(d, mode=0o700, exist_ok=True)
+pcm = b'\x01\x00' * 1280
+header = b'RIFF' + struct.pack('<I', 36 + len(pcm)) + b'WAVEfmt ' + struct.pack('<IHHIIHH', 16, 1, 1, 16000, 32000, 2, 16) + b'data' + struct.pack('<I', len(pcm))
+for name in ('near-1700000000-0001', 'near-1700000001-0002'):
+    fd = os.open(os.path.join(d, name + '.wav'), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.write(fd, header + pcm)
+    os.close(fd)
+PY
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.data.count == 2 and .data.clips[0].id == "near-1700000001-0002" and .data.clips[1].kind == "near" and .data.clips[0].bytes == 2604' >/dev/null
+curl -fsS -D /tmp/le-clip-headers.out -o /tmp/le-clip.wav "$URL/api/v1/voice/clips/near-1700000000-0001"
+grep -qi '^content-type: audio/wav' /tmp/le-clip-headers.out
+[ "$(wc -c </tmp/le-clip.wav | tr -d ' ')" = 2604 ] || { echo "voice clip download size mismatch" >&2; exit 1; }
+[ "$(head -c 4 /tmp/le-clip.wav)" = RIFF ] || { echo "voice clip download is not a WAV" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/api/v1/voice/clips/near-1700000009-0009")
+[ "$code" = 404 ] || { echo "missing voice clip did not return 404 ($code)" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/api/v1/voice/clips/..%2Fsettings")
+[ "$code" = 404 ] || { echo "traversal-shaped voice clip id did not return 404 ($code)" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/voice/clips/near-1700000000-0001" -H "$CSRF")
+[ "$code" = 200 ] || { echo "voice clip delete failed ($code)" >&2; exit 1; }
+code=$(curl -sS -o /dev/null -w '%{http_code}' -X DELETE "$URL/api/v1/voice/clips/near-1700000000-0001" -H "$CSRF")
+[ "$code" = 404 ] || { echo "second voice clip delete did not return 404 ($code)" >&2; exit 1; }
+curl -fsS -X POST "$URL/api/v1/voice/clips/clear" -H "$CSRF" | jq -e '.data.removed == 1' >/dev/null
+curl -fsS "$URL/api/v1/voice/clips" | jq -e '.data.count == 0' >/dev/null
+[ "$(stat -c %a "$voice_dir/settings")" = 600 ] || { echo "voice clip settings are not mode 0600" >&2; exit 1; }
+curl -fsS -X PUT "$URL/api/v1/voice/clips" -H "$CSRF" -H 'Content-Type: application/json' --data '{"near_miss_enabled":false}' | jq -e '.data.near_miss_enabled == false' >/dev/null
 echo 'api: ok'

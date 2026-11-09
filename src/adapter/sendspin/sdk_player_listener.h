@@ -208,6 +208,14 @@ public:
     bool pump_feedback() {
         std::lock_guard<std::recursive_mutex> guard(mu_);
         if (role_ == nullptr) return false;
+        // The engine dropped the live generation under a still-open SDK stream
+        // (for example a PCM error while voice output held the speaker). Open a
+        // successor so playback resumes without the server restarting the stream.
+        // The feedback ledger restarts with the successor's own played cursor.
+        if (session_.rearm_pending() && session_.rearm_stream() == SinkResult::Ok) {
+            reset_feedback_locked();
+            mute_.reset_stream();
+        }
         if (pending_start_) {
             const auto result = session_.start_stream();
             if (result == SinkResult::Timeout) return false;

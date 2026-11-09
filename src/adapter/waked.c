@@ -1,12 +1,17 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "adapter.h"
+#include "clap_detector.h"
+#include "smoke_alarm_detector.h"
 #include "voice_aec.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
 #include "voice_stream.h"
+#include "wake_arbiter.h"
 #include "wake_led.h"
 #include "wake_worker.h"
+#include "wake_model.h"
+#include "voice_clip_store.h"
 #include "../json.h"
 
 #include "wake_health.h"
@@ -35,8 +40,18 @@
 #define PREROLL_SAMPLES (LE_VOICE_AEC_RATE * 3U)
 #define REFERENCE_TIMEOUT_NS 250000000ULL
 #define WAKE_ACCEPT_THRESHOLD 0.55f
+/* The classifier of a model folder: the one file a second word needs. */
+#define WAKE_CLASSIFIER_FILE "alexa_v0.1.onnx"
+#define WAKE_SECOND_PATH_BYTES 1024U
 #define MAX_WAKE_SUBSCRIBERS 4U
 #define MAX_AUDIO_SUBSCRIBERS 2U
+/* Nearest-device answering (#408): the owner's switch is in the web config,
+ * the house key beside it. Fixed paths, not arguments: the init script ships
+ * in the ramdisk and must work with older waked payloads. */
+#define DEFAULT_WEB_CONFIG "/data/libreecho/config/web-config.json"
+#define DEFAULT_PEER_KEY "/data/libreecho/config/peer.key"
+/* The wake word's level is measured over this much audio before detection. */
+#define ARB_LEVEL_SAMPLES (LE_VOICE_AEC_RATE * 8U / 10U)
 
 struct waked_config {
     const char *socket_path;
@@ -49,6 +64,9 @@ struct waked_config {
     unsigned int wake_threads;
     unsigned int vad_floor_rms;
     float wake_threshold;
+    /* Optional second wake word: a model folder whose classifier runs on the
+     * first model's features. Its folder name is the word's name. */
+    const char *second_model_directory;
 };
 
 struct waked_ipc {
@@ -57,9 +75,24 @@ struct waked_ipc {
     int subscribers[MAX_WAKE_SUBSCRIBERS];
     int audio_subscribers[MAX_AUDIO_SUBSCRIBERS];
     unsigned int detected_count;
+    unsigned int clap_count;
+    unsigned int smoke_alarm_count;
     int sensitivity;
     struct le_wake_event last_event;
+    /* The phrase and model name of the model this process runs. */
+    char wake_phrase[LE_WAKE_MODEL_NAME_MAX];
+    char wake_model[LE_WAKE_MODEL_NAME_MAX];
     struct le_wake_led led;
+    struct le_clap_detector clap;
+    struct le_smoke_alarm_detector smoke_alarm;
+    struct le_wake_arbiter arbiter;
+    /* A detection waiting for the other devices' claims. */
+    int arb_pending;
+    struct le_wake_event arb_event;
+    /* The preroll ring, to measure how loud the wake word was. */
+    const int16_t *preroll;
+    const size_t *preroll_position;
+    uint64_t samples_written;
 };
 
 struct waked_metrics {
@@ -243,13 +276,111 @@ static int threshold_sensitivity(float threshold)
     return sensitivity;
 }
 
+static void send_to_wake_subscribers(struct waked_ipc *ipc,
+                                     const char *message, int length)
+{
+    size_t i;
+
+    for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i) {
+        int fd = ipc->subscribers[i];
+
+        if (fd < 0)
+            continue;
+        if (send(fd, message, (size_t)length,
+                 MSG_DONTWAIT | MSG_NOSIGNAL) != length) {
+            close(fd);
+            ipc->subscribers[i] = -1;
+        }
+    }
+}
+
+/*
+ * Clap events travel on the wake subscriber stream as their own event type.
+ * Existing consumers select on wake_detected and ignore anything else, so a
+ * clap never starts a voice turn.
+ */
+static void publish_clap_event(struct waked_ipc *ipc,
+                               const struct le_clap_event *event)
+{
+    char data[128];
+    char message[LE_ADAPTER_MSG_MAX];
+    int length;
+
+    ++ipc->clap_count;
+    if (snprintf(
+            data, sizeof(data),
+            "{\"detection_sample\":%llu,\"claps\":%u}",
+            (unsigned long long)event->detection_sample,
+            event->claps) >= (int)sizeof(data))
+        return;
+    length = le_adapter_format_event(
+        message, sizeof(message), "clap_detected", data);
+    if (length < 0)
+        return;
+    send_to_wake_subscribers(ipc, message, length);
+}
+
+/*
+ * Smoke alarm T3 events use the same subscriber stream as claps. They are
+ * reported as smoke_alarm_detected and never start a voice turn.
+ */
+static void publish_smoke_alarm_event(
+    struct waked_ipc *ipc, const struct le_smoke_alarm_event *event)
+{
+    char data[128];
+    char message[LE_ADAPTER_MSG_MAX];
+    int length;
+
+    ++ipc->smoke_alarm_count;
+    if (snprintf(
+            data, sizeof(data),
+            "{\"detection_sample\":%llu,\"pulses\":%u}",
+            (unsigned long long)event->detection_sample,
+            event->pulses) >= (int)sizeof(data))
+        return;
+    length = le_adapter_format_event(
+        message, sizeof(message), "smoke_alarm_detected", data);
+    if (length < 0)
+        return;
+    send_to_wake_subscribers(ipc, message, length);
+}
+
+#ifdef LE_WAKE_ENGINE_ONNX
+/* Wake near-miss floor. Peaks at or above this, with speech, that stay under
+ * the accept threshold are kept as clips when the owner has enabled them. */
+#define WAKE_NEAR_MISS_FLOOR 0.35f
+
+/*
+ * Runs on the wake inference thread. Each near miss is one bounded clip write,
+ * taken only when the owner has enabled clip capture; the settings file is
+ * read here, so a change applies on the next near miss without a restart.
+ */
+static void wake_near_miss_received(
+    const struct le_wake_near_miss *miss,
+    const int16_t *samples, size_t count, void *opaque)
+{
+    struct le_voice_clip_settings settings;
+    const char *directory = le_voice_clip_directory();
+
+    (void)opaque;
+    (void)miss;
+    if (le_voice_clip_settings_load(directory, &settings) != 0 ||
+        !settings.near_miss_enabled)
+        return;
+    if (count > LE_VOICE_CLIP_MAX_SAMPLES)
+        count = LE_VOICE_CLIP_MAX_SAMPLES;
+    if (le_voice_clip_write(directory, "near", samples, count,
+                            (long long)time(NULL)) < 0)
+        fprintf(stderr, "waked: near-miss clip not stored\n");
+}
+#endif
+
 static void publish_wake_event(struct waked_ipc *ipc,
                                const struct le_wake_event *event)
 {
     char data[512];
     char message[LE_ADAPTER_MSG_MAX];
     int length;
-    size_t i;
 
     ++ipc->detected_count;
     ipc->last_event = *event;
@@ -278,17 +409,76 @@ static void publish_wake_event(struct waked_ipc *ipc,
         message, sizeof(message), "wake_detected", data);
     if (length < 0)
         return;
-    for (i = 0; i < MAX_WAKE_SUBSCRIBERS; ++i) {
-        int fd = ipc->subscribers[i];
+    send_to_wake_subscribers(ipc, message, length);
+}
 
-        if (fd < 0)
-            continue;
-        if (send(fd, message, (size_t)length,
-                 MSG_DONTWAIT | MSG_NOSIGNAL) != length) {
-            close(fd);
-            ipc->subscribers[i] = -1;
-        }
+static uint64_t monotonic_milliseconds(void)
+{
+    return monotonic_nanoseconds() / 1000000ULL;
+}
+
+/* Level of the ARB_LEVEL_SAMPLES before the detection, from the preroll. */
+static int wake_level(const struct waked_ipc *ipc, uint64_t detection_sample)
+{
+    static int16_t window[ARB_LEVEL_SAMPLES];
+    uint64_t end = detection_sample, start, held;
+    size_t count, i, position;
+
+    if (!ipc->preroll || !ipc->samples_written)
+        return LE_WAKE_ARB_LEVEL_MIN;
+    if (end > ipc->samples_written)
+        end = ipc->samples_written;
+    held = ipc->samples_written < PREROLL_SAMPLES
+        ? ipc->samples_written : PREROLL_SAMPLES;
+    start = end > ARB_LEVEL_SAMPLES ? end - ARB_LEVEL_SAMPLES : 0;
+    if (start < ipc->samples_written - held)
+        start = ipc->samples_written - held;
+    if (end <= start)
+        return LE_WAKE_ARB_LEVEL_MIN;
+    count = (size_t)(end - start);
+    /* *preroll_position is where sample samples_written goes next. */
+    position = (*ipc->preroll_position + PREROLL_SAMPLES -
+                (size_t)(ipc->samples_written - start)) % PREROLL_SAMPLES;
+    for (i = 0; i < count; ++i)
+        window[i] = ipc->preroll[(position + i) % PREROLL_SAMPLES];
+    return le_wake_level(window, count);
+}
+
+/* A wake was detected here. With nearest-device answering on, it is held
+ * until the other devices' claims are in; otherwise it goes out at once. */
+static void wake_detected_here(struct waked_ipc *ipc,
+                               const struct le_wake_event *event)
+{
+    int level, rc;
+
+    if (ipc->arb_pending) {
+        fprintf(stderr, "waked: wake ignored: the previous one is "
+                "still being settled\n");
+        return;
     }
+    level = wake_level(ipc, event->detection_sample);
+    rc = le_wake_arbiter_claim(&ipc->arbiter, monotonic_milliseconds(),
+                               (long long)time(NULL), level,
+                               le_wake_score_milli(event->score));
+    if (rc == LE_WAKE_ARB_OFF) {
+        publish_wake_event(ipc, event);
+    } else if (rc == LE_WAKE_ARB_PENDING) {
+        ipc->arb_pending = 1;
+        ipc->arb_event = *event;
+    }
+}
+
+static void arbiter_tick(struct waked_ipc *ipc)
+{
+    int rc = le_wake_arbiter_tick(&ipc->arbiter, monotonic_milliseconds(),
+                                  (long long)time(NULL));
+
+    if (!ipc->arb_pending || rc == LE_WAKE_ARB_PENDING)
+        return;
+    ipc->arb_pending = 0;
+    /* WON, or switched off mid-window (IDLE): answer as before. */
+    if (rc != LE_WAKE_ARB_LOST)
+        publish_wake_event(ipc, &ipc->arb_event);
 }
 
 #ifdef LE_WAKE_ENGINE_ONNX
@@ -416,7 +606,8 @@ static void handle_control_client(
 {
     char message[LE_ADAPTER_MSG_MAX];
     char command[64];
-    char status[1024];
+    char status[1280];
+    char arbitration[192];
     char *args = NULL;
     unsigned long id = 0;
 
@@ -437,9 +628,12 @@ static void handle_control_client(
 #ifdef LE_WAKE_ENGINE_ONNX
         model_loaded = le_wake_worker_health(wake_worker, &inference_age_ms);
 #endif
+        if (le_wake_arbiter_status_json(&ipc->arbiter, arbitration,
+                                        sizeof(arbitration)) < 0)
+            snprintf(arbitration, sizeof(arbitration), "null");
         snprintf(
             status, sizeof(status),
-            "{\"enabled\":true,\"wake_word\":\"Alexa\","
+            "{\"enabled\":true,\"wake_word\":\"%s\","
             "\"model_status\":\"%s\",\"sensitivity\":%d,"
             "\"cooldown_ms\":1750,\"detected_count\":%u,"
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
@@ -448,7 +642,11 @@ static void handle_control_client(
             "\"model_loaded\":%s,\"processed_frames\":%llu,"
             "\"capture_active\":%s,\"capture_age_ms\":%d,"
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
-            "\"model\":\"alexa_v0.1\"}",
+            "\"clap_enabled\":%s,\"clap_count\":%u,"
+            "\"smoke_alarm_enabled\":%s,\"smoke_alarm_count\":%u,"
+            "\"nearest_answers\":%s,"
+            "\"model\":\"%s\"}",
+            ipc->wake_phrase,
             model_loaded ? "loaded" : "unavailable", ipc->sensitivity, ipc->detected_count,
             metrics->vad_active ? "true" : "false",
             metrics->vad_floor_rms,
@@ -456,7 +654,12 @@ static void handle_control_client(
             metrics->playback_active ? "true" : "false",
             model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
             metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
-            model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms);
+            model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms,
+            ipc->clap.enabled ? "true" : "false", ipc->clap_count,
+            ipc->smoke_alarm.enabled ? "true" : "false",
+            ipc->smoke_alarm_count,
+            arbitration,
+            ipc->wake_model);
         (void)respond(client_fd, id, 1, status);
     } else if (!strcmp(command, "subscribe")) {
         if (add_subscriber(ipc, client_fd) < 0) {
@@ -534,6 +737,38 @@ static void handle_control_client(
         else
             (void)respond(client_fd, id, 0, "wake model runtime unavailable");
 #endif
+    } else if (!strcmp(command, "set_clap")) {
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+        int enabled = 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "enabled") ||
+            json_get_top_level_bool(args, length, "enabled", &enabled) != 1)
+            (void)respond(client_fd, id, 0,
+                          "enabled must be a single top-level boolean");
+        else {
+            le_clap_detector_set_enabled(&ipc->clap, enabled);
+            (void)respond(client_fd, id, 1,
+                          enabled ? "{\"enabled\":true}"
+                                  : "{\"enabled\":false}");
+        }
+    } else if (!strcmp(command, "set_smoke_alarm")) {
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+        int enabled = 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "enabled") ||
+            json_get_top_level_bool(args, length, "enabled", &enabled) != 1)
+            (void)respond(client_fd, id, 0,
+                          "enabled must be a single top-level boolean");
+        else {
+            le_smoke_alarm_detector_set_enabled(&ipc->smoke_alarm, enabled);
+            (void)respond(client_fd, id, 1,
+                          enabled ? "{\"enabled\":true}"
+                                  : "{\"enabled\":false}");
+        }
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -541,9 +776,28 @@ static void handle_control_client(
             1.0f, 1.0f, 0, "synthetic-test"
         };
 
-        publish_wake_event(ipc, &event);
+        /* Settled like a real wake, so the owner can try the
+         * nearest-device setting from any device. */
+        wake_detected_here(ipc, &event);
         (void)respond(client_fd, id, 1,
                       "{\"detected\":true}");
+    } else if (!strcmp(command, "listen")) {
+        /*
+         * Push-to-talk (#372): the action button starts a turn as if the wake
+         * word had been heard. Subscribers -- the on-device pipeline, the
+         * Home Assistant satellite, a live session -- cannot tell it from a
+         * detection, which is the point; the model name says where it came
+         * from in the log and the voice history. The turn starts at the
+         * current sample, so nothing before the press is sent as speech.
+         */
+        const struct le_wake_event event = {
+            metrics->processed_frames *
+                LE_VOICE_AEC_FRAME_SAMPLES,
+            1.0f, 1.0f, metrics->playback_active, "button"
+        };
+
+        publish_wake_event(ipc, &event);
+        (void)respond(client_fd, id, 1, "{\"listening\":true}");
     } else {
         (void)respond(client_fd, id, 0, "unknown command");
     }
@@ -596,12 +850,27 @@ static int process_frame(struct le_voice_aec *aec,
     preroll_write(preroll, preroll_position, clean,
                   LE_VOICE_AEC_FRAME_SAMPLES);
     ++metrics->processed_frames;
+    ipc->samples_written =
+        metrics->processed_frames * LE_VOICE_AEC_FRAME_SAMPLES;
     metrics->last_capture_ns = now_ns;
     publish_audio_frame(
         ipc,
         (metrics->processed_frames - 1U) *
             LE_VOICE_AEC_FRAME_SAMPLES,
         clean, LE_VOICE_AEC_FRAME_SAMPLES);
+    if (ipc->clap.enabled) {
+        struct le_clap_event clap;
+
+        if (le_clap_detector_process(&ipc->clap, clean, &clap))
+            publish_clap_event(ipc, &clap);
+    }
+    if (ipc->smoke_alarm.enabled) {
+        struct le_smoke_alarm_event alarm;
+
+        if (le_smoke_alarm_detector_process(
+                &ipc->smoke_alarm, clean, &alarm))
+            publish_smoke_alarm_event(ipc, &alarm);
+    }
 
 #ifdef LE_WAKE_ENGINE_ONNX
     if (wake_worker && wake_worker->implementation) {
@@ -636,6 +905,13 @@ static int process_frame(struct le_voice_aec *aec,
     return metrics->dump_samples >= dump_limit ? 1 : 0;
 }
 
+static const char *wake_second_name(const char *directory)
+{
+    const char *slash = strrchr(directory, '/');
+
+    return slash ? slash + 1 : directory;
+}
+
 static int run_waked(const struct waked_config *config)
 {
     struct le_voice_reference reference;
@@ -664,9 +940,21 @@ static int run_waked(const struct waked_config *config)
     memset(&metrics, 0, sizeof(metrics));
     metrics.vad_floor_rms = config->vad_floor_rms;
     memset(&ipc, 0, sizeof(ipc));
+    le_clap_detector_init(&ipc.clap);
+    le_smoke_alarm_detector_init(&ipc.smoke_alarm);
     ipc.listen_fd = -1;
     ipc.event_pipe[0] = -1;
     ipc.event_pipe[1] = -1;
+    if (le_wake_model_label(config->model_directory, ipc.wake_phrase,
+                            sizeof(ipc.wake_phrase), ipc.wake_model,
+                            sizeof(ipc.wake_model)) < 0) {
+        snprintf(ipc.wake_phrase, sizeof(ipc.wake_phrase), "%s",
+                 LE_WAKE_MODEL_STOCK_PHRASE);
+        snprintf(ipc.wake_model, sizeof(ipc.wake_model), "%s",
+                 LE_WAKE_MODEL_STOCK_NAME);
+    }
+    le_wake_arbiter_init(&ipc.arbiter, DEFAULT_WEB_CONFIG,
+                         DEFAULT_PEER_KEY, 1);
     le_wake_led_init(&ipc.led, config->led_socket);
     ipc.sensitivity =
         threshold_sensitivity(config->wake_threshold);
@@ -677,6 +965,9 @@ static int run_waked(const struct waked_config *config)
     preroll = (int16_t *)calloc(PREROLL_SAMPLES, sizeof(*preroll));
     if (!preroll)
         goto out;
+    ipc.preroll = preroll;
+    ipc.preroll_position = &preroll_position;
+    le_wake_arbiter_reload(&ipc.arbiter, monotonic_milliseconds());
     ipc.listen_fd = le_adapter_listen(config->socket_path);
     if (ipc.listen_fd < 0) {
         perror("waked: control socket");
@@ -703,10 +994,33 @@ static int run_waked(const struct waked_config *config)
             &vad, config->vad_floor_rms) < 0)
         goto out;
 #ifdef LE_WAKE_ENGINE_ONNX
-    if (le_wake_worker_start(
-            &wake_worker, config->model_directory,
-            config->wake_threads, config->wake_threshold,
-            wake_event_received, &ipc) < 0)
+    {
+        char second_classifier[WAKE_SECOND_PATH_BYTES];
+        const char *second_name = NULL;
+        const char *second_path = NULL;
+
+        if (config->second_model_directory) {
+            second_name = wake_second_name(config->second_model_directory);
+            if (snprintf(second_classifier, sizeof(second_classifier),
+                         "%s/%s", config->second_model_directory,
+                         WAKE_CLASSIFIER_FILE) >=
+                    (int)sizeof(second_classifier)) {
+                fprintf(stderr, "waked: second wake model path too long\n");
+                goto out;
+            }
+            second_path = second_classifier;
+            fprintf(stderr, "waked: second wake word %s\n", second_name);
+        }
+        if (le_wake_worker_start_words(
+                &wake_worker, config->model_directory,
+                config->wake_threads, config->wake_threshold,
+                second_path, second_name,
+                wake_event_received, &ipc) < 0)
+            goto out;
+    }
+    if (le_wake_worker_set_near_miss(
+            &wake_worker, WAKE_NEAR_MISS_FLOOR,
+            wake_near_miss_received, NULL) < 0)
         goto out;
 #endif
     microphone_fd = connect_mic_stream(config->mic_socket);
@@ -734,8 +1048,10 @@ static int run_waked(const struct waked_config *config)
     );
 
     while (running) {
-        struct pollfd descriptors[4];
+        struct pollfd descriptors[5];
         int poll_result;
+        int poll_timeout = le_wake_arbiter_timeout(
+            &ipc.arbiter, monotonic_milliseconds());
 
         descriptors[0].fd = microphone_fd;
         descriptors[0].events = POLLIN;
@@ -749,7 +1065,12 @@ static int run_waked(const struct waked_config *config)
         descriptors[3].fd = ipc.event_pipe[0];
         descriptors[3].events = POLLIN;
         descriptors[3].revents = 0;
-        poll_result = poll(descriptors, 4, 1000);
+        descriptors[4].fd = le_wake_arbiter_fd(&ipc.arbiter);
+        descriptors[4].events = POLLIN;
+        descriptors[4].revents = 0;
+        if (poll_timeout < 0 || poll_timeout > 1000)
+            poll_timeout = 1000;
+        poll_result = poll(descriptors, 5, poll_timeout);
         if (poll_result < 0 && errno == EINTR)
             continue;
         if (poll_result < 0)
@@ -767,8 +1088,9 @@ static int run_waked(const struct waked_config *config)
             while ((count = read(
                         ipc.event_pipe[0], &event,
                         sizeof(event))) == (ssize_t)sizeof(event))
-                publish_wake_event(&ipc, &event);
+                wake_detected_here(&ipc, &event);
         }
+        arbiter_tick(&ipc);
         reap_subscribers(&ipc);
         if (descriptors[2].revents & POLLIN) {
             int client_fd = le_adapter_accept(ipc.listen_fd);
@@ -817,6 +1139,7 @@ static int run_waked(const struct waked_config *config)
     result = running ? -1 : 0;
 
 out:
+    le_wake_arbiter_close(&ipc.arbiter);
     le_wake_led_shutdown(&ipc.led);
 #ifdef LE_WAKE_ENGINE_ONNX
     le_wake_worker_stop(&wake_worker, &wake_metrics);
@@ -879,7 +1202,8 @@ int main(int argc, char **argv)
         0,
         2,
         LE_VOICE_VAD_DEFAULT_FLOOR_RMS,
-        WAKE_ACCEPT_THRESHOLD
+        WAKE_ACCEPT_THRESHOLD,
+        NULL
     };
     int i;
 
@@ -920,6 +1244,15 @@ int main(int argc, char **argv)
                 return 2;
             }
             config.wake_threshold = threshold;
+        } else if (!strcmp(argv[i], "--second-model-dir") &&
+                   i + 1 < argc) {
+            const char *name = wake_second_name(argv[++i]);
+
+            if (!le_wake_model_name_valid(name)) {
+                fprintf(stderr, "waked: invalid second wake model name\n");
+                return 2;
+            }
+            config.second_model_directory = argv[i];
         } else if (!strcmp(argv[i], "--vad-floor-rms") &&
                    i + 1 < argc) {
             char *end = NULL;
@@ -963,6 +1296,7 @@ int main(int argc, char **argv)
                     "[--model-dir PATH] [--wake-threads 1..4] "
                     "[--vad-floor-rms 1..16384] "
                     "[--wake-threshold 0..1] "
+                    "[--second-model-dir PATH] "
                     "[--dump-pcm PATH --dump-seconds N]\n", argv[0]);
             return 2;
         }

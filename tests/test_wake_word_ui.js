@@ -22,7 +22,8 @@ async function check(word,enabled=true){
  assert(content.innerHTML.includes(`<dt>Adapter-reported wake word</dt><dd>${esc(word||'Unavailable')}</dd>`));
  assert(!content.innerHTML.includes('<select'));
  assert(!content.innerHTML.includes('<option'));
- assert(content.innerHTML.includes('uploading a custom model is not supported here'));
+ assert(content.innerHTML.includes('An owner-staged model reports its own name here; manage staged models in Wake-word models below.'));
+ assert(content.innerHTML.includes('<div id="wake-models">'));
  assert(content.innerHTML.includes('Custom voice mode changes speech recognition and synthesis, not the wake model'));
  assert(content.innerHTML.includes('select or disable the installed wake model in Home Assistant'));
  assert(content.innerHTML.includes(enabled?'Enabled':'Disabled'));

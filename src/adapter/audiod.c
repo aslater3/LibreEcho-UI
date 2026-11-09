@@ -15,6 +15,7 @@
 #endif
 
 #include "adapter.h"
+#include "event_sound.h"
 #include "log.h"
 #include "sleep_generator.h"
 
@@ -208,6 +209,8 @@ struct snd_ctl_elem_value {
 
 static volatile sig_atomic_t g_stop;
 static volatile sig_atomic_t g_sleep_stop;
+/* Raised by SIGTERM in a sample child: finish on a faded chunk and exit. */
+static volatile sig_atomic_t g_sample_stop;
 
 struct audio_control {
     int found;
@@ -262,6 +265,9 @@ struct audio_hw {
     pid_t noise_pid;
     /* One sample child at a time; this also lets the reaper clear ownership. */
     pid_t sample_pid;
+    /* Which owner event sound the live sample child is playing, or -1 for a
+       bundled sample, so a timer dismissal stops only its own ring. */
+    int sample_event;
     /*
      * Cue playback: at most one writer at a time, and at most one cue per
      * LE_CUE_MIN_INTERVAL_MS.  The PID is the writer slot and the timestamp
@@ -284,7 +290,13 @@ struct audio_hw {
     int amplifier_on;
     char system_audio_bus[PATH_MAX];
     int volume_leveling;     /* music AVL in the audio engine, persisted */
+    int do_not_disturb;      /* owner's DND switch, persisted in LE_DND_PATH */
     long long last_leveling_check_ms;
+    /* Separate assistant-reply level (#409), persisted.  0: replies follow
+     * the master (the default); 1: reply_volume is their own level. */
+    int reply_volume_custom;
+    int reply_volume;
+    long long last_reply_check_ms;
 };
 
 struct client {
@@ -936,8 +948,32 @@ static const char *control_name_or_default(const struct audio_control *control,
 /* The engine watches this beside master.volume (LE_MASTER_VOLUME_DIR). */
 #define LE_AVL_DISABLED_PATH "/run/libreecho-audio/avl.disabled"
 #endif
+/* Do not disturb: the owner's switch.  Stored beside volume leveling with the
+ * same atomic "on"/"off" file.  While it is on, chimes, press tones, wake
+ * chirps and action samples are dropped unless the caller marks them
+ * priority (timer alarms are).  esphomed reads the same file and drops Home
+ * Assistant announcements.  A missing file means off. */
+#ifndef LE_DND_PATH
+#define LE_DND_PATH "/data/libreecho/config/do-not-disturb"
+#endif
+static int flag_file_load(const char *path);
 static int volume_leveling_load(void);
 static int volume_leveling_apply(int enabled);
+/* Separate reply volume (#409).  The owner's level for assistant replies,
+ * announcements and chimes (the engine's system and announcement buses) is
+ * persisted here as a decimal 0..100; a missing or invalid file means replies
+ * follow the master volume, exactly as before.  While a level is set it is
+ * published beside master.volume as reply.volume in the same form; the file
+ * is absent while replies follow the master. */
+#ifndef LE_REPLY_VOLUME_PATH
+#define LE_REPLY_VOLUME_PATH "/data/libreecho/config/reply-volume"
+#endif
+#ifndef LE_REPLY_VOLUME_RUNTIME_PATH
+/* Literal, beside master.volume (LE_MASTER_VOLUME_DIR may be a variable in tests). */
+#define LE_REPLY_VOLUME_RUNTIME_PATH "/run/libreecho-audio/reply.volume"
+#endif
+static int reply_volume_load(int *volume);
+static int reply_volume_publish(int custom, int volume);
 /* How often the guard re-reads the mixer while idle, in milliseconds. */
 #define VOLUME_GUARD_POLL_MS 250
 
@@ -1233,6 +1269,10 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->volume_leveling = volume_leveling_load();
     if (volume_leveling_apply(audio->volume_leveling) < 0)
         le_log_warn("audiod: volume leveling flag could not be applied");
+    audio->reply_volume_custom = reply_volume_load(&audio->reply_volume) == 0;
+    if (reply_volume_publish(audio->reply_volume_custom, audio->reply_volume) < 0)
+        le_log_warn("audiod: reply volume could not be published");
+    audio->do_not_disturb = flag_file_load(LE_DND_PATH);
     (void)snprintf(audio->system_audio_bus, sizeof(audio->system_audio_bus),
                    "%s", LE_SYSTEM_AUDIO_BUS);
     (void)snprintf(audio->ctl_path, sizeof(audio->ctl_path),
@@ -1260,10 +1300,11 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->output_available = 0;
 }
 
-static int volume_leveling_load(void)
+/* Reads an "on"/"off" flag file.  Anything unreadable or unknown is off. */
+static int flag_file_load(const char *path)
 {
     char text[8];
-    int fd = open(LE_VOLUME_LEVELING_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    int fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
     ssize_t n;
 
     if (fd < 0)
@@ -1274,6 +1315,11 @@ static int volume_leveling_load(void)
         return 0;
     text[n] = '\0';
     return strcmp(text, "on\n") == 0 || strcmp(text, "on") == 0;
+}
+
+static int volume_leveling_load(void)
+{
+    return flag_file_load(LE_VOLUME_LEVELING_PATH);
 }
 
 /* Drive the engine's RAM flag.  Returns 0 when the flag matches. */
@@ -1296,15 +1342,15 @@ static int volume_leveling_apply(int enabled)
     return 0;
 }
 
-/* Atomic, fsynced 0600 write of the owner's choice. */
-static int volume_leveling_save(int enabled)
+/* Atomic, fsynced 0600 write of an owner's on/off choice. */
+static int flag_file_save(const char *path, int enabled)
 {
-    char temp[sizeof(LE_VOLUME_LEVELING_PATH) + 16];
+    char temp[160];
     const char *text = enabled ? "on\n" : "off\n";
     size_t length = strlen(text);
     int fd;
 
-    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_VOLUME_LEVELING_PATH) >=
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", path) >=
         (int)sizeof(temp))
         return -1;
     fd = mkstemp(temp);
@@ -1316,11 +1362,105 @@ static int volume_leveling_save(int enabled)
         unlink(temp);
         return -1;
     }
-    if (close(fd) < 0 || rename(temp, LE_VOLUME_LEVELING_PATH) < 0) {
+    if (close(fd) < 0 || rename(temp, path) < 0) {
         unlink(temp);
         return -1;
     }
     return 0;
+}
+
+/* Parse a strict decimal 0..100 with an optional single trailing newline. */
+static int parse_level_text(const char *text, int *value)
+{
+    char *end;
+    long parsed;
+
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    if (errno || end == text || text[0] < '0' || text[0] > '9' ||
+        (*end != '\0' && strcmp(end, "\n") != 0) || parsed < 0 || parsed > 100)
+        return -1;
+    *value = (int)parsed;
+    return 0;
+}
+
+/* 0 with *volume set when the owner chose a reply level; -1 to follow. */
+static int reply_volume_load(int *volume)
+{
+    char text[8];
+    int fd = open(LE_REPLY_VOLUME_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t n;
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    text[n] = '\0';
+    return parse_level_text(text, volume);
+}
+
+/* Atomic, fsynced 0600 write of the owner's choice; follow removes it. */
+static int reply_volume_save(int custom, int volume)
+{
+    char temp[sizeof(LE_REPLY_VOLUME_PATH) + 16], text[8];
+    int fd, length;
+
+    if (!custom)
+        return unlink(LE_REPLY_VOLUME_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    length = snprintf(text, sizeof(text), "%d\n", volume);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_REPLY_VOLUME_PATH) >=
+        (int)sizeof(temp))
+        return -1;
+    fd = mkstemp(temp);
+    if (fd < 0)
+        return -1;
+    if (fchmod(fd, 0600) < 0 || write(fd, text, (size_t)length) != length ||
+        fsync(fd) < 0) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temp, LE_REPLY_VOLUME_PATH) < 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Drive the engine's runtime file.  Returns 0 when it matches the choice. */
+static int reply_volume_publish(int custom, int volume)
+{
+    char temp[sizeof(LE_REPLY_VOLUME_RUNTIME_PATH) + 16], text[8];
+    int fd, length;
+
+    if (!custom)
+        return unlink(LE_REPLY_VOLUME_RUNTIME_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    if (ensure_volume_directory() < 0)
+        return -1;
+    length = snprintf(text, sizeof(text), "%d\n", volume);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_REPLY_VOLUME_RUNTIME_PATH) >=
+        (int)sizeof(temp))
+        return -1;
+    fd = mkstemp(temp);
+    if (fd < 0)
+        return -1;
+    if (fchmod(fd, 0640) < 0 || write(fd, text, (size_t)length) != length) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temp, LE_REPLY_VOLUME_RUNTIME_PATH) < 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+static int volume_leveling_save(int enabled)
+{
+    return flag_file_save(LE_VOLUME_LEVELING_PATH, enabled);
 }
 
 static void stop_noise(struct audio_hw *audio);
@@ -1721,26 +1861,53 @@ static int sample_open_fd(const char *name)
     return fd;
 }
 
+static void sample_stop_signal(int signum)
+{
+    (void)signum;
+    g_sample_stop = 1;
+}
+
+/*
+ * How long a sample writer waits for the bus to take more audio. The playback
+ * engine holds the bus while it wakes the output from idle (measured 1.44 s on
+ * radar), so anything longer than the 64 KiB pipe would otherwise be cut off
+ * there. Waits are sliced so a stop request is seen within one slice.
+ */
+#define LE_SAMPLE_STALL_BUDGET_MS 3000
+#define LE_SAMPLE_POLL_MS 50
+
 static int write_sample_fd(int fd, int sample_fd)
 {
     unsigned char out[LE_TONE_CHUNK_FRAMES * LE_TONE_CHANNELS * sizeof(int16_t)];
     int16_t in[LE_TONE_CHUNK_FRAMES];
     FILE *file = fdopen(sample_fd, "rb");
     size_t frames;
+    unsigned int stalled_ms = 0;
+    int last = 0;
 
     if (!file) {
         close(sample_fd);
         return -1;
     }
-    while ((frames = fread(in, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
+    while (!last &&
+           (frames = fread(in, sizeof(int16_t), LE_TONE_CHUNK_FRAMES, file)) > 0) {
         int16_t *samples = (int16_t *)out;
         size_t bytes = frames * LE_TONE_CHANNELS * sizeof(int16_t);
         size_t sent = 0;
         size_t i;
 
+        /* A stop request fades the current chunk (about 21 ms) to silence
+           and ends there, so an owner's long ring stops on a whole frame and
+           without a click when the timer is dismissed. */
+        last = g_sample_stop != 0;
         for (i = 0; i < frames; i++) {
-            samples[i * 2] = in[i];
-            samples[i * 2 + 1] = in[i];
+            int16_t value = in[i];
+
+            if (last)
+                value = (int16_t)((long)value * (long)(frames - i) /
+                                  (long)frames);
+            samples[i * 2] = value;
+            samples[i * 2 + 1] = value;
         }
         while (sent < bytes) {
             ssize_t n = write(fd, out + sent, bytes - sent);
@@ -1751,9 +1918,17 @@ static int write_sample_fd(int fd, int sample_fd)
                 struct pollfd pfd = { fd, POLLOUT, 0 };
                 int rc;
 
-                do {
-                    rc = poll(&pfd, 1, 1000);
-                } while (rc < 0 && errno == EINTR);
+                /* Stopped while the bus is full: nothing more can be
+                   faded in, so end here rather than wait for room. */
+                if (g_sample_stop) {
+                    fclose(file);
+                    return 0;
+                }
+                rc = poll(&pfd, 1, LE_SAMPLE_POLL_MS);
+                if (rc < 0 && errno == EINTR)
+                    continue;
+                if (rc == 0 && (stalled_ms += LE_SAMPLE_POLL_MS) < LE_SAMPLE_STALL_BUDGET_MS)
+                    continue;
                 if (rc <= 0) {
                     fclose(file);
                     return -1;
@@ -1764,6 +1939,7 @@ static int write_sample_fd(int fd, int sample_fd)
                 fclose(file);
                 return -1;
             }
+            stalled_ms = 0;
             sent += (size_t)n;
         }
     }
@@ -1775,22 +1951,36 @@ static int write_sample_fd(int fd, int sample_fd)
     return 0;
 }
 
-static int start_sample(struct audio_hw *audio, const char *name)
+/* Do-not-disturb gate for chimes and samples.  Priority sounds (alarms) pass. */
+#define DND_SUPPRESSED_JSON "{\"playing\":false,\"suppressed\":true}"
+static int dnd_suppresses(const struct audio_hw *audio, int priority)
 {
-    int fd, sample_fd;
-    pid_t pid;
+    return audio->do_not_disturb && !priority;
+}
 
-    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0)
-        return -1;
+/* Nonzero while an earlier sample child is still writing. */
+static int sample_busy(struct audio_hw *audio)
+{
     if (audio->sample_pid > 0) {
         pid_t done = waitpid(audio->sample_pid, NULL, WNOHANG);
         if (done == 0 || (done < 0 && errno != ECHILD))
-            return -1;
+            return 1;
         audio->sample_pid = 0;
     }
-    sample_fd = sample_open_fd(name);
-    if (sample_fd < 0)
+    return 0;
+}
+
+/* Takes ownership of sample_fd whatever the outcome. */
+static int spawn_sample_writer(struct audio_hw *audio, int sample_fd, int event)
+{
+    int fd;
+    pid_t pid;
+
+    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0 ||
+        sample_busy(audio)) {
+        close(sample_fd);
         return -1;
+    }
     fd = open(audio->system_audio_bus, O_WRONLY | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0) {
         close(sample_fd);
@@ -1803,13 +1993,100 @@ static int start_sample(struct audio_hw *audio, const char *name)
         return -1;
     }
     if (pid == 0) {
-        int result = write_sample_fd(fd, sample_fd);
+        int result;
+
+        g_sample_stop = 0;
+        signal(SIGTERM, sample_stop_signal);
+        result = write_sample_fd(fd, sample_fd);
         close(fd);
         _exit(result < 0 ? 1 : 0);
     }
     audio->sample_pid = pid;
+    audio->sample_event = event;
     close(sample_fd);
     close(fd);
+    return 0;
+}
+
+static int start_sample(struct audio_hw *audio, const char *name)
+{
+    int sample_fd;
+
+    if (!audio->output_available || access(audio->system_audio_bus, F_OK) < 0 ||
+        sample_busy(audio))
+        return -1;
+    sample_fd = sample_open_fd(name);
+    if (sample_fd < 0)
+        return -1;
+    return spawn_sample_writer(audio, sample_fd, -1);
+}
+
+/*
+ * The owner's sound for an event (#410). Only the selected file is played,
+ * unless `preview` asks for the kept one too so the owner can hear a sound
+ * before switching to it. The size is re-checked here rather than trusted
+ * from the uploader: this is the process that streams it to the speaker.
+ */
+static int event_sound_open_fd(int index, int preview)
+{
+    static const char *suffixes[] = { ".raw", ".raw.saved" };
+    char path[320];
+    struct stat status;
+    unsigned long limit = le_event_sound_max_bytes(index);
+    int i;
+
+    if (limit == 0)
+        return -1;
+    for (i = 0; i < (preview ? 2 : 1); ++i) {
+        int length = snprintf(path, sizeof(path), "%s/" LE_EVENT_SOUND_PREFIX "%s%s",
+                              le_event_sound_dir(),
+                              le_event_sound_slots[index].id, suffixes[i]);
+        int fd;
+
+        if (length < 0 || (size_t)length >= sizeof(path))
+            return -1;
+        fd = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0)
+            continue;
+        if (fstat(fd, &status) == 0 && S_ISREG(status.st_mode) &&
+            status.st_size > 0 &&
+            (status.st_size % (off_t)sizeof(int16_t)) == 0 &&
+            (unsigned long)status.st_size <= limit)
+            return fd;
+        close(fd);
+    }
+    return -1;
+}
+
+/* Event sound outcomes for callers that keep their own built-in fallback. */
+#define LE_EVENT_SOUND_NONE 0
+#define LE_EVENT_SOUND_PLAYING 1
+#define LE_EVENT_SOUND_BUSY 2
+#define LE_EVENT_SOUND_FAILED 3
+
+static int play_event_sound(struct audio_hw *audio, int index, int preview)
+{
+    int fd = event_sound_open_fd(index, preview);
+
+    if (fd < 0)
+        return LE_EVENT_SOUND_NONE;
+    if (sample_busy(audio)) {
+        close(fd);
+        return LE_EVENT_SOUND_BUSY;
+    }
+    if (spawn_sample_writer(audio, fd, index) < 0)
+        return LE_EVENT_SOUND_FAILED;
+    return LE_EVENT_SOUND_PLAYING;
+}
+
+static int stop_event_sound(struct audio_hw *audio, int index)
+{
+    if (sample_busy(audio) && audio->sample_event == index &&
+        audio->sample_pid > 0) {
+        if (kill(audio->sample_pid, SIGTERM) < 0 && errno != ESRCH)
+            return -1;
+        return 1;
+    }
     return 0;
 }
 
@@ -2201,23 +2478,31 @@ static int handle_request(struct audio_hw *audio, char *message,
                        "\"notification_volume\":%d,\"muted\":%s,"
                        "\"startup_sound\":%s,\"amplifier_on\":%s,"
                        "\"volume_leveling\":%s,"
+                       "\"reply_volume\":%d,\"reply_volume_custom\":%s,"
                        "\"output_available\":%s,"
                        "\"noise_active\":%s,\"noise_colour\":\"%s\","
                        "\"noise_source\":\"%s\",\"noise_bed\":\"%s\","
                        "\"noise_tempo\":%d,\"noise_fade_seconds\":%ld,"
-                       "\"noise_level\":%d,\"noise_remaining_seconds\":%ld}",
-                       audio->volume, audio->gain, audio->notification_volume,
+                       "\"noise_level\":%d,\"noise_remaining_seconds\":%ld,"
+                       "\"do_not_disturb\":%s}",
+                       audio->volume, audio->gain,
+                       audio->reply_volume_custom ? audio->reply_volume
+                                                  : audio->notification_volume,
                        audio->muted ? "true" : "false",
                        audio->startup_sound ? "true" : "false",
                        audio->amplifier_on ? "true" : "false",
                        audio->volume_leveling ? "true" : "false",
+                       audio->reply_volume_custom ? audio->reply_volume
+                                                  : audio->volume,
+                       audio->reply_volume_custom ? "true" : "false",
                        audio->output_available ? "true" : "false",
                        audio->noise_pid > 0 ? "true" : "false",
                        noise_source_name(audio->noise_source),
                        noise_source_name(audio->noise_source),
                        noise_bed_name(audio->noise_bed),
                        audio->noise_tempo, audio->noise_fade_seconds,
-                       audio->noise_level, noise_remaining(audio));
+                       audio->noise_level, noise_remaining(audio),
+                       audio->do_not_disturb ? "true" : "false");
         return response_ok(response, response_size, id, data);
     }
     if (!strcmp(command, "airplay_volume") || !strcmp(command, "airplay_end")) {
@@ -2365,6 +2650,15 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "microphone gain unavailable");
         return response_ok(response, response_size, id, "{}");
     }
+    if (!strcmp(command, "set_do_not_disturb")) {
+        if (json_bool(message, "enabled", &boolean) < 0)
+            return response_error(response, response_size, id, "enabled must be boolean");
+        if (flag_file_save(LE_DND_PATH, boolean) < 0)
+            return response_error(response, response_size, id, "do not disturb could not be saved");
+        audio->do_not_disturb = boolean;
+        le_log_info("audiod: do not disturb %s", boolean ? "on" : "off");
+        return response_ok(response, response_size, id, "{}");
+    }
     if (!strcmp(command, "set_volume_leveling")) {
         if (json_bool(message, "enabled", &boolean) < 0)
             return response_error(response, response_size, id, "enabled must be boolean");
@@ -2374,6 +2668,29 @@ static int handle_request(struct audio_hw *audio, char *message,
             return response_error(response, response_size, id, "volume leveling could not be applied");
         audio->volume_leveling = boolean;
         le_log_info("audiod: volume leveling %s", boolean ? "on" : "off");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "set_reply_volume")) {
+        /* {"volume":0-100} sets the reply level; {"custom":false} returns
+         * replies to the master volume. */
+        int custom = 1;
+        if (json_bool(message, "custom", &boolean) == 0) {
+            if (boolean)
+                return response_error(response, response_size, id, "custom:true needs a volume");
+            custom = 0;
+            value = audio->reply_volume;
+        } else if (json_long(message, "volume", &value) < 0 || value < 0 || value > 100)
+            return response_error(response, response_size, id, "volume must be 0-100");
+        if (reply_volume_save(custom, (int)value) < 0)
+            return response_error(response, response_size, id, "reply volume could not be saved");
+        if (reply_volume_publish(custom, (int)value) < 0)
+            return response_error(response, response_size, id, "reply volume could not be applied");
+        audio->reply_volume_custom = custom;
+        audio->reply_volume = (int)value;
+        if (custom)
+            le_log_info("audiod: reply volume %d", (int)value);
+        else
+            le_log_info("audiod: reply volume follows the master");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "set_mute")) {
@@ -2467,6 +2784,8 @@ static int handle_request(struct audio_hw *audio, char *message,
         if (!sample_name_ok(name))
             return response_error(response, response_size, id,
                                   "sample name must be lowercase letters, digits, - or _");
+        if (dnd_suppresses(audio, 0))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
         if (start_sample(audio, name) < 0)
             return response_error(response, response_size, id,
                                   "sample could not be played");
@@ -2475,7 +2794,7 @@ static int handle_request(struct audio_hw *audio, char *message,
 
     if (!strcmp(command, "cue")) {
         long first = 0, second = 0, ms = LE_CHIRP_MS;
-        int cue;
+        int cue, priority = 0;
 
         if (json_long(message, "first_hz", &first) < 0 ||
             json_long(message, "second_hz", &second) < 0)
@@ -2490,6 +2809,11 @@ static int handle_request(struct audio_hw *audio, char *message,
         (void)json_long(message, "ms", &ms);
         if (ms < 40 || ms > 800)
             ms = LE_CHIRP_MS;
+        /* Alarms set priority and still ring while do-not-disturb is on. */
+        if (json_bool(message, "priority", &priority) < 0)
+            priority = 0;
+        if (dnd_suppresses(audio, priority))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
         cue = start_cue(audio, (double)first, (double)second,
                         (unsigned int)ms);
         if (cue < 0)
@@ -2503,9 +2827,61 @@ static int handle_request(struct audio_hw *audio, char *message,
         return response_ok(response, response_size, id, "{}");
     }
 
+    if (!strcmp(command, "event_sound") ||
+        !strcmp(command, "event_sound_stop")) {
+        char event[16] = "";
+        int index, preview = 0, outcome;
+
+        (void)json_string(message, "event", event, sizeof(event));
+        index = le_event_sound_index(event);
+        if (index < 0)
+            return response_error(response, response_size, id,
+                                  "event must be wake, end or timer");
+        if (!strcmp(command, "event_sound_stop")) {
+            outcome = stop_event_sound(audio, index);
+            if (outcome < 0)
+                return response_error(response, response_size, id,
+                                      "event sound could not be stopped");
+            return response_ok(response, response_size, id,
+                               outcome ? "{\"stopped\":true}"
+                                       : "{\"stopped\":false}");
+        }
+        if (json_bool(message, "preview", &boolean) == 0)
+            preview = boolean;
+        /* Do-not-disturb silences the owner's chimes; the timer ring is
+           priority, like an alarm cue, and a preview is an explicit request. */
+        if (!preview &&
+            dnd_suppresses(audio, index == le_event_sound_index("timer")))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
+        outcome = play_event_sound(audio, index, preview);
+        if (outcome == LE_EVENT_SOUND_FAILED)
+            return response_error(response, response_size, id,
+                                  "event sound could not be played");
+        /* "custom":false tells the caller to play its own built-in sound. */
+        return response_ok(response, response_size, id,
+                           outcome == LE_EVENT_SOUND_NONE
+                               ? "{\"custom\":false,\"playing\":false}"
+                           : outcome == LE_EVENT_SOUND_BUSY
+                               ? "{\"custom\":true,\"playing\":false,\"busy\":true}"
+                               : "{\"custom\":true,\"playing\":true}");
+    }
+
     if (!strcmp(command, "wake_chirp")) {
-        int cue = start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
-                            LE_CHIRP_MS);
+        int cue, owner;
+
+        if (dnd_suppresses(audio, 0))
+            return response_ok(response, response_size, id, DND_SUPPRESSED_JSON);
+        owner = play_event_sound(audio, le_event_sound_index("wake"), 0);
+
+        /* The owner's chime replaces the chirp; if it cannot play, the chirp
+           still marks the turn rather than leaving it silent. */
+        if (owner == LE_EVENT_SOUND_PLAYING)
+            return response_ok(response, response_size, id, "{\"custom\":true}");
+        if (owner == LE_EVENT_SOUND_BUSY)
+            return response_ok(response, response_size, id,
+                               "{\"custom\":true,\"playing\":false}");
+        cue = start_cue(audio, LE_CHIRP_LOW_HZ, LE_CHIRP_HIGH_HZ,
+                        LE_CHIRP_MS);
 
         if (cue < 0)
             return response_error(response, response_size, id,
@@ -2718,6 +3094,39 @@ static void volume_leveling_reconcile(struct audio_hw *audio, long long now_ms)
                     audio->volume_leveling ? "on" : "off");
 }
 
+/* Keep the engine's reply.volume in step with the owner's choice: /run is
+ * cleared by a reboot and the directory can be recreated under audiod.  One
+ * small read per poll tick. */
+static void reply_volume_reconcile(struct audio_hw *audio, long long now_ms)
+{
+    char text[8];
+    int fd, current = -1, matches;
+    ssize_t n;
+
+    if (now_ms <= 0 || (audio->last_reply_check_ms != 0 &&
+        now_ms - audio->last_reply_check_ms < VOLUME_GUARD_POLL_MS))
+        return;
+    audio->last_reply_check_ms = now_ms;
+    fd = open(LE_REPLY_VOLUME_RUNTIME_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0) {
+        n = read(fd, text, sizeof(text) - 1);
+        close(fd);
+        if (n > 0) {
+            text[n] = '\0';
+            if (parse_level_text(text, &current) < 0)
+                current = -2;
+        } else {
+            current = -2;
+        }
+    }
+    matches = audio->reply_volume_custom ? current == audio->reply_volume
+                                         : current == -1;
+    if (matches)
+        return;
+    if (reply_volume_publish(audio->reply_volume_custom, audio->reply_volume) == 0)
+        le_log_info("audiod: reply volume re-published");
+}
+
 static void retry_startup_volume(struct audio_hw *audio, long long now_ms)
 {
     if (!audio->volume_publish_pending || audio->airplay_restore_pending ||
@@ -2818,6 +3227,7 @@ int main(int argc, char **argv)
          * bounded poll cadence; never override an outstanding AirPlay restore. */
         retry_startup_volume(&audio, monotonic_millis());
         volume_leveling_reconcile(&audio, monotonic_millis());
+        reply_volume_reconcile(&audio, monotonic_millis());
 
         pollfds[0].fd = listen_fd;
         pollfds[0].events = POLLIN;

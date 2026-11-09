@@ -36,10 +36,15 @@
 
 #define TIMER_SOCK "/run/libreecho/timer.sock"
 #define STATE_PATH "/data/libreecho/config/timers"
+#define TTS_SOCK LE_ADAPTER_TTS_SOCK
 #define MAX_CLIENTS 4
 #define POLL_CAP_MS 60000
 #define RESTORE_RETRY_MS 1000
 #define AUDIO_TIMEOUT_MS 1000
+#define LED_TIMEOUT_MS 1000
+/* Owner's sunrise lead time (UI #447): a single decimal minute count. Kept in
+   its own file so the alarm record format does not change. */
+#define SUNRISE_STATE_PATH "/data/libreecho/config/timers-sunrise"
 
 /* The ring: a two-tone cue every RING_PERIOD_MS. Long enough to be a pattern
    rather than a siren, short enough that a room notices. */
@@ -47,6 +52,11 @@
 #define RING_LOW_HZ 880
 #define RING_HIGH_HZ 1320
 #define RING_CUE_MS 250
+
+/* A reminder is spoken, not rung. The chime is the same cue, then the speech
+   starts after the two tones have finished so the words are not talked over. */
+#define REMINDER_CHIME_GAP_MS 600
+#define REMINDER_TEXT_MAX (LE_TIMER_LABEL_MAX + 32)
 
 /* HA owns remote expiry. This table is separate from the persisted local
    schedule and cannot consume local timer/alarm slots or synthesize a due time. */
@@ -69,14 +79,27 @@ struct context {
     const char *socket_path;
     const char *state_path;
     const char *audio_sock;
+    const char *tts_socket;
     int listen_fd;
     int clients[MAX_CLIENTS];
     long long next_ring_ms;
+    /* The last ring was the owner's own sound (#410); stop it on dismissal,
+       because unlike the 250 ms cue it can still be playing. */
+    int custom_ring;
     int dirty;
     int state_loaded;
     /* The state path was atomically replaced, but its final durability step
        failed. A retry must not treat the new file as the old backup source. */
     int state_commit_pending;
+    /* Sunrise wake light (UI #447): minutes before an alarm, 0 when off. */
+    int sunrise_minutes;
+    const char *sunrise_path;
+    const char *led_sock;
+    /* The alarm whose fade is running, and the due instant the fade was
+       started for. A snooze, reschedule or cancel ends the fade. */
+    int sunrise_active;
+    unsigned int sunrise_id;
+    long long sunrise_due;
 };
 
 static volatile sig_atomic_t stop_requested;
@@ -116,7 +139,10 @@ static long long wall_epoch(void)
 /* ------------------------------ persistence ----------------------------- */
 
 /*
- * One record per line: "v3 kind id due_epoch @hex:label_bytes". Older v2 and
+ * One record per line: "v3 kind id due_epoch @hex:label_bytes". A repeating
+ * alarm is "v4 alarm id due_epoch days hour minute @hex:label_bytes": the
+ * repeat mask and wall-clock time are stored because a snoozed alarm's due
+ * instant no longer says what time the alarm is set for. Older v2 and
  * whitespace-delimited records without the v2 marker are still accepted when
  * loading. Encoding new labels removes the whitespace ambiguity in the
  * original format and preserves every byte of the label across a restart.
@@ -379,11 +405,20 @@ static enum state_save_result state_save_at(struct context *ctx,
                 continue;
             due = now_epoch + (timer->due_monotonic_ms - now_ms) / 1000LL;
         }
+        /* v5 reminders are unknown to older daemons, which skip the line. */
         if (state_encode_label(encoded_label, sizeof(encoded_label),
                                timer->label) < 0 ||
-            fprintf(file, "v3 %s %u %lld %s\n",
-                    timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
-                    timer->id, due, encoded_label) < 0) {
+            (timer->kind == LE_TIMER_ALARM && timer->reminder
+                 ? fprintf(file, "v5 reminder %u %lld %u %d %d %s\n", timer->id,
+                           due, timer->repeat_days, timer->hour, timer->minute,
+                           encoded_label)
+                 : timer->kind == LE_TIMER_ALARM && timer->repeat_days
+                 ? fprintf(file, "v4 alarm %u %lld %u %d %d %s\n", timer->id,
+                           due, timer->repeat_days, timer->hour, timer->minute,
+                           encoded_label)
+                 : fprintf(file, "v3 %s %u %lld %s\n",
+                           timer->kind == LE_TIMER_ALARM ? "alarm" : "countdown",
+                           timer->id, due, encoded_label)) < 0) {
             fclose(file);
             unlink(temporary);
             return STATE_SAVE_FAILED;
@@ -484,6 +519,37 @@ static int state_load_at(struct context *ctx, long long now_ms,
         int format = 0;
 
         label[0] = '\0';
+        if (!strncmp(line, "v4 alarm ", 9) || !strncmp(line, "v5 reminder ", 12)) {
+            unsigned int days = 0;
+            unsigned int record_id = 0;
+            int hour = -1, minute = -1, consumed = 0;
+            int reminder = line[1] == '5';
+            size_t length;
+
+            if (sscanf(line, reminder ? "v5 reminder %u %lld %u %d %d%n"
+                                      : "v4 alarm %u %lld %u %d %d%n",
+                       &record_id, &due, &days, &hour, &minute, &consumed) != 5 ||
+                consumed <= 0 || !record_id)
+                continue;
+            if (line[consumed] != ' ')
+                continue;
+            length = strlen(line + consumed + 1);
+            while (length && (line[consumed + length] == '\n' ||
+                              line[consumed + length] == '\r'))
+                line[consumed + --length + 1] = '\0';
+            if (state_decode_label(line + consumed + 1, label, sizeof(label)) < 0)
+                continue;
+            if ((reminder
+                     ? le_timer_restore_reminder(&ctx->timers, record_id, due,
+                                                 hour, minute, days, label,
+                                                 now_epoch, now_ms, &id)
+                     : le_timer_restore_repeat_alarm(&ctx->timers, record_id,
+                                                     due, hour, minute, days,
+                                                     label, now_epoch, now_ms,
+                                                     &id)) != LE_TIMER_OK)
+                ++ctx->timers.missed;
+            continue;
+        }
         if (state_parse_header(line, kind, sizeof(kind), &restore_id, &due,
                                &label_offset, &format) < 0)
             continue;
@@ -617,7 +683,8 @@ static void audio_cue(struct context *ctx)
 {
     struct le_adapter *adapter;
     char args[128];
-    int result;
+    char reply[256];
+    int result, custom = 0;
 
 #ifdef LE_TIMERD_TESTING
     if (le_timerd_test_block_audio_ms > 0) {
@@ -631,14 +698,137 @@ static void audio_cue(struct context *ctx)
         le_log_warn("timerd: audio daemon unavailable; timer is silent");
         return;
     }
-    snprintf(args, sizeof(args),
-             "{\"first_hz\":%d,\"second_hz\":%d,\"ms\":%d}",
-             RING_LOW_HZ, RING_HIGH_HZ, RING_CUE_MS);
     le_adapter_set_io_timeout(adapter, AUDIO_TIMEOUT_MS);
+    /* The owner's own ring, when one is selected. A sound longer than the
+       ring period answers busy and simply rings back to back; only "no
+       sound selected" or a failure falls back to the built-in cue. */
+    reply[0] = '\0';
+    result = le_adapter_call(adapter, "event_sound", "{\"event\":\"timer\"}",
+                             reply, sizeof(reply));
+    if (result == LE_ADAPTER_OK &&
+        json_get_top_level_bool(reply, strlen(reply), "custom", &custom) == 1 &&
+        custom) {
+        ctx->custom_ring = 1;
+        le_adapter_close(adapter);
+        return;
+    }
+    ctx->custom_ring = 0;
+    /* priority: an alarm still rings while do-not-disturb silences chimes. */
+    snprintf(args, sizeof(args),
+             "{\"first_hz\":%d,\"second_hz\":%d,\"ms\":%d,\"priority\":true}",
+             RING_LOW_HZ, RING_HIGH_HZ, RING_CUE_MS);
     result = le_adapter_call(adapter, "cue", args, NULL, 0);
     if (result != LE_ADAPTER_OK)
         le_log_warn("timerd: audio cue failed (%d)", result);
     le_adapter_close(adapter);
+}
+
+static void audio_ring_stop(struct context *ctx)
+{
+    struct le_adapter *adapter;
+
+    if (!ctx->custom_ring)
+        return;
+    ctx->custom_ring = 0;
+    adapter = le_adapter_connect(ctx->audio_sock, AUDIO_TIMEOUT_MS);
+    if (!adapter)
+        return;
+    le_adapter_set_io_timeout(adapter, AUDIO_TIMEOUT_MS);
+    (void)le_adapter_call(adapter, "event_sound_stop",
+                          "{\"event\":\"timer\"}", NULL, 0);
+    le_adapter_close(adapter);
+}
+
+/* ----------------------------- sunrise light ---------------------------- */
+
+static int sunrise_load(struct context *ctx)
+{
+    FILE *file = fopen(ctx->sunrise_path, "r");
+    int value = 0;
+
+    if (!file)
+        return 0; /* Never set: off, the default. */
+    if (fscanf(file, "%d", &value) != 1 ||
+        !le_timer_sunrise_minutes_valid(value)) {
+        le_log_warn("timerd: ignoring invalid sunrise setting");
+        value = 0;
+    }
+    fclose(file);
+    ctx->sunrise_minutes = value;
+    return 0;
+}
+
+static int sunrise_save(const struct context *ctx, int minutes)
+{
+    char temp[256];
+    FILE *file;
+
+    if (snprintf(temp, sizeof(temp), "%s.tmp", ctx->sunrise_path) >=
+        (int)sizeof(temp))
+        return -1;
+    file = fopen(temp, "w");
+    if (!file)
+        return -1;
+    if (fprintf(file, "%d\n", minutes) < 0 || fflush(file) != 0 ||
+        fsync(fileno(file)) != 0) {
+        fclose(file);
+        unlink(temp);
+        return -1;
+    }
+    if (fclose(file) != 0 || rename(temp, ctx->sunrise_path) != 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Best effort: a missing or busy ledd means no fade, never a missed alarm. */
+static void sunrise_send(const struct context *ctx, const char *args)
+{
+    struct le_adapter *adapter;
+    int result;
+
+    adapter = le_adapter_connect(ctx->led_sock, LED_TIMEOUT_MS);
+    if (!adapter) {
+        le_log_warn("timerd: LED daemon unavailable; no sunrise fade");
+        return;
+    }
+    le_adapter_set_io_timeout(adapter, LED_TIMEOUT_MS);
+    result = le_adapter_call(adapter, "sunrise", args, NULL, 0);
+    if (result != LE_ADAPTER_OK)
+        le_log_warn("timerd: sunrise command failed (%d)", result);
+    le_adapter_close(adapter);
+}
+
+/*
+ * Start the fade when a pending alarm enters its lead window, and end it when
+ * that alarm is dismissed, snoozed, cancelled or its ring runs out. A snooze
+ * or a repeat moves the due instant, a one-off is cleared: either ends the
+ * fade. The fade runs over the whole lead, then holds warm white until then.
+ */
+static void sunrise_tick(struct context *ctx, long long now_epoch)
+{
+    if (ctx->sunrise_active) {
+        const struct le_timer *timer =
+            le_timer_find(&ctx->timers, ctx->sunrise_id);
+
+        if (ctx->sunrise_minutes <= 0 || !timer ||
+            timer->due_epoch != ctx->sunrise_due) {
+            sunrise_send(ctx, "{\"action\":\"stop\"}");
+            ctx->sunrise_active = 0;
+        }
+        return;
+    }
+    if (le_timer_sunrise_due(&ctx->timers, now_epoch, ctx->sunrise_minutes,
+                             &ctx->sunrise_id, &ctx->sunrise_due)) {
+        char args[96];
+
+        snprintf(args, sizeof(args),
+                 "{\"action\":\"start\",\"seconds\":%d}",
+                 ctx->sunrise_minutes * 60);
+        sunrise_send(ctx, args);
+        ctx->sunrise_active = 1;
+    }
 }
 
 static void ring_tick(struct context *ctx, long long now_ms)
@@ -646,6 +836,7 @@ static void ring_tick(struct context *ctx, long long now_ms)
     remote_ring_expire(ctx, now_ms);
     if (ringing_count(ctx) <= 0) {
         ctx->next_ring_ms = 0;
+        audio_ring_stop(ctx);
         return;
     }
     if (now_ms < ctx->next_ring_ms)
@@ -655,6 +846,51 @@ static void ring_tick(struct context *ctx, long long now_ms)
        next cue and any save in this cycle use the current monotonic time. */
     now_ms = monotonic_ms();
     ctx->next_ring_ms = now_ms + RING_PERIOD_MS;
+}
+
+/*
+ * A due reminder is said once and cleared, not rung. The label is read before
+ * the dismiss because a one-off reminder leaves the schedule with it, and a
+ * repeating one moves to its next occurrence. Speech goes through ttsd, the
+ * same path the agent uses; if ttsd is down the reminder is logged and dropped
+ * rather than held back.
+ */
+static void announce_reminder(struct context *ctx, unsigned int id,
+                              long long now_epoch)
+{
+    char label[LE_TIMER_LABEL_MAX];
+    char text[REMINDER_TEXT_MAX];
+    char escaped[REMINDER_TEXT_MAX * 6];
+    char args[REMINDER_TEXT_MAX * 6 + 32];
+    struct le_timer *timer = le_timer_find(&ctx->timers, id);
+    struct le_adapter *tts;
+    struct timespec gap = { REMINDER_CHIME_GAP_MS / 1000,
+                            (REMINDER_CHIME_GAP_MS % 1000) * 1000000L };
+    int rc;
+
+    if (!timer)
+        return;
+    snprintf(label, sizeof(label), "%s", timer->label);
+    (void)le_timer_dismiss_at(&ctx->timers, id, now_epoch);
+    ctx->dirty = 1;
+    le_log_info("timerd: reminder %u is due", id);
+
+    audio_cue(ctx);
+    nanosleep(&gap, NULL);
+
+    snprintf(text, sizeof(text), "Reminder: %s", label[0] ? label : "your reminder");
+    json_escape(escaped, sizeof(escaped), text);
+    snprintf(args, sizeof(args), "{\"text\":\"%s\"}", escaped);
+    tts = le_adapter_connect(ctx->tts_socket, AUDIO_TIMEOUT_MS);
+    if (!tts) {
+        le_log_warn("timerd: speech daemon unavailable; reminder %u is silent", id);
+        return;
+    }
+    le_adapter_set_io_timeout(tts, AUDIO_TIMEOUT_MS);
+    rc = le_adapter_call(tts, "speak", args, NULL, 0);
+    if (rc != LE_ADAPTER_OK)
+        le_log_warn("timerd: reminder speech failed (%d)", rc);
+    le_adapter_close(tts);
 }
 
 /* ------------------------------- commands ------------------------------- */
@@ -677,6 +913,8 @@ static int timers_json(struct context *ctx, char *out, size_t size)
         const struct le_timer *timer = &ctx->timers.timers[i];
         char label[LE_TIMER_LABEL_MAX * 2];
         long long remaining;
+        int hour;
+        int minute;
 
         if (timer->state == LE_TIMER_STATE_FREE)
             continue;
@@ -688,15 +926,41 @@ static int timers_json(struct context *ctx, char *out, size_t size)
             remaining = 0;
         json_escape(label, sizeof(label), timer->label);
 
+        if (timer->kind == LE_TIMER_ALARM) {
+            /* A repeating alarm reports the time it is set for, not the due
+               instant of a snooze. A one-off reports the local time it rings.
+               A reminder always carries the time it was set for. */
+            if (timer->repeat_days || timer->reminder) {
+                hour = timer->hour;
+                minute = timer->minute;
+            } else {
+                time_t at = (time_t)timer->due_epoch;
+                struct tm local;
+
+                if (localtime_r(&at, &local)) {
+                    hour = local.tm_hour;
+                    minute = local.tm_min;
+                } else {
+                    hour = -1;
+                    minute = -1;
+                }
+            }
+        } else {
+            hour = -1;
+            minute = -1;
+        }
         written = snprintf(out + used, size - used,
                            "%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\","
-                           "\"seconds_remaining\":%lld,\"label\":\"%s\"}",
+                           "\"seconds_remaining\":%lld,\"label\":\"%s\","
+                           "\"repeat_days\":%u,\"hour\":%d,\"minute\":%d}",
                            first ? "" : ",", timer->id,
-                           timer->kind == LE_TIMER_ALARM ? "alarm"
-                                                         : "countdown",
+                           timer->kind != LE_TIMER_ALARM ? "countdown"
+                           : timer->reminder ? "reminder" : "alarm",
                            timer->state == LE_TIMER_STATE_RINGING
                                ? "ringing" : "pending",
-                           remaining, label);
+                           remaining, label,
+                           timer->kind == LE_TIMER_ALARM ? timer->repeat_days : 0U,
+                           hour, minute);
         if (written < 0 || (size_t)written >= size - used)
             return -1;
         used += (size_t)written;
@@ -827,6 +1091,24 @@ static int remote_event(struct context *ctx, const char *args,
     return le_adapter_respond_ok(out, size, id, "{}");
 }
 
+/* The optional "kind" filter on next and cancel_all: "" matches everything. */
+static int kind_valid(const char *kind)
+{
+    return !kind[0] || !strcmp(kind, "alarm") || !strcmp(kind, "countdown") ||
+           !strcmp(kind, "reminder");
+}
+
+/* "alarm" selects alarms only, so cancelling an alarm cannot cancel a
+   reminder, and the reverse. */
+static int kind_matches(const struct le_timer *timer, const char *kind)
+{
+    if (!kind[0])
+        return 1;
+    if (timer->kind != LE_TIMER_ALARM)
+        return !strcmp(kind, "countdown");
+    return !strcmp(kind, timer->reminder ? "reminder" : "alarm");
+}
+
 static int dispatch(struct context *ctx, const char *cmd, const char *args,
                     unsigned long id, char *out, size_t size)
 {
@@ -841,6 +1123,27 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
     if (!strcmp(cmd, "remote_clear")) {
         memset(ctx->remote_timers, 0, sizeof(ctx->remote_timers));
         return le_adapter_respond_ok(out, size, id, "{}");
+    }
+    if (!strcmp(cmd, "sunrise_get")) {
+        snprintf(data, sizeof(data), "{\"lead_minutes\":%d}",
+                 ctx->sunrise_minutes);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+    if (!strcmp(cmd, "sunrise_set")) {
+        long long minutes = 0;
+
+        if (!args || json_get_int64_top_level(args, "lead_minutes", &minutes) != 1 ||
+            !le_timer_sunrise_minutes_valid(minutes))
+            return le_adapter_respond_err(out, size, id,
+                "lead_minutes must be 0 or 5 to 30");
+        if (sunrise_save(ctx, (int)minutes) != 0)
+            return le_adapter_respond_err(out, size, id,
+                "sunrise setting could not be saved");
+        /* A change to 0 ends a running fade on the next tick. */
+        ctx->sunrise_minutes = (int)minutes;
+        snprintf(data, sizeof(data), "{\"lead_minutes\":%d}",
+                 ctx->sunrise_minutes);
+        return le_adapter_respond_ok(out, size, id, data);
     }
 
     label[0] = '\0';
@@ -878,6 +1181,64 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         return le_adapter_respond_ok(out, size, id, data);
     }
 
+    /* A weekly alarm: hour, minute and a day mask, bit 0 Sunday. The daemon
+       owns the next-occurrence rule so every caller agrees on it. */
+    if (!strcmp(cmd, "add_repeat")) {
+        unsigned int created = 0;
+        int hour = -1, minute = -1, days = 0;
+        int result;
+
+        if (!args || json_get_int(args, "hour", &hour) != 1 ||
+            json_get_int(args, "minute", &minute) != 1 ||
+            json_get_int(args, "days", &days) != 1)
+            return le_adapter_respond_err(out, size, id,
+                                          "add_repeat requires hour, minute and days");
+        result = le_timer_add_repeat_alarm(&ctx->timers, hour, minute,
+                                           (unsigned int)days, label,
+                                           wall_epoch(), &created);
+        if (result != LE_TIMER_OK)
+            return le_adapter_respond_err(out, size, id, add_error(result));
+        ctx->dirty = 1;
+        snprintf(data, sizeof(data), "{\"id\":%u}", created);
+        le_log_info("timerd: repeating alarm %u at %02d:%02d days 0x%02x",
+                    created, hour, minute, days);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
+    /* Snooze every ringing alarm for the fixed snooze period. Countdowns are
+       not snoozed; a countdown that rings is stopped with dismiss. */
+    if (!strcmp(cmd, "snooze")) {
+        int snoozed = le_timer_snooze_ringing(&ctx->timers, wall_epoch());
+
+        if (snoozed)
+            ctx->dirty = 1;
+        snprintf(data, sizeof(data), "{\"snoozed\":%d}", snoozed);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
+    /* A spoken reminder at hour:minute, repeating on days (zero for once). */
+    if (!strcmp(cmd, "add_reminder")) {
+        unsigned int created = 0;
+        int hour = -1, minute = -1, days = 0;
+        int result;
+
+        if (!args || json_get_int(args, "hour", &hour) != 1 ||
+            json_get_int(args, "minute", &minute) != 1 ||
+            json_get_int(args, "days", &days) != 1)
+            return le_adapter_respond_err(out, size, id,
+                                          "add_reminder requires hour, minute and days");
+        result = le_timer_add_reminder(&ctx->timers, hour, minute,
+                                       (unsigned int)days, label, wall_epoch(),
+                                       &created);
+        if (result != LE_TIMER_OK)
+            return le_adapter_respond_err(out, size, id, add_error(result));
+        ctx->dirty = 1;
+        snprintf(data, sizeof(data), "{\"id\":%u}", created);
+        le_log_info("timerd: reminder %u at %02d:%02d days 0x%02x",
+                    created, hour, minute, days);
+        return le_adapter_respond_ok(out, size, id, data);
+    }
+
     if (!strcmp(cmd, "add_alarm")) {
         unsigned int created = 0;
         int result;
@@ -905,9 +1266,15 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
     if (!strcmp(cmd, "cancel_all")) {
         size_t i;
         int cancelled = 0;
+        char kind[16] = "";
+        int kind_result = args ? json_get_string(args, "kind", kind, sizeof(kind)) : 0;
 
+        if (kind_result < 0 || !kind_valid(kind_result == 1 ? kind : ""))
+            return le_adapter_respond_err(out, size, id,
+                                          "kind must be alarm, countdown or reminder");
         for (i = 0; i < LE_TIMER_MAX; ++i) {
-            if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING)
+            if (ctx->timers.timers[i].state != LE_TIMER_STATE_PENDING ||
+                !kind_matches(&ctx->timers.timers[i], kind_result == 1 ? kind : ""))
                 continue;
             memset(&ctx->timers.timers[i], 0,
                    sizeof(ctx->timers.timers[i]));
@@ -926,14 +1293,20 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
         long long soonest = -1;
         unsigned int soonest_id = 0;
         char label[LE_TIMER_LABEL_MAX * 2] = "";
+        char kind[16] = "";
+        int kind_result = args ? json_get_string(args, "kind", kind, sizeof(kind)) : 0;
         int count = 0;
         size_t i;
 
+        if (kind_result < 0 || !kind_valid(kind_result == 1 ? kind : ""))
+            return le_adapter_respond_err(out, size, id,
+                                          "kind must be alarm, countdown or reminder");
         for (i = 0; i < LE_TIMER_MAX; ++i) {
             const struct le_timer *timer = &ctx->timers.timers[i];
             long long remaining;
 
-            if (timer->state != LE_TIMER_STATE_PENDING)
+            if (timer->state != LE_TIMER_STATE_PENDING ||
+                !kind_matches(timer, kind_result == 1 ? kind : ""))
                 continue;
             ++count;
             if (timer->kind == LE_TIMER_ALARM)
@@ -1009,9 +1382,10 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
             return le_adapter_respond_err(out, size, id,
                                           "dismiss id must be a positive integer");
         if (id_result > 0)
-            stopped = le_timer_dismiss(&ctx->timers, dismiss_id);
+            stopped = le_timer_dismiss_at(&ctx->timers, dismiss_id, wall_epoch());
         else
-            stopped = le_timer_dismiss_all(&ctx->timers) + remote_dismiss_all(ctx);
+            stopped = le_timer_dismiss_all_at(&ctx->timers, wall_epoch()) +
+                      remote_dismiss_all(ctx);
         if (stopped)
             ctx->dirty = 1;
         snprintf(data, sizeof(data), "{\"dismissed\":%d}", stopped);
@@ -1082,6 +1456,9 @@ int main(int argc, char **argv)
     ctx.socket_path = TIMER_SOCK;
     ctx.state_path = STATE_PATH;
     ctx.audio_sock = LE_ADAPTER_AUDIO_SOCK;
+    ctx.tts_socket = TTS_SOCK;
+    ctx.sunrise_path = SUNRISE_STATE_PATH;
+    ctx.led_sock = LE_ADAPTER_LED_SOCK;
     ctx.listen_fd = -1;
     for (i = 0; i < MAX_CLIENTS; ++i)
         ctx.clients[i] = -1;
@@ -1094,6 +1471,12 @@ int main(int argc, char **argv)
             ctx.state_path = argv[++i];
         else if (!strcmp(argv[i], "--audio-socket") && i + 1 < argc)
             ctx.audio_sock = argv[++i];
+        else if (!strcmp(argv[i], "--tts-socket") && i + 1 < argc)
+            ctx.tts_socket = argv[++i];
+        else if (!strcmp(argv[i], "--sunrise-state") && i + 1 < argc)
+            ctx.sunrise_path = argv[++i];
+        else if (!strcmp(argv[i], "--led-socket") && i + 1 < argc)
+            ctx.led_sock = argv[++i];
         else if (!strcmp(argv[i], "--foreground"))
             continue;
         else if (argv[i][0] == '-' && strncmp(argv[i], "--verbose", 9) &&
@@ -1101,12 +1484,14 @@ int main(int argc, char **argv)
                  strncmp(argv[i], "--quiet", 7)) {
             fprintf(stderr,
                     "usage: %s [--foreground] [--socket PATH] "
-                    "[--state PATH] [--audio-socket PATH]\n", argv[0]);
+                    "[--state PATH] [--audio-socket PATH] [--tts-socket PATH]\n",
+                    argv[0]);
             return 2;
         }
     }
 
     le_timer_set_init(&ctx.timers);
+    (void)sunrise_load(&ctx);
 
     ctx.listen_fd = le_adapter_listen(ctx.socket_path);
     if (ctx.listen_fd < 0) {
@@ -1143,13 +1528,19 @@ int main(int argc, char **argv)
         if (count > 0) {
             int k;
 
-            for (k = 0; k < count; ++k)
+            for (k = 0; k < count; ++k) {
+                if (le_timer_is_reminder(&ctx.timers, fired[k])) {
+                    announce_reminder(&ctx, fired[k], now_epoch);
+                    continue;
+                }
                 le_log_info("timerd: timer %u is due", fired[k]);
-            /* Ring at once rather than waiting out a period. */
-            ctx.next_ring_ms = 0;
+                /* Ring at once rather than waiting out a period. */
+                ctx.next_ring_ms = 0;
+            }
             ctx.dirty = 1;
         }
         ring_tick(&ctx, now_ms);
+        sunrise_tick(&ctx, now_epoch);
         /* ring_tick may wait for audiod. Refresh both snapshots before a save
            and before deriving the poll deadline from the schedule. */
         now_ms = monotonic_ms();
@@ -1171,6 +1562,14 @@ int main(int argc, char **argv)
         }
 
         timeout = timer_poll_timeout(&ctx, now_ms, now_epoch);
+        if (!ctx.sunrise_active) {
+            /* Wake for the start of a fade, not after it. */
+            long long until_sunrise = le_timer_sunrise_timeout_ms(
+                &ctx.timers, now_epoch, ctx.sunrise_minutes, timeout);
+
+            if (until_sunrise < timeout)
+                timeout = until_sunrise;
+        }
         if (ringing_count(&ctx) > 0) {
             long long until_ring = ctx.next_ring_ms - now_ms;
 

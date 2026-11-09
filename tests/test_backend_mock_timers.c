@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 int main(void)
@@ -84,6 +85,39 @@ int main(void)
     for (int i = 0; i < 16; ++i)
         assert(backend.ops->timer_add(&backend, 60, "capacity", &id) == LE_OK);
     assert(backend.ops->timer_add(&backend, 60, "capacity", &id) == LE_BUSY);
+    backend.ops->destroy(&backend);
+
+    /* An alarm is added through the same op, listed as an alarm, and refused
+       when its instant is already past. */
+    memset(&backend, 0, sizeof(backend));
+    assert(le_mock_create(&backend, NULL, NULL, 1) == LE_OK);
+    {
+        long long epoch = (long long)time(0) + 3600;
+
+        assert(backend.ops->timer_add_alarm(&backend, epoch, "wake", &id) == LE_OK);
+        assert(backend.ops->timers(&backend, &list) == LE_OK);
+        assert(list.count == 1);
+        assert(!strcmp(list.items[0].kind, "alarm"));
+        assert(!strcmp(list.items[0].label, "wake"));
+        assert(list.items[0].seconds_remaining > 3500);
+        assert(backend.ops->timer_add_alarm(&backend, (long long)time(0) - 5, "old", &id) == LE_INVALID);
+        assert(backend.ops->timer_cancel(&backend, id) == LE_OK);
+    }
+    /* Sunrise wake light (UI #447): off by default, 5 to 30 or 0 to set. */
+    {
+        int minutes = -1;
+
+        assert(backend.ops->timer_sunrise_get(&backend, &minutes) == LE_OK);
+        assert(minutes == 0);
+        assert(backend.ops->timer_sunrise_set(&backend, 31) == LE_INVALID);
+        assert(backend.ops->timer_sunrise_set(&backend, 4) == LE_INVALID);
+        assert(backend.ops->timer_sunrise_set(&backend, 5) == LE_OK);
+        assert(backend.ops->timer_sunrise_get(&backend, &minutes) == LE_OK);
+        assert(minutes == 5);
+        assert(backend.ops->timer_sunrise_set(&backend, 0) == LE_OK);
+        assert(backend.ops->timer_sunrise_get(&backend, &minutes) == LE_OK);
+        assert(minutes == 0);
+    }
     backend.ops->destroy(&backend);
 
     puts("mock timer backend: ok");

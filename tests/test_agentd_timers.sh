@@ -452,15 +452,17 @@ case "$out" in
 esac
 call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
 call "$agent_sock" respond '{"text":"set a timer for fifteen minutes"}' >/dev/null
+# "alarms" names alarms only. With countdowns pending and no alarm set, the
+# request must say so and leave the countdowns alone.
 out=$(call "$agent_sock" respond '{"text":"delete each one of the alarms"}')
 case "$out" in
-    *'cancelled'*) ;;
-    *) echo "FAIL: each-one-of cancel-all not confirmed: $out"; exit 1 ;;
+    *'There are no alarms to cancel.'*) ;;
+    *) echo "FAIL: each-one-of alarm cancel not limited to alarms: $out"; exit 1 ;;
 esac
 out=$(call "$timer_sock" status '{}')
 case "$out" in
-    *'"timers":[]'*) ;;
-    *) echo "FAIL: each-one-of cancel-all left timers: $out"; exit 1 ;;
+    *'"kind":"countdown"'*) ;;
+    *) echo "FAIL: alarm-only cancel removed countdowns: $out"; exit 1 ;;
 esac
 call "$agent_sock" respond '{"text":"set a timer for ten minutes"}' >/dev/null
 out=$(call "$agent_sock" respond '{"text":"cancel all timers"}')
@@ -557,5 +559,104 @@ case "$out" in
     *) echo "FAIL: \"stop\" was taken as a timer request with nothing ringing: $out"; exit 1 ;;
 esac
 echo "  \"stop\" with nothing ringing falls through: ok"
+
+# --- alarms by voice, with no model -----------------------------------------
+# "set an alarm for 7am" creates a real alarm at the next 07:00, and "cancel my
+# alarm" removes that alarm and not a countdown beside it.
+call "$agent_sock" respond '{"text":"cancel all timers and alarms"}' >/dev/null
+out=$(call "$timer_sock" status '{}')
+case "$out" in
+    *'"timers":[]'*) ;;
+    *) echo "FAIL: alarm section started with timers pending: $out"; exit 1 ;;
+esac
+out=$(call "$agent_sock" respond '{"text":"set an alarm for 7am"}')
+case "$out" in
+    *'"ok":true'*'Alarm set for 7:00 am.'*) ;;
+    *) echo "FAIL: alarm request not confirmed: $out"; cat "$dir/agentd.log"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+alarms = [t for t in json.load(sys.stdin)["data"]["timers"] if t["kind"] == "alarm"]
+assert len(alarms) == 1 and alarms[0]["state"] == "pending", alarms
+assert 0 < alarms[0]["seconds_remaining"] <= 24 * 3600, alarms
+' || { echo "FAIL: alarm not in the schedule: $out"; exit 1; }
+out=$(call "$agent_sock" respond '{"text":"set a timer for ten minutes"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: countdown beside the alarm rejected: $out"; exit 1 ;;
+esac
+out=$(call "$agent_sock" respond '{"text":"cancel my alarm"}')
+case "$out" in
+    *'Alarm cancelled.'*) ;;
+    *) echo "FAIL: alarm cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.load(sys.stdin)["data"]["timers"]
+assert [t["kind"] for t in timers] == ["countdown"], timers
+' || { echo "FAIL: alarm-only cancel touched a countdown or left the alarm: $out"; exit 1; }
+echo "  alarm set and cancelled by voice, countdown untouched: ok"
+
+# Alarm-only filters reach the daemon directly too, and a bad kind is refused.
+out=$(call "$timer_sock" next '{"kind":"alarm"}')
+case "$out" in
+    *'"count":0'*) ;;
+    *) echo "FAIL: alarm filter matched a countdown: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" next '{"kind":"ringing"}')
+case "$out" in
+    *'"ok":false'*) ;;
+    *) echo "FAIL: unknown kind filter was accepted: $out"; exit 1 ;;
+esac
+# Reminders by voice: set at a clock time, listed as a reminder rather than an
+# alarm or a countdown, and cancelled by voice without touching a countdown.
+out=$(call "$agent_sock" respond '{"text":"remind me to take the pills at 6pm"}')
+case "$out" in
+    *'Reminder set for 6:00 pm: take the pills.'*) ;;
+    *) echo "FAIL: reminder not confirmed: $out"; cat "$dir/agentd.log"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.load(sys.stdin)["data"]["timers"]
+reminders = [t for t in timers if t["kind"] == "reminder"]
+assert len(reminders) == 1, timers
+assert reminders[0]["label"] == "take the pills" and reminders[0]["state"] == "pending", timers
+assert reminders[0]["hour"] == 18 and reminders[0]["minute"] == 0, timers
+assert not [t for t in timers if t["kind"] == "alarm"], timers
+' || { echo "FAIL: reminder not in the schedule as a reminder: $out"; exit 1; }
+out=$(call "$agent_sock" respond '{"text":"set a timer for ten minutes"}')
+case "$out" in
+    *'"ok":true'*) ;;
+    *) echo "FAIL: countdown beside the reminder rejected: $out"; exit 1 ;;
+esac
+out=$(call "$agent_sock" respond '{"text":"cancel my reminder"}')
+case "$out" in
+    *'Reminder cancelled.'*) ;;
+    *) echo "FAIL: reminder cancellation not confirmed: $out"; exit 1 ;;
+esac
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+timers = json.load(sys.stdin)["data"]["timers"]
+assert not [t for t in timers if t["kind"] == "reminder"], timers
+assert [t for t in timers if t["kind"] == "countdown"], timers
+' || { echo "FAIL: reminder cancel touched a countdown or left the reminder: $out"; exit 1; }
+out=$(call "$timer_sock" next '{"kind":"alarm"}')
+case "$out" in
+    *'"count":0'*) ;;
+    *) echo "FAIL: alarm filter matched a reminder or countdown: $out"; exit 1 ;;
+esac
+echo "  reminder set and cancelled by voice, countdown untouched: ok"
+
+out=$(call "$agent_sock" respond '{"text":"cancel all timers and alarms"}')
+out=$(call "$timer_sock" status '{}')
+printf '%s' "$out" | python3 -c '
+import json, sys
+assert json.load(sys.stdin)["data"]["timers"] == []
+' || { echo "FAIL: schedule not cleared by the test: $out"; exit 1; }
+echo "  alarm kind filter and bad kind refused: ok"
 
 echo "agentd timers: ok"

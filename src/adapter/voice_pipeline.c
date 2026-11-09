@@ -5,6 +5,8 @@
 #include "adapter.h"
 #include "voice_stream.h"
 #include "voice_listening_led.h"
+#include "voice_ns.h"
+#include "voice_whisper.h"
 #include "../json.h"
 
 #include <fcntl.h>
@@ -20,7 +22,9 @@
 #include <time.h>
 #include <unistd.h>
 
-#define PCM_RING_SAMPLES (16000U * 2U)
+/* Three seconds: room for a stop window's replay (below) as well as the
+   wake word's own lead-in. */
+#define PCM_RING_SAMPLES (16000U * 3U)
 #define TRANSCRIPT_MAX 4096U
 /*
  * Bounded recognition deadline. sttd itself endpoints at 20 seconds of audio;
@@ -28,6 +32,34 @@
  * instead of a turn that silently never appears anywhere.
  */
 #define RECOGNITION_TIMEOUT_MS 30000U
+/*
+ * A wake-free stop window is short on purpose. "Stop" is one word: a window
+ * still decoding after this long is hearing music, a television or a
+ * conversation, none of which is a stop, so it is closed and a fresh one
+ * opened. After a stop was heard the next window waits briefly, so the tail
+ * of the same word cannot act twice.
+ */
+#define STOP_WINDOW_MS 8000U
+/*
+ * A window that reaches its time limit while the recogniser is part way
+ * through a word is given this long to endpoint it instead of being cut off:
+ * closing the socket throws away the final transcript, so a "stop" spoken
+ * across the boundary was otherwise never heard by either window.
+ */
+#define STOP_WINDOW_GRACE_MS 4000U
+/*
+ * A word that starts too close to the limit to be decoded in time is not
+ * lost either: a window closed by its time limit is followed by one that
+ * replays this much of the audio before it, so the whole word is in the next
+ * window. Only windows that heard nothing usable are followed this way, so
+ * nothing is ever acted on twice. 2.5 s, because the recogniser's first
+ * partial comes up to a second after the word starts, and the streaming
+ * Zipformer needs about 0.7 s of audio before a word to decode it (a stream
+ * that starts closer than that turns "Alexa, stop" into "P").
+ */
+#define STOP_WINDOW_OVERLAP_SAMPLES (16000U * 5U / 2U)
+#define STOP_COOLDOWN_MS 1500U
+#define STOP_RETRY_MS 1000U
 
 struct le_voice_pipeline {
     pthread_t capture_thread;
@@ -43,7 +75,18 @@ struct le_voice_pipeline {
     void *outcome_context;
     le_voice_pipeline_turn_begin_fn turn_begin_callback;
     void *turn_begin_context;
+    le_voice_pipeline_stop_fn stop_callback;
+    void *stop_context;
+    int stop_listen;
+    /* Capture thread only: the open recognition is a wake-free stop window. */
+    int stop_window;
+    /* Capture thread only: the open stop window has decoded some speech. */
+    int stop_window_speech;
     uint64_t recognition_timeout_ms;
+    uint64_t stop_window_ms;
+    uint64_t stop_window_grace_ms;
+    int whisper_detect;
+    int16_t whisper_window[PCM_RING_SAMPLES];
     int16_t pcm_ring[PCM_RING_SAMPLES];
     uint64_t ring_first_sample;
     size_t ring_count;
@@ -55,6 +98,13 @@ struct le_voice_pipeline {
     int dispatching;
     int follow_up_pending;
     struct le_voice_pipeline_metrics metrics;
+    /* Optional noise suppression on the speech sent to recognition (#401).
+     * The flag is shared under mutex; the filter state belongs to the
+     * capture thread, which runs it on every frame so the noise estimate is
+     * settled before a wake. */
+    int noise_suppression;
+    int noise_suppression_reset;
+    struct le_voice_ns ns;
 };
 
 static uint64_t monotonic_milliseconds(void)
@@ -306,6 +356,36 @@ static int ring_write_from(struct le_voice_pipeline *pipeline, int fd,
     return 0;
 }
 
+/*
+ * Classify the request audio held in the ring from the detection sample to
+ * the newest captured sample. Runs on the capture worker, the only writer of
+ * the ring, so the ring needs no extra locking here.
+ */
+static int classify_turn_whisper(struct le_voice_pipeline *pipeline,
+                                 uint64_t detection_sample)
+{
+    uint64_t first = detection_sample;
+    uint64_t end = pipeline->ring_first_sample + pipeline->ring_count;
+    struct le_voice_whisper_result result;
+    size_t count = 0;
+
+    pthread_mutex_lock(&pipeline->mutex);
+    if (!pipeline->whisper_detect) {
+        pthread_mutex_unlock(&pipeline->mutex);
+        return 0;
+    }
+    pthread_mutex_unlock(&pipeline->mutex);
+    if (first < pipeline->ring_first_sample)
+        first = pipeline->ring_first_sample;
+    for (; first < end; ++first)
+        pipeline->whisper_window[count++] =
+            pipeline->pcm_ring[first % PCM_RING_SAMPLES];
+    if (le_voice_whisper_classify(pipeline->whisper_window, count,
+                                  &result) != 0)
+        return 0;
+    return result.whispered;
+}
+
 static int queue_transcript(
     struct le_voice_pipeline *pipeline, const char *text,
     const struct le_voice_pipeline_turn *turn)
@@ -334,16 +414,17 @@ static int queue_transcript(
 }
 
 static int start_recognition(struct le_voice_pipeline *pipeline,
-                             uint64_t detection_sample)
+                             uint64_t detection_sample, int stop_window)
 {
     int fd;
 
     /*
      * The turn begins here. Notify before recognition can fail so the embedder
      * captures per-turn context (the voice-history generation) ahead of any
-     * clear that might land mid-turn.
+     * clear that might land mid-turn. A stop window is not a turn.
      */
-    emit_turn_begin(pipeline, detection_sample);
+    if (!stop_window)
+        emit_turn_begin(pipeline, detection_sample);
     fd = subscribe(pipeline->stt_socket, "recognize_stream");
 
     /* Non-blocking: while sttd is busy transcribing it stops reading, and a
@@ -363,24 +444,84 @@ static int start_recognition(struct le_voice_pipeline *pipeline,
         close(fd);
         return -1;
     }
+    pipeline->stop_window = stop_window;
+    pipeline->stop_window_speech = 0;
     pthread_mutex_lock(&pipeline->mutex);
-    pipeline->metrics.recognizing = 1;
+    if (stop_window)
+        pipeline->metrics.stop_listening = 1;
+    else
+        pipeline->metrics.recognizing = 1;
     pthread_mutex_unlock(&pipeline->mutex);
-    le_voice_listening_feedback_set(1);
+    /* The listening ring means "your request is being heard". A stop window
+       is not a request, and lighting it for a whole alarm would be noise. */
+    if (!stop_window)
+        le_voice_listening_feedback_set(1);
     return fd;
 }
 
 static void close_recognition(struct le_voice_pipeline *pipeline,
                               int *fd)
 {
+    int stop_window = pipeline->stop_window;
+    int was_listening = *fd >= 0;
+
     if (*fd >= 0)
         close(*fd);
     *fd = -1;
     pipeline->stt_line_used = 0;
+    pipeline->stop_window = 0;
+    pipeline->stop_window_speech = 0;
     pthread_mutex_lock(&pipeline->mutex);
-    pipeline->metrics.recognizing = 0;
+    if (stop_window)
+        pipeline->metrics.stop_listening = 0;
+    else
+        pipeline->metrics.recognizing = 0;
     pthread_mutex_unlock(&pipeline->mutex);
-    le_voice_listening_feedback_set(0);
+    if (!stop_window) {
+        le_voice_listening_feedback_set(0);
+        /* Only a capture that was actually open ends audibly; the idle and
+           shutdown calls, and a hidden stop window, must not chime. */
+        if (was_listening)
+            le_voice_listening_end_sound();
+    }
+}
+
+/*
+ * A stop window's line. Partial results are ignored: "stop" is only acted on
+ * once the recogniser has endpointed the whole utterance, so "stop by the
+ * shop" never gets as far as its first word. Returns 0 to keep reading, 1 when
+ * the window is finished, 2 when it finished with a stop the embedder acted on.
+ */
+static int handle_stop_line(struct le_voice_pipeline *pipeline,
+                            const char *line)
+{
+    char text[TRANSCRIPT_MAX];
+    le_voice_pipeline_stop_fn callback;
+    void *context;
+    int acted = 0;
+
+    if (strstr(line, "\"event\":\"transcript_partial\"")) {
+        /* Something is being said: the window may run into its grace. */
+        if (json_get_string(line, "text", text, sizeof(text)) > 0 && text[0])
+            pipeline->stop_window_speech = 1;
+        return 0;
+    }
+    if (!strstr(line, "\"event\":\"transcript\""))
+        return 0;
+    if (json_get_string(line, "text", text, sizeof(text)) < 1 || !text[0])
+        return 1;
+    pthread_mutex_lock(&pipeline->mutex);
+    callback = pipeline->stop_listen ? pipeline->stop_callback : NULL;
+    context = pipeline->stop_context;
+    pthread_mutex_unlock(&pipeline->mutex);
+    if (callback)
+        acted = callback(context, text) == 1;
+    if (!acted)
+        return 1;
+    pthread_mutex_lock(&pipeline->mutex);
+    ++pipeline->metrics.stops_heard;
+    pthread_mutex_unlock(&pipeline->mutex);
+    return 2;
 }
 
 static int handle_stt_line(struct le_voice_pipeline *pipeline,
@@ -414,6 +555,7 @@ static int handle_stt_line(struct le_voice_pipeline *pipeline,
             turn.stt_audio_ms + turn.stt_processing_ms;
     turn.endpoint = strstr(line, "\"endpoint\":true") != NULL;
     turn.follow_up = follow_up;
+    turn.whispered = classify_turn_whisper(pipeline, detection_sample);
     /* An empty final transcript is a recognition failure, not a turn. */
     if (!text[0])
         return -1;
@@ -442,6 +584,19 @@ static void close_connection(struct le_voice_pipeline *pipeline,
     set_connection_metric(pipeline, wake, 0);
 }
 
+static uint64_t env_milliseconds(const char *name, uint64_t fallback,
+                                 unsigned long minimum)
+{
+    const char *override = getenv(name);
+    char *end;
+    unsigned long value;
+
+    if (!override || !override[0])
+        return fallback;
+    value = strtoul(override, &end, 10);
+    return !*end && value >= minimum && value <= 600000UL ? value : fallback;
+}
+
 static void *capture_worker(void *opaque)
 {
     struct le_voice_pipeline *pipeline = opaque;
@@ -455,6 +610,9 @@ static void *capture_worker(void *opaque)
     uint64_t recognition_processing_ms = 0;
     uint64_t recognition_total_ms = 0;
     int recognition_active = 0;
+    uint64_t stop_window_started_ms = 0;
+    uint64_t stop_window_not_before_ms = 0;
+    int stop_window_overlap = 0;
 
     while (pipeline_running(pipeline)) {
         struct pollfd descriptors[3];
@@ -522,6 +680,24 @@ static void *capture_worker(void *opaque)
                 close_connection(pipeline, &audio_fd, 0);
                 continue;
             }
+            {
+                int suppress, reset;
+
+                pthread_mutex_lock(&pipeline->mutex);
+                suppress = pipeline->noise_suppression;
+                reset = pipeline->noise_suppression_reset;
+                pipeline->noise_suppression_reset = 0;
+                pthread_mutex_unlock(&pipeline->mutex);
+                /* A gap in the sample index is a new stream: start over. */
+                if (reset || (pipeline->ring_count &&
+                              frame.first_sample !=
+                                  pipeline->ring_first_sample +
+                                      pipeline->ring_count))
+                    le_voice_ns_reset(&pipeline->ns);
+                if (suppress)
+                    le_voice_ns_process(&pipeline->ns, frame.samples,
+                                        frame.sample_count);
+            }
             ring_append(pipeline, &frame);
             if (stt_fd >= 0 &&
                 frame.first_sample + frame.sample_count >
@@ -565,7 +741,8 @@ static void *capture_worker(void *opaque)
             pthread_mutex_lock(&pipeline->mutex);
             ++pipeline->metrics.wake_events;
             if (pipeline->dispatching ||
-                pipeline->transcript_pending || stt_fd >= 0) {
+                pipeline->transcript_pending ||
+                (stt_fd >= 0 && !pipeline->stop_window)) {
                 ++pipeline->metrics.dropped_turns;
                 pthread_mutex_unlock(&pipeline->mutex);
                 /* A wake that could not start a turn is a cancelled turn, not
@@ -575,6 +752,10 @@ static void *capture_worker(void *opaque)
                 continue;
             }
             pthread_mutex_unlock(&pipeline->mutex);
+            /* The wake word always wins over a stop window. */
+            if (stt_fd >= 0 && pipeline->stop_window)
+                close_recognition(pipeline, &stt_fd);
+            stop_window_overlap = 0;
             detection_sample = sample;
             recognition_follow_up = 0;
             recognition_started_ms = monotonic_milliseconds();
@@ -582,7 +763,7 @@ static void *capture_worker(void *opaque)
             recognition_processing_ms = 0;
             recognition_total_ms = 0;
             stt_fd = start_recognition(
-                pipeline, detection_sample);
+                pipeline, detection_sample, 0);
             if (stt_fd < 0) {
                 pthread_mutex_lock(&pipeline->mutex);
                 ++pipeline->metrics.dropped_turns;
@@ -615,6 +796,15 @@ static void *capture_worker(void *opaque)
             if (line_result == 0)
                 continue;
             snprintf(line, sizeof(line), "%s", pipeline->stt_line);
+            if (pipeline->stop_window) {
+                result = handle_stop_line(pipeline, line);
+                if (result == 2)
+                    stop_window_not_before_ms =
+                        monotonic_milliseconds() + STOP_COOLDOWN_MS;
+                if (result != 0)
+                    close_recognition(pipeline, &stt_fd);
+                continue;
+            }
             result = handle_stt_line(
                 pipeline, stt_fd, line, detection_sample,
                 recognition_follow_up);
@@ -651,6 +841,24 @@ static void *capture_worker(void *opaque)
             recognition_active = 0;
             close_recognition(pipeline, &stt_fd);
         }
+        if (stt_fd >= 0 && pipeline->stop_window) {
+            int keep;
+            uint64_t open_ms =
+                monotonic_milliseconds() - stop_window_started_ms;
+
+            pthread_mutex_lock(&pipeline->mutex);
+            keep = pipeline->stop_listen && !pipeline->follow_up_pending;
+            pthread_mutex_unlock(&pipeline->mutex);
+            if (!keep) {
+                close_recognition(pipeline, &stt_fd);
+            } else if (open_ms >= pipeline->stop_window_ms &&
+                       (!pipeline->stop_window_speech ||
+                        open_ms >= pipeline->stop_window_ms +
+                                       pipeline->stop_window_grace_ms)) {
+                close_recognition(pipeline, &stt_fd);
+                stop_window_overlap = 1;
+            }
+        }
         if (stt_fd < 0) {
             int start_follow_up = 0;
 
@@ -673,7 +881,7 @@ static void *capture_worker(void *opaque)
                 recognition_processing_ms = 0;
                 recognition_total_ms = 0;
                 stt_fd = start_recognition(
-                    pipeline, detection_sample);
+                    pipeline, detection_sample, 0);
                 if (stt_fd < 0) {
                     pthread_mutex_lock(&pipeline->mutex);
                     ++pipeline->metrics.dropped_turns;
@@ -684,6 +892,38 @@ static void *capture_worker(void *opaque)
                 } else {
                     recognition_active = 1;
                 }
+            }
+        }
+        if (stt_fd < 0) {
+            uint64_t now = monotonic_milliseconds();
+            int start_stop = 0;
+
+            pthread_mutex_lock(&pipeline->mutex);
+            if (pipeline->stop_listen && pipeline->stop_callback &&
+                !pipeline->follow_up_pending &&
+                !pipeline->transcript_pending && pipeline->ring_count &&
+                now >= stop_window_not_before_ms) {
+                /* From now on, never older audio: only a window following
+                   one that ran out of time starts a little earlier. */
+                uint64_t back = stop_window_overlap
+                    ? (pipeline->ring_count < STOP_WINDOW_OVERLAP_SAMPLES
+                           ? pipeline->ring_count
+                           : STOP_WINDOW_OVERLAP_SAMPLES)
+                    : 0;
+
+                detection_sample =
+                    pipeline->ring_first_sample + pipeline->ring_count - back;
+                ++pipeline->metrics.stop_windows;
+                start_stop = 1;
+            }
+            pthread_mutex_unlock(&pipeline->mutex);
+            if (start_stop) {
+                stop_window_overlap = 0;
+                recognition_active = 0;
+                stt_fd = start_recognition(pipeline, detection_sample, 1);
+                stop_window_started_ms = now;
+                if (stt_fd < 0)
+                    stop_window_not_before_ms = now + STOP_RETRY_MS;
             }
         }
     }
@@ -741,6 +981,17 @@ struct le_voice_pipeline *le_voice_pipeline_start(
     pipeline->transcript_callback = transcript;
     pipeline->callback_context = context;
     pipeline->recognition_timeout_ms = RECOGNITION_TIMEOUT_MS;
+    /* Tests shorten the stop window and its grace to exercise the
+       boundary. */
+    pipeline->stop_window_ms =
+        env_milliseconds("LE_VOICE_STOP_WINDOW_MS", STOP_WINDOW_MS, 1);
+    pipeline->stop_window_grace_ms =
+        env_milliseconds("LE_VOICE_STOP_GRACE_MS", STOP_WINDOW_GRACE_MS, 0);
+    if (le_voice_ns_init(&pipeline->ns,
+                         LE_VOICE_NS_DEFAULT_ATTENUATION_DB) < 0) {
+        free(pipeline);
+        return NULL;
+    }
     {
         const char *override = getenv("LE_VOICE_STT_TIMEOUT_MS");
 
@@ -801,6 +1052,29 @@ int le_voice_pipeline_request_follow_up(
     return result;
 }
 
+void le_voice_pipeline_set_stop_callback(
+    struct le_voice_pipeline *pipeline,
+    le_voice_pipeline_stop_fn stop, void *context)
+{
+    if (!pipeline)
+        return;
+    pthread_mutex_lock(&pipeline->mutex);
+    pipeline->stop_callback = stop;
+    pipeline->stop_context = context;
+    pthread_mutex_unlock(&pipeline->mutex);
+}
+
+void le_voice_pipeline_set_stop_listen(
+    struct le_voice_pipeline *pipeline, int active)
+{
+    if (!pipeline)
+        return;
+    pthread_mutex_lock(&pipeline->mutex);
+    pipeline->stop_listen = active ? 1 : 0;
+    pipeline->metrics.stop_listen_requested = pipeline->stop_listen;
+    pthread_mutex_unlock(&pipeline->mutex);
+}
+
 void le_voice_pipeline_set_outcome_callback(
     struct le_voice_pipeline *pipeline,
     le_voice_pipeline_outcome_fn outcome, void *context)
@@ -810,6 +1084,29 @@ void le_voice_pipeline_set_outcome_callback(
     pthread_mutex_lock(&pipeline->mutex);
     pipeline->outcome_callback = outcome;
     pipeline->outcome_context = context;
+    pthread_mutex_unlock(&pipeline->mutex);
+}
+
+void le_voice_pipeline_set_noise_suppression(
+    struct le_voice_pipeline *pipeline, int enabled)
+{
+    if (!pipeline)
+        return;
+    pthread_mutex_lock(&pipeline->mutex);
+    if (enabled && !pipeline->noise_suppression)
+        pipeline->noise_suppression_reset = 1;
+    pipeline->noise_suppression = enabled ? 1 : 0;
+    pipeline->metrics.noise_suppression = pipeline->noise_suppression;
+    pthread_mutex_unlock(&pipeline->mutex);
+}
+
+void le_voice_pipeline_set_whisper_detection(
+    struct le_voice_pipeline *pipeline, int enabled)
+{
+    if (!pipeline)
+        return;
+    pthread_mutex_lock(&pipeline->mutex);
+    pipeline->whisper_detect = enabled ? 1 : 0;
     pthread_mutex_unlock(&pipeline->mutex);
 }
 

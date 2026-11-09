@@ -164,6 +164,7 @@ function deviceAssistantBody(a,selected) {
       ${field('Provider',a.provider_name||a.provider,'assistant-provider','text','disabled')}
       ${field('Model',a.model||'','assistant-model')}
       ${clockFormatField(a.clock_format,'assistant-clock-format')}
+      ${stopWithoutWakeField(a,'assistant-stop-without-wake')}
       <label class="field"><span>Voice response prompt</span><textarea id="assistant-prompt" rows="8">${esc(a.prompt||'')}</textarea></label>
       ${saveButton('save-assistant')}
     </div>
@@ -234,6 +235,15 @@ function bindLiveToggle(id,assistant) {
   if(!input)return;
   if(row)row.onclick=event=>event.stopPropagation();
   input.onchange=()=>setLiveProvider(input.checked,assistant);
+}
+
+/* Stop without the wake word (#405). Off by default: it transcribes room audio
+   while something rings or a reply plays, on the device only. */
+function stopWithoutWakeField(a,id) {
+  return toggle('Stop without the wake word',a.stop_without_wake===true,id)+
+    '<p class="muted">While a timer or alarm rings or a reply is playing, saying just "stop" ends it. '+
+    'What the device hears in those moments is recognised on the device and dropped unless it was a stop; '+
+    'it is never sent to a speech server.</p>';
 }
 
 function clockFormatField(value,id) {
@@ -591,12 +601,13 @@ async function integrationsPage() {
     if($('#local-test'))$('#local-test').onclick=()=>post('/assistant/respond',{text:$('#local-test-text').value},'Test response queued');
 
     if(deviceSelected) {
-      bindDirty(['#assistant-model','#assistant-clock-format','#assistant-prompt'],'#save-assistant');
+      bindDirty(['#assistant-model','#assistant-clock-format','#assistant-stop-without-wake','#assistant-prompt'],'#save-assistant');
       $('#save-assistant').onclick=()=>mutate('/assistant',{
         provider:'openai-codex',
         enabled:deviceEnabled&&account.signedIn,
         model:$('#assistant-model').value.trim(),
         clock_format:$('#assistant-clock-format').value,
+        stop_without_wake:$('#assistant-stop-without-wake').checked===true,
         prompt:$('#assistant-prompt').value.trim()
       },'On Device Voice Assistant settings saved');
       if($('#assistant-test'))$('#assistant-test').onclick=()=>post('/assistant/respond',{text:$('#assistant-test-text').value},'Test response queued');
@@ -630,9 +641,22 @@ async function sendspinDetail(){
   host.innerHTML=`<div class="status-line"><span class="status-dot ${s.connected?'ok':''}"></span><span>${sendspinStateText(s)}</span></div>
     <p class="muted">Music Assistant finds this speaker on your network. To add it, pair it there with this speaker's pairing token.</p>
     <div class="button-row"><button class="secondary-btn" id="sendspin-pair">Show pairing token</button><button class="secondary-btn" id="sendspin-unpair">Forget paired servers</button></div>
+    <label class="sound-row${s.unpaired_access?' on':''}"><input type="checkbox" id="sendspin-unpaired"${s.unpaired_access?' checked':''}> Play without pairing (off)</label>
+    <p class="muted">When on, any Music Assistant server on your network can play to this speaker, including ones that have not paired. Paired servers work either way.</p>
     <div id="sendspin-token" hidden></div>`;
   $('#sendspin-pair').onclick=showSendspinToken;
   $('#sendspin-unpair').onclick=forgetSendspinServers;
+  $('#sendspin-unpaired').onchange=setSendspinUnpaired;
+}
+/* Owner's play-without-pairing switch. Turning it on is confirmed first; the
+   box is put back if the change is refused. */
+async function setSendspinUnpaired(e){
+  const box=e.target,enabled=box.checked;
+  if(enabled&&!confirm('Let Music Assistant servers play without pairing?\n\nAny server on your network can then stream audio to this speaker until you turn this off. Paired servers are not affected.')){box.checked=false;return;}
+  try{await api('/sendspin/unpaired-access',{method:'PUT',body:JSON.stringify({enabled})});}
+  catch(err){box.checked=!enabled;toast(err.message,true);return;}
+  toast(enabled?'Play without pairing is on':'Play without pairing is off');
+  await sendspinDetail();
 }
 /* Clears every pairing and issues a new token; servers must pair again. */
 async function forgetSendspinServers(){

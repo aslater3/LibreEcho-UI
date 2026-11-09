@@ -78,7 +78,7 @@
      "Assistant"
     ],
     "summary": "Read voice-assistant state and latency telemetry",
-    "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, and the configured spoken time format.",
+    "description": "Reports subscription authentication, wake/STT stream health, measured speech-end-to-first-PCM latency, the configured spoken time format, and stop-without-the-wake-word state (stop_without_wake, stop_listening, stop_windows, stops_heard).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -138,6 +138,11 @@
           ],
           "default": "12",
           "description": "Spoken time format: \"12\" reads times as 1:57 PM, \"24\" as 13:57. Applies to ChatGPT and OpenAI-compatible providers."
+         },
+         "stop_without_wake": {
+          "type": "boolean",
+          "default": false,
+          "description": "While a timer or alarm rings or a reply is playing, a bare \"stop\" (no wake word) ends it. Recognised on the device only; never used with a Wyoming speech server. Off by default."
          },
          "prompt": {
           "type": "string",
@@ -474,7 +479,7 @@
      "Audio"
     ],
     "summary": "Read audio state",
-    "description": "Returns available audio state, including volume_leveling (experimental music automatic volume leveling, false by default). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
+    "description": "Returns available audio state, including volume_leveling (experimental music automatic volume leveling, false by default) and the separate reply volume: reply_volume (0-100, the level spoken replies, announcements and chimes play at; equal to volume while following) and reply_volume_custom (false while replies follow the master volume, the default) and microphone_mix (how the microphone array is mixed for voice: beamformer, the default, average or single) and microphone_lane (the array microphone used by single: 0-6, or -1 for automatic). On images without audiod, the 200 response contains data.available=false and data.unavailable=true; this is an expected capability result, not an HTTP error.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -488,8 +493,8 @@
     "tags": [
      "Audio"
     ],
-    "summary": "Update volume, microphone state, announcement voice, or music volume leveling",
-  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), tts_voice, and volume_leveling (boolean: experimental stock-style music automatic volume leveling, off by default; persisted). A non-boolean volume_leveling is rejected with 400.",
+    "summary": "Update volume, reply volume, microphone state, announcement voice, or music volume leveling",
+  "description": "Accepts any of volume (0-100), microphone_gain (0-100), microphone_muted (boolean), microphone_mix (beamformer, average or single; persisted, and applied to the running voice stream at once), microphone_lane (-1 automatic or 0-6 for one array microphone, used by single; persisted; out of range is rejected with 400), tts_voice, and volume_leveling (boolean: experimental stock-style music automatic volume leveling, off by default; persisted). A non-boolean volume_leveling is rejected with 400. reply_volume (integer 0-100) gives assistant replies, announcements and chimes their own level, persisted; reply_volume_custom false returns them to the master volume. Alarms, music and other media always use volume. An out-of-range or non-integer reply_volume, a non-boolean reply_volume_custom, or reply_volume_custom true without reply_volume is rejected with 400 before any change. An unknown microphone_mix is rejected with 400.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1343,7 +1348,7 @@
      "LED and buttons"
     ],
     "summary": "Read button settings and live physical-input capability state",
-    "description": "Returns saved tones/action/brightness settings plus live capability fields from libreecho-buttond. `available` is true only for a fresh connected status record; `stale` is true when the record is missing, disconnected, or older than 15 seconds. The response data includes `short_press`, `long_press`, `tones`, `action`, `action_sounds`, `available_sounds`, `action_brightness`, `mute_brightness`, `volume_capable`, `hardware_mute`, and `action_capable`. `privacy_latch` reports the kernel privacy latch, which lights the mute button's lamp and, while it is engaged, owns it: true, false, or null when no fresh reading exists (absence of a reading is not evidence that the latch is released). `lamp_control` reports whether software can light that lamp at all: true when the kernel's mute-lamp control is present and last accepted a write, false when the kernel refuses the write outright (a board whose hardware latch owns the line) or software cannot write the attribute at all (an image that predates the control, or a driver that has not bound yet), null when there is no fresh reading or nothing has tested the control yet. Only a definite kernel refusal settles the question: a missing attribute, or any failure that may pass, is probed again, so a driver that binds later turns this true without restarting the daemon. A write the kernel defers while the latch is engaged is recorded for when the line is free, not a refusal, so it leaves the field at the answer it already had: null while nothing has tested the control, and true where a write has already been accepted, since a deferral does not unlearn proven support. On an image without the control the latch is the only source for the lamp's state: a software mute lights the ring and leaves the lamp dark. Both fields describe the lamp indication; neither reports that software engaged the hardware privacy latch, which only the button can do. `hardware_mute` is a capability, not a state. Sound names are lowercase letters, digits, hyphens, or underscores and are at most 48 characters each; an empty `action_sounds` is valid and disables sound playback.",
+    "description": "Returns saved tones/action/brightness settings plus live capability fields from libreecho-buttond. `available` is true only for a fresh connected status record; `stale` is true when the record is missing, disconnected, or older than 15 seconds. The response data includes `short_press`, `long_press` (legacy free-text strings no daemon acts on; superseded by `action` and `action_long`), `tones`, `action`, `action_long`, `action_sounds`, `available_sounds`, `action_brightness`, `mute_brightness`, `volume_capable`, `hardware_mute`, and `action_capable`. `privacy_latch` reports the kernel privacy latch, which lights the mute button's lamp and, while it is engaged, owns it: true, false, or null when no fresh reading exists (absence of a reading is not evidence that the latch is released). `lamp_control` reports whether software can light that lamp at all: true when the kernel's mute-lamp control is present and last accepted a write, false when the kernel refuses the write outright (a board whose hardware latch owns the line) or software cannot write the attribute at all (an image that predates the control, or a driver that has not bound yet), null when there is no fresh reading or nothing has tested the control yet. Only a definite kernel refusal settles the question: a missing attribute, or any failure that may pass, is probed again, so a driver that binds later turns this true without restarting the daemon. A write the kernel defers while the latch is engaged is recorded for when the line is free, not a refusal, so it leaves the field at the answer it already had: null while nothing has tested the control, and true where a write has already been accepted, since a deferral does not unlearn proven support. On an image without the control the latch is the only source for the lamp's state: a software mute lights the ring and leaves the lamp dark. Both fields describe the lamp indication; neither reports that software engaged the hardware privacy latch, which only the button can do. `hardware_mute` is a capability, not a state. Sound names are lowercase letters, digits, hyphens, or underscores and are at most 48 characters each; an empty `action_sounds` is valid and disables sound playback.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1358,7 +1363,7 @@
      "LED and buttons"
     ],
     "summary": "Update button mappings, cues, action, and brightness",
-    "description": "At least one recognized button field is required. All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `noise`, `listen`, `playpause`, or `disabled` (`noise` toggles a sleep sound: white noise until the next press); `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Missing, malformed, or out-of-range settings return 400. Persistence failure returns 503 and preserves prior preferences.",
+    "description": "At least one recognized button field is required. All supplied fields are validated before applying the update. `tones` is a boolean; `action` is one of `sound`, `noise`, `listen`, `playpause`, or `disabled` (`noise` toggles a sleep sound: white noise until the next press; `listen` starts a voice request as if the wake word had been heard; `playpause` pauses and resumes internet radio and stops and restarts a sleep sound); `action_long` is `same` (the default: no separate long press, the button acts when pressed) or any `action` value, run when the action button is held for 800 ms, in which case a quicker press runs `action` on release; `action_sounds` is a comma-separated rotation list of lowercase sound names, each 1–48 characters; `action_brightness` and `mute_brightness` are integers from 0 through 100. Missing, malformed, or out-of-range settings return 400. Persistence failure returns 503 and preserves prior preferences.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -1377,6 +1382,7 @@
          {"required": ["long_press"]},
          {"required": ["tones"]},
          {"required": ["action"]},
+         {"required": ["action_long"]},
          {"required": ["action_sounds"]},
          {"required": ["action_brightness"]},
          {"required": ["mute_brightness"]}
@@ -1396,6 +1402,17 @@
          "action": {
           "type": "string",
           "enum": [
+           "sound",
+           "noise",
+           "listen",
+           "playpause",
+           "disabled"
+          ]
+         },
+         "action_long": {
+          "type": "string",
+          "enum": [
+           "same",
            "sound",
            "noise",
            "listen",
@@ -1728,12 +1745,315 @@
     }
    }
   },
+  "/sounds": {
+   "get": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "List owner event sounds",
+    "description": "Each event reports whether the owner's own sound or the built-in one is selected, whether one is uploaded, its length and the event's length limit.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sounds/{event}": {
+   "put": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Upload the owner's sound for an event",
+    "description": "The body is a WAV file (16-bit PCM, mono or stereo, 8000-48000 Hz, at most 1 MiB). It is converted to 48 kHz mono and selected. Length limits: wake 1000 ms, end 2000 ms, timer 5000 ms. Invalid or over-long files are rejected and leave the stored sound unchanged. The web UI converts Opus, MP3 and other formats the browser can decode to WAV before uploading.",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "audio/wav": {
+       "schema": {
+        "type": "string",
+        "format": "binary"
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "413": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "delete": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Remove the owner's sound and return to the built-in one",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sounds/{event}/select": {
+   "post": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Choose the owner's sound or the built-in one",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "selected"
+        ],
+        "properties": {
+         "selected": {
+          "type": "string",
+          "enum": [
+           "custom",
+           "default"
+          ]
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sounds/{event}/preview": {
+   "post": {
+    "tags": [
+     "Audio"
+    ],
+    "summary": "Play the uploaded sound for an event on the device",
+    "description": "Plays the uploaded sound whether or not it is selected. 409 when none is uploaded or another sound is playing.",
+    "security": [
+     {
+      "BearerAuth": []
+     }
+    ],
+    "parameters": [
+     {
+      "name": "event",
+      "in": "path",
+      "required": true,
+      "schema": {
+       "type": "string",
+       "enum": [
+        "wake",
+        "end",
+        "timer"
+       ]
+      },
+      "description": "wake: listening chime (local assistant); end: finished-listening chime (local assistant; no built-in sound); timer: timer and alarm ring."
+     },
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/reminders": {
+    "post": {
+      "tags": [
+        "Timers"
+      ],
+      "summary": "Set a spoken reminder at the next occurrence of a local 24-hour time, once or on repeating days",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "time"
+              ],
+              "properties": {
+                "time": {
+                  "type": "string",
+                  "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                  "description": "Local 24-hour time, HH:MM."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Optional text the device says at the reminder time; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."
+                },
+                "days": {
+                  "type": "string",
+                  "description": "Optional repeat days: a comma list of lower-case names (sun,mon,tue,wed,thu,fri,sat), or daily, weekdays or weekends. Empty or omitted makes a one-off reminder. An unknown list returns 400."
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "201": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
   "/timers": {
    "get": {
     "tags": [
      "Timers"
     ],
-    "summary": "List timers and alarms",
+    "summary": "List timers, alarms and reminders",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -1861,6 +2181,215 @@
      }
     }
    }
+  },
+  "/alarms": {
+    "get": {
+      "tags": [
+        "Timers"
+      ],
+      "summary": "List alarms with their clock time",
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "post": {
+      "tags": [
+        "Timers"
+      ],
+      "summary": "Set an alarm at the next occurrence of a local 24-hour time, once or on repeating days",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "time"
+              ],
+              "properties": {
+                "time": {
+                  "type": "string",
+                  "pattern": "^([01][0-9]|2[0-3]):[0-5][0-9]$",
+                  "description": "Local 24-hour time, HH:MM."
+                },
+                "label": {
+                  "type": "string",
+                  "description": "Optional label; its UTF-8 encoding must be no longer than 47 bytes and must not contain control characters."
+                },
+                "days": {
+                  "type": "string",
+                  "description": "Optional repeat days: a comma list of lower-case names (sun,mon,tue,wed,thu,fri,sat), or daily, weekdays or weekends. Empty or omitted makes a one-off alarm. An unknown list returns 400."
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "201": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/alarms/snooze": {
+    "post": {
+      "tags": [
+        "Timers"
+      ],
+      "summary": "Snooze every ringing alarm for five minutes; countdowns are not snoozed",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+    "/alarms/sunrise": {
+      "get": {
+        "tags": [
+          "Timers"
+        ],
+        "summary": "Read the sunrise wake light lead time",
+        "description": "Minutes before an alarm that the LED ring starts a warm fade-up. 0 means off, the default.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Success"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "Timers"
+        ],
+        "summary": "Set the sunrise wake light lead time",
+        "description": "lead_minutes is a single top-level integer: 0 turns the wake light off, 5 to 30 sets the lead. Applies to every alarm.",
+        "security": [
+          {
+            "BearerAuth": []
+          }
+        ],
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Csrf"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "lead_minutes"
+                ],
+                "properties": {
+                  "lead_minutes": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 30,
+                    "description": "0 (off) or 5 to 30"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Success"
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+  "/alarms/{id}": {
+    "delete": {
+      "tags": [
+        "Timers"
+      ],
+      "summary": "Cancel a pending alarm; the id must name an alarm, not a countdown",
+      "security": [
+        {
+          "BearerAuth": []
+        }
+      ],
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
   },
   "/device": {
    "get": {
@@ -2174,7 +2703,7 @@
      "Integrations"
     ],
     "summary": "Read Sendspin player status",
-    "description": "Status of the Sendspin player (Music Assistant multiroom). installed: the audio feature carries the player; enabled: integrations bit 64; state is unavailable, disabled, starting, waiting (listening and discoverable, no server), connected or playing. listening, discoverable, connected, paired, streaming and time_synced come from the running player; volume is null while it is not running; server is the connected server's JSON-escaped name or null. Never contains pairing material. Read-only; other methods receive 405.",
+    "description": "Status of the Sendspin player (Music Assistant multiroom). installed: the audio feature carries the player; enabled: integrations bit 64; state is unavailable, disabled, starting, waiting (listening and discoverable, no server), connected or playing. listening, discoverable, connected, paired, streaming and time_synced come from the running player; volume is null while it is not running; unpaired_access is the owner's play-without-pairing choice (off by default), kept even while the player is stopped; server is the connected server's JSON-escaped name or null. Never contains pairing material. Read-only; other methods receive 405.",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -2217,6 +2746,54 @@
       "$ref": "#/components/responses/Error"
      },
      "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/sendspin/unpaired-access": {
+   "put": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Set play without pairing",
+    "description": "Sets whether Music Assistant servers that have not paired with this player may play to it. Off by default. Body: {\"enabled\": true|false}. Stored by the supervisor and applied by restarting the player when it is running. Returns data.unpaired_access. Authenticated and CSRF-checked like every changing request; 400 for a body without a boolean enabled, 503 when the setting could not be stored. Paired servers are unaffected.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": ["enabled"],
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        },
+        "additionalProperties": false
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "403": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
       "$ref": "#/components/responses/Error"
      },
      "503": {
@@ -2555,6 +3132,67 @@
     }
    }
   },
+  "/dnd": {
+   "get": {
+    "tags": [
+     "LED"
+    ],
+    "summary": "Read do-not-disturb",
+    "description": "Reports whether the do-not-disturb switch is on. While on, chimes, press tones, wake chirps and action samples are silenced, Home Assistant announcements are acknowledged without playing, and the ring shows the do-not-disturb theme. Timer alarms still ring.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   },
+   "put": {
+    "tags": [
+     "LED"
+    ],
+    "summary": "Turn do-not-disturb on or off",
+    "description": "Persists the switch, applies it to the audio and LED daemons, and reports the saved state. Timer alarms are never silenced.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "enabled"
+        ],
+        "properties": {
+         "enabled": {
+          "type": "boolean"
+         }
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/led/idle": {
    "put": {
     "tags": [
@@ -2843,6 +3481,96 @@
     }
    }
   },
+  "/network/pairing": {
+   "get": {
+    "tags": ["Network"],
+    "summary": "Device pairing state",
+    "description": "Whether this device holds a house key for signed device-to-device traffic (#450), and its fingerprint. Never returns the key.",
+    "responses": {
+     "200": {"description": "Pairing state", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerPairing"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "401": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "post": {
+    "tags": ["Network"],
+    "summary": "Create, join or show the house key",
+    "description": "action create makes a new random house key and returns its pairing code once; join takes the code from another device (64 hex digits, any case, '-' or spaces allowed); show returns the code again so another device can join. A paired device answers 409 to create and join until it is unpaired. Unknown fields are refused. The key is stored in peer.key beside the configuration, mode 0600, and is not part of the configuration export.",
+    "requestBody": {"required": true, "content": {"application/json": {"schema": {"type": "object", "required": ["action"], "additionalProperties": false, "properties": {"action": {"type": "string", "enum": ["create", "join", "show"]}, "code": {"type": "string", "maxLength": 128}}}}}},
+    "responses": {
+     "200": {"description": "Pairing state; code is present for create and show", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerPairing"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "400": {"$ref": "#/components/responses/Error"},
+     "401": {"$ref": "#/components/responses/Error"},
+     "403": {"$ref": "#/components/responses/Error"},
+     "409": {"$ref": "#/components/responses/Error"},
+     "501": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "delete": {
+    "tags": ["Network"],
+    "summary": "Unpair this device",
+    "description": "Removes the house key. This device then signs nothing and trusts no device.",
+    "responses": {
+     "200": {"description": "Pairing state", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerPairing"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "401": {"$ref": "#/components/responses/Error"},
+     "403": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/peer/proof": {
+   "get": {
+    "tags": ["Network"],
+    "summary": "Signed proof for another paired device",
+    "description": "Device-to-device (#450). Needs no session: another LibreEcho device asks with a fresh nonce and checks the answer with the shared house key. Answered only when Host is one of this device's IPv4 addresses and its plain HTTP port, so the signed host tells the asker which address answered. GET only; every other method goes through normal authentication.",
+    "security": [],
+    "parameters": [{"name": "nonce", "in": "query", "required": true, "schema": {"type": "string", "pattern": "^[0-9a-f]{32}$"}}],
+    "responses": {
+     "200": {"description": "Signed proof", "content": {"application/json": {"schema": {"type": "object", "required": ["ok", "data", "error"], "properties": {"ok": {"type": "boolean"}, "data": {"$ref": "#/components/schemas/PeerProof"}, "error": {"$ref": "#/components/schemas/NullableApiError"}}}}}},
+     "400": {"$ref": "#/components/responses/Error"},
+     "405": {"$ref": "#/components/responses/Error"},
+     "409": {"description": "not_paired: this device has no house key", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}}
+    }
+   }
+  },
+  "/network/peers": {
+   "get": {
+    "tags": ["Network"],
+    "summary": "List other LibreEcho devices on the local network",
+    "description": "One bounded DNS-SD browse for _libreecho._tcp.local (mDNS legacy-unicast query; answers are collected for one second and repeated requests within three seconds reuse the last answer). At most 16 devices; truncated is true when more answered. Only devices with an SRV record are listed. self marks this device's own record (one of its IPv4 addresses and its HTTP port); advertising is true while this device holds its own lease. When this device is paired (#450) every other listed device is asked for a signed proof in parallel (at most 0.8 s in total) and trust says what came back; without a house key trust is off and nothing is sent. GET only.",
+    "responses": {
+     "200": {
+      "description": "Devices found on the local network",
+      "content": {
+       "application/json": {
+        "schema": {
+         "type": "object",
+         "required": ["ok", "data", "error"],
+         "properties": {
+          "ok": {"type": "boolean"},
+          "data": {
+           "type": "object",
+           "required": ["discoverable", "advertising", "paired", "key_id", "devices", "truncated"],
+           "properties": {
+            "discoverable": {"type": "boolean"},
+            "advertising": {"type": "boolean"},
+            "paired": {"type": "boolean", "description": "This device holds a house key"},
+            "key_id": {"type": "string", "pattern": "^([0-9a-f]{8})?$", "description": "Fingerprint of the house key; empty when not paired"},
+            "devices": {"type": "array", "maxItems": 16, "items": {"$ref": "#/components/schemas/NetworkPeer"}},
+            "truncated": {"type": "boolean"}
+           }
+          },
+          "error": {"$ref": "#/components/schemas/NullableApiError"}
+         }
+        }
+       }
+      }
+     },
+     "405": {"$ref": "#/components/responses/Error"},
+     "503": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
   "/network/recovery": {
    "put": {
     "tags": [
@@ -3116,6 +3844,67 @@
     }
    }
   },
+  "/voice/clips": {
+   "get": {
+    "tags": ["Privacy"],
+    "summary": "List wake near-miss clips",
+    "description": "Reports whether near-miss clip capture is enabled (off by default), the store limits, and the saved clips newest first. Clips are 16 kHz mono WAV files kept under /data with mode 0600.",
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "405": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "put": {
+    "tags": ["Privacy"],
+    "summary": "Enable or disable wake near-miss clips",
+    "description": "State-changing requests require CSRF. Body: {\"near_miss_enabled\": true|false}. Disabling stops new clips; saved clips stay until deleted.",
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "requestBody": {"$ref": "#/components/requestBodies/JsonObject"},
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "400": {"$ref": "#/components/responses/Error"},
+     "405": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/voice/clips/clear": {
+   "post": {
+    "tags": ["Privacy"],
+    "summary": "Delete every saved wake near-miss clip",
+    "description": "State-changing requests require CSRF. Returns the number of clips removed.",
+    "parameters": [{"$ref": "#/components/parameters/Csrf"}],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "405": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
+  "/voice/clips/{id}": {
+   "get": {
+    "tags": ["Privacy"],
+    "summary": "Download one wake near-miss clip",
+    "description": "Returns the clip as audio/wav (16 kHz, mono, 16-bit). This is the only API response that is not a JSON envelope. Unknown or invalid ids return the JSON error envelope with 404.",
+    "parameters": [{"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[a-z]{1,8}-[0-9]{10}-[0-9]{4}$"}}],
+    "responses": {
+     "200": {"description": "WAV clip", "content": {"audio/wav": {"schema": {"type": "string", "format": "binary"}}}},
+     "404": {"$ref": "#/components/responses/Error"}
+    }
+   },
+   "delete": {
+    "tags": ["Privacy"],
+    "summary": "Delete one wake near-miss clip",
+    "description": "State-changing requests require CSRF.",
+    "parameters": [
+     {"$ref": "#/components/parameters/Csrf"},
+     {"name": "id", "in": "path", "required": true, "schema": {"type": "string", "pattern": "^[a-z]{1,8}-[0-9]{10}-[0-9]{4}$"}}
+    ],
+    "responses": {
+     "200": {"$ref": "#/components/responses/Success"},
+     "400": {"$ref": "#/components/responses/Error"},
+     "404": {"$ref": "#/components/responses/Error"}
+    }
+   }
+  },
   "/provenance": {
    "get": {
     "tags": [
@@ -3224,7 +4013,7 @@
      "Setup"
     ],
     "summary": "Complete first-boot AP-mode setup",
-    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. After the settings and Wi-Fi commit, the daemon synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features` helper and waits for `/run/libreecho/startup-ready` before completing setup. Reconciliation or readiness failure returns 503 and leaves setup incomplete; if and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. This one-time operation is rejected after setup completes.",
+    "description": "Validates and applies hostname, Wi-Fi, audio, wake-word and privacy basics, then requests access-point handoff. Hostname, audio, Wi-Fi and persistence failures return stage-specific errors. After the settings and Wi-Fi commit, the daemon synchronously invokes the no-argument `/usr/local/sbin/libreecho-reconcile-features` helper and waits for `/run/libreecho/startup-ready` before completing setup. Reconciliation or readiness failure returns 503 and leaves setup incomplete; if and only if the optional wake adapter reports not-supported, setup continues and persists wake_word and wake_sensitivity for later restore. Optional timezone (POSIX TZ string) and timezone_name (IANA name) set the device time zone; without them it stays UTC. This one-time operation is rejected after setup completes.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -3446,6 +4235,211 @@
     }
    }
   },
+  "/https/certificate": {
+    "get": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Report the HTTPS certificate in use",
+      "description": "Returns whether an owner certificate is installed (`custom`), its expiry and SHA-256 fingerprint. The private key is never returned.",
+      "responses": {
+        "200": {
+          "description": "Current state",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "put": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Install an owner HTTPS certificate",
+      "description": "Owner-supplied HTTPS certificate. `certificate_pem` (the certificate, optionally followed by its chain) and `private_key_pem` (an unencrypted PEM key) must match and the certificate must not have expired; otherwise 400 and nothing is written. The pair replaces the self-signed certificate. New TLS connections use it at once; it is kept across restarts and not regenerated while the custom marker is present. 501 when the build has no TLS. `tls_available` is false on builds without mbedTLS.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "$ref": "#/components/requestBodies/JsonObject"
+      },
+      "responses": {
+        "200": {
+          "description": "Saved; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "delete": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Restore the self-signed HTTPS certificate",
+      "description": "Removes the owner certificate and generates a new self-signed pair. Connections already open keep the old certificate; new connections get the new one.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Removed; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/https/private-ca": {
+    "get": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Report the private CA trust",
+      "description": "Returns whether a private CA is configured.",
+      "responses": {
+        "200": {
+          "description": "Current state",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "put": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Add a private certificate authority",
+      "description": "Private certificate authority trusted for outbound HTTPS in addition to the system roots. `ca_pem` must hold one or more CA certificates (basic constraints CA:TRUE). The system roots and the CA are written to trust-bundle.pem in the configuration directory. Verification stays on. News refresh uses the bundle immediately; LLM, Home Assistant and live services read it when they next start.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "$ref": "#/components/requestBodies/JsonObject"
+      },
+      "responses": {
+        "200": {
+          "description": "Saved; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "delete": {
+      "tags": [
+        "System"
+      ],
+      "summary": "Remove the private certificate authority",
+      "description": "Removes the private CA and the trust bundle built from it.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "responses": {
+        "200": {
+          "description": "Removed; the new state is returned",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object"
+              }
+            }
+          }
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "501": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+
   "/system/features": {
    "get": {
     "tags": [
@@ -3618,6 +4612,7 @@
      "System"
     ],
     "summary": "Read the configured timezone",
+    "description": "Returns timezone (POSIX TZ string), name (the IANA name it was picked as, or empty) and source (manual or home_assistant).",
     "responses": {
      "200": {
       "$ref": "#/components/responses/Success"
@@ -3629,7 +4624,7 @@
      "System"
     ],
     "summary": "Set the timezone",
-    "description": "A POSIX TZ string such as CST6CDT,M3.2.0,M11.1.0. There is no zoneinfo database on the device, so Olson names are not accepted. Daemons read TZ at start, so the change applies after a restart.",
+    "description": "A POSIX TZ string such as CST6CDT,M3.2.0,M11.1.0; there is no zoneinfo database on the device, so IANA names are not accepted as timezone. name optionally records the IANA name for the picker. Angle-bracket names (<+04>-4) are stored as letters (LST-4). source home_assistant makes esphomed store the zone Home Assistant reports over ESPHome; timezone is optional then. Daemons that render local time follow the change within seconds (applies: now); others at the next boot.",
     "parameters": [
      {
       "$ref": "#/components/parameters/Csrf"
@@ -3641,13 +4636,25 @@
       "application/json": {
        "schema": {
         "type": "object",
-        "required": [
-         "timezone"
-        ],
         "properties": {
          "timezone": {
           "type": "string",
-          "maxLength": 63
+          "maxLength": 63,
+          "description": "POSIX TZ string; required unless source is home_assistant"
+         },
+         "name": {
+          "type": "string",
+          "maxLength": 63,
+          "pattern": "^[A-Za-z0-9_+/-]*$",
+          "description": "IANA name, e.g. Europe/London"
+         },
+         "source": {
+          "type": "string",
+          "enum": [
+           "manual",
+           "home_assistant"
+          ],
+          "default": "manual"
          }
         }
        }
@@ -4026,6 +5033,10 @@
           "type": "integer",
           "minimum": 1,
           "maximum": 1024
+         },
+         "noise_suppression": {
+          "type": "boolean",
+          "description": "Run the on-device noise suppressor on the speech sent to the assistant (Home Assistant or the local pipeline). Off by default; restarts the voice pipeline like the other listening fields."
          }
         }
        }
@@ -4142,6 +5153,225 @@
     }
    }
   },
+  "/wake-word/models": {
+    "get": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "List owner-staged wake models",
+      "description": "Lists committed model folders with their validation result and the selected folder. The stock model is always available; the bundled Alexa model is data.stock.",
+      "parameters": [],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/model": {
+    "put": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Select a wake model",
+      "description": "Selects a committed model folder, or the stock model with alexa_v0.1. The choice is saved on the device and applies when the wake service next starts.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "model"
+              ],
+              "properties": {
+                "model": {
+                  "type": "string",
+                  "maxLength": 63
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/models/{name}": {
+    "delete": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Delete a staged wake model",
+      "description": "Removes a committed model folder. The selected model cannot be removed.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 63
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/models/{name}/files/{file}": {
+    "post": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Upload one chunk of a model file",
+      "description": "Stages one base64 chunk of melspectrogram.onnx, embedding_model.onnx or alexa_v0.1.onnx. offset must equal the bytes already staged for that file; offset 0 starts the file again. A chunk decodes to at most 8192 bytes; a file is at most 8 MiB.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 63
+          }
+        },
+        {
+          "name": "file",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "melspectrogram.onnx",
+              "embedding_model.onnx",
+              "alexa_v0.1.onnx"
+            ]
+          }
+        }
+      ],
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "offset",
+                "data"
+              ],
+              "properties": {
+                "offset": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "data": {
+                  "type": "string",
+                  "description": "Standard base64 of the chunk"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/wake-word/models/{name}/commit": {
+    "post": {
+      "tags": [
+        "Wake word"
+      ],
+      "summary": "Check and install a staged wake model",
+      "description": "Checks the three staged files (names, sizes, graph inputs and outputs, operators, opset and external data) and moves the folder into place. A folder that fails the check is discarded and the response carries the reason.",
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Csrf"
+        },
+        {
+          "name": "name",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "maxLength": 63
+          }
+        }
+      ],
+      "responses": {
+        "200": {
+          "$ref": "#/components/responses/Success"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "422": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
   "/wake-word/test": {
    "post": {
     "tags": [
@@ -4159,6 +5389,810 @@
      }
     }
    }
+  },
+  "/network/groups": {
+    "get": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "List device groups",
+      "description": "Device groups (#448) with their members. Owner only; needs a session like the rest of the API.",
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    },
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Create a device group",
+      "description": "Creates an empty group with the given name (1 to 47 characters, no control characters). Returns the groups.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "name"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 47
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/network/groups/{id}": {
+    "delete": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Delete a device group",
+      "description": "Removes the group and its member list. Returns the remaining groups.",
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ]
+    }
+  },
+  "/network/groups/{id}/members": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Add a device to a group",
+      "description": "Adds a device by its address and HTTP port, as shown in the device list (#413). Refused for a bad IPv4 address, a port outside 1 to 65535, an empty name, a full group (8 members) or a device already listed.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "address",
+                "port",
+                "name"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "maxLength": 15
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 63
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Groups",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "groups"
+                    ],
+                    "properties": {
+                      "groups": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/DeviceGroup"
+                        }
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ]
+    }
+  },
+  "/network/groups/{id}/command": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Send a group command",
+      "description": "Sends mute, unmute or stop to every member. The device applies it to itself directly, and sends a signed group-command packet (#450 house key) to each other member. Requires this device to be paired. Answers with each member result: applied, unpaired (no key, another key, or older firmware), failed, or unreachable. The whole fan-out is bounded to about 2 seconds.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "action"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "action": {
+                  "type": "string",
+                  "enum": [
+                    "mute",
+                    "unmute",
+                    "stop"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Command result per member",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "$ref": "#/components/schemas/GroupCommandResult"
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "parameters": [
+        {
+          "name": "id",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "integer",
+            "minimum": 1
+          }
+        }
+      ]
+    }
+  },
+  "/network/broadcast": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Announce a short text to paired devices",
+      "description": "Speaks a short text on every paired device found on the LAN (#412, first slice), or on one device when address and port are given. The text is signed into an announcement packet with the house key and sent to POST /api/v1/peer/announce on each target; this device speaks it too when it is paired and no address is given. Devices of another house and devices that are off are skipped or reported. Each target answers applied, not_supported (the target has no speaker), unpaired, failed or unreachable. The packet is signed, not encrypted. The fan-out is bounded to about 3 seconds after the LAN search. This device must be paired (409 otherwise).",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "text"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 240,
+                  "description": "UTF-8 text with no control characters, 1 to 240 bytes"
+                },
+                "address": {
+                  "type": "string",
+                  "description": "IPv4 address of one device to announce to; omit to announce to every paired device"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535,
+                  "description": "HTTP port of that device; required with address"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The announcement was sent. this_device is applied, not_supported, failed or not_included (single-device sends); devices lists each remote result; sent, applied and skipped count them."
+        },
+        "400": {
+          "description": "The text, address or port is not valid"
+        },
+        "401": {
+          "description": "Authentication is required"
+        },
+        "403": {
+          "description": "The CSRF token is missing or invalid"
+        },
+        "409": {
+          "description": "This device is not paired with other devices"
+        },
+        "503": {
+          "description": "The local network could not be searched or the reply could not be built"
+        }
+      }
+    }
+  },
+  "/network/settings/copy": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Copy settings to a paired device",
+      "description": "Copies the chosen settings groups (voice, audio, ha, led) from this device to one other paired device (#449). Only the keys listed in src/peer_settings.h are sent: no hostname, MAC, Wi-Fi, SSH, API exposure, room, timezone, privacy, feature switches, buttons, appearance or secret ever moves. The values travel in a sealed settings-copy packet (house key, #450) to POST /api/v1/peer/settings on the target. This device must be paired. The target must be a different device, and the address must be IPv4. Answers result applied, unpaired (no key, another key, or older firmware), failed or unreachable. The send is bounded to about 3 seconds.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object",
+              "required": [
+                "address",
+                "port"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "address": {
+                  "type": "string",
+                  "description": "IPv4 address of the target device, as shown in the device list"
+                },
+                "port": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 65535
+                },
+                "voice": {
+                  "type": "boolean",
+                  "description": "Wake word, wake sensitivity and speech end and VAD tuning"
+                },
+                "audio": {
+                  "type": "boolean",
+                  "description": "Speaker volume and microphone gain"
+                },
+                "ha": {
+                  "type": "boolean",
+                  "description": "Home Assistant address (only when this device has one set)"
+                },
+                "led": {
+                  "type": "boolean",
+                  "description": "LED brightness, visualizer and action and mute ring brightness"
+                }
+              }
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Result for the target",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "required": [
+                      "result",
+                      "groups",
+                      "address",
+                      "port"
+                    ],
+                    "properties": {
+                      "result": {
+                        "type": "string",
+                        "enum": [
+                          "applied",
+                          "unpaired",
+                          "failed",
+                          "unreachable"
+                        ]
+                      },
+                      "groups": {
+                        "type": "string",
+                        "description": "Comma-separated group names that were sent"
+                      },
+                      "address": {
+                        "type": "string"
+                      },
+                      "port": {
+                        "type": "integer"
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/peer/announce": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Speak a signed announcement",
+      "description": "Device-to-device (#412). Needs no session or CSRF token: the body is a sealed packet of type announcement (LESIG1 header, then the UTF-8 text) made with the house key. A packet that does not verify, is outside the 300 second window, or was already accepted answers 401 not_verified. A device without a key answers 409 not_paired. Text that is blank, too long or holds control characters answers 400. A verified announcement answers 200 with spoken true when this device has a speaker, and 501 not_supported when it does not. Other methods are not exempt from authentication.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "The announcement was verified and spoken"
+        },
+        "400": {
+          "description": "The announcement text is not valid"
+        },
+        "401": {
+          "description": "The packet did not verify with this device's key, or was already accepted"
+        },
+        "409": {
+          "description": "This device is not paired with other devices"
+        },
+        "501": {
+          "description": "The packet verified, but this device has no speaker"
+        }
+      }
+    }
+  },
+  "/peer/settings": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Apply a signed settings copy",
+      "description": "Device-to-device (#449). Needs no session or CSRF token: the body is a sealed packet of type settings-copy (LESIG1 header, then a flat JSON object of setting values) made with the house key. A packet that does not verify, is outside the 300 second window, or was already accepted answers 401 not_verified. A device without a key answers 409 not_paired. Keys this device does not copy are ignored; a listed key with a value out of range, or a wrong type, refuses the whole packet with 400 and changes nothing. Other methods are not exempt from authentication.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Applied",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "applied": {
+                        "type": "boolean"
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      }
+    }
+  },
+  "/peer/command": {
+    "post": {
+      "tags": [
+        "Network"
+      ],
+      "summary": "Apply a signed group command",
+      "description": "Device-to-device (#448). Needs no session: the body is a sealed packet of type group-command (LESIG1 header, then the action name) made with the house key. A packet that does not verify, is outside the 300 second window, or was already accepted answers 401 not_verified. A device without a key answers 409 not_paired. Other methods are not exempt from authentication.",
+      "requestBody": {
+        "required": true,
+        "content": {
+          "text/plain": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "responses": {
+        "200": {
+          "description": "Applied",
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "ok",
+                  "data",
+                  "error"
+                ],
+                "properties": {
+                  "ok": {
+                    "type": "boolean"
+                  },
+                  "data": {
+                    "type": "object",
+                    "properties": {
+                      "action": {
+                        "type": "string"
+                      },
+                      "applied": {
+                        "type": "boolean"
+                      }
+                    }
+                  },
+                  "error": {
+                    "$ref": "#/components/schemas/NullableApiError"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "400": {
+          "$ref": "#/components/responses/Error"
+        },
+        "401": {
+          "$ref": "#/components/responses/Error"
+        },
+        "403": {
+          "$ref": "#/components/responses/Error"
+        },
+        "404": {
+          "$ref": "#/components/responses/Error"
+        },
+        "405": {
+          "$ref": "#/components/responses/Error"
+        },
+        "409": {
+          "$ref": "#/components/responses/Error"
+        },
+        "503": {
+          "$ref": "#/components/responses/Error"
+        }
+      },
+      "security": []
+    }
   }
  },
  "components": {
@@ -4220,6 +6254,14 @@
         },
         "api_lan": {
          "type": "boolean"
+        },
+        "discoverable": {
+         "type": "boolean",
+         "description": "Advertise this control centre as _libreecho._tcp so other LibreEcho devices can list it (default true)."
+        },
+        "nearest_answers": {
+         "type": "boolean",
+         "description": "Only the nearest paired device answers the wake word (default false). Needs pairing; settled by signed claims between devices (#408)."
         },
         "wifi_mac": {
          "type": "string",
@@ -4633,7 +6675,54 @@
      },
      "api_lan_forced": {
       "type": "boolean"
+     },
+     "discoverable": {
+      "type": "boolean",
+      "description": "Persisted choice to advertise this control centre to other LibreEcho devices (_libreecho._tcp)."
+     },
+     "nearest_answers": {
+      "type": "boolean",
+      "description": "Persisted choice to let only the nearest paired device answer the wake word (#408). Off by default."
      }
+    }
+   },
+   "NetworkPeer": {
+    "type": "object",
+    "required": ["name", "room", "version", "address", "port", "url", "self", "trust"],
+    "properties": {
+     "name": {"type": "string", "maxLength": 63, "description": "DNS-SD instance name (the device hostname)"},
+     "room": {"type": "string", "maxLength": 63, "description": "Room from TXT; empty when unset or unsafe"},
+     "version": {"type": "string", "maxLength": 31, "description": "LibreEcho version from TXT; empty when absent"},
+     "address": {"type": "string", "description": "IPv4 address of the device"},
+     "port": {"type": "integer", "minimum": 1, "maximum": 65535},
+     "url": {"type": "string", "description": "Link to that device's control centre"},
+     "self": {"type": "boolean", "description": "True for this device's own record"},
+     "trust": {"type": "string", "enum": ["off", "self", "paired", "unpaired", "failed"], "description": "off: this device is not paired, nothing checked. self: this device. paired: answered with a valid signed proof for this house key. unpaired: answered without a house key or with another one. failed: no answer, or a proof that did not verify (forged, replayed or relayed)."}
+    }
+   },
+   "PeerPairing": {
+    "type": "object",
+    "required": ["supported", "paired", "key_id"],
+    "properties": {
+     "supported": {"type": "boolean", "description": "False when the daemon runs without a saved configuration"},
+     "paired": {"type": "boolean"},
+     "key_id": {"type": "string", "pattern": "^([0-9a-f]{8})?$", "description": "Fingerprint of the house key; the same on every paired device"},
+     "code": {"type": "string", "pattern": "^[0-9a-f]{4}(-[0-9a-f]{4}){15}$", "description": "Pairing code (the house key). Only in the answers to create and show."}
+    }
+   },
+   "PeerProof": {
+    "type": "object",
+    "required": ["key_id", "type", "ts", "nonce", "name", "room", "version", "host", "mac"],
+    "properties": {
+     "key_id": {"type": "string", "pattern": "^[0-9a-f]{8}$"},
+     "type": {"type": "string", "enum": ["peer-proof"]},
+     "ts": {"type": "integer", "minimum": 0},
+     "nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+     "name": {"type": "string"},
+     "room": {"type": "string"},
+     "version": {"type": "string"},
+     "host": {"type": "string", "description": "The Host this device was asked under: one of its IPv4 addresses and its HTTP port"},
+     "mac": {"type": "string", "pattern": "^[0-9a-f]{64}$", "description": "HMAC-SHA256 over LESIG1, type, ts, nonce and name/room/version/host joined by newlines; see docs/API.md"}
     }
    },
    "ErrorEnvelope": {
@@ -4691,7 +6780,8 @@
     "required": [
      "max_utterance_ms",
      "end_silence_ms",
-     "vad_floor_rms"
+     "vad_floor_rms",
+     "noise_suppression"
     ],
     "properties": {
      "max_utterance_ms": {
@@ -4708,6 +6798,10 @@
       "type": "integer",
       "minimum": 1,
       "maximum": 1024
+     },
+     "noise_suppression": {
+      "type": "boolean",
+      "description": "Steady-noise suppression on the speech sent to the assistant; false unless turned on."
      }
     }
    },
@@ -5037,6 +7131,105 @@
       }
      }
     ]
+   },
+   "DeviceGroup": {
+     "type": "object",
+     "required": [
+       "id",
+       "name",
+       "members"
+     ],
+     "properties": {
+       "id": {
+         "type": "integer"
+       },
+       "name": {
+         "type": "string"
+       },
+       "members": {
+         "type": "array",
+         "items": {
+           "type": "object",
+           "required": [
+             "address",
+             "port",
+             "name"
+           ],
+           "properties": {
+             "address": {
+               "type": "string"
+             },
+             "port": {
+               "type": "integer"
+             },
+             "name": {
+               "type": "string"
+             }
+           }
+         }
+       }
+     }
+   },
+   "GroupCommandResult": {
+     "type": "object",
+     "required": [
+       "group",
+       "action",
+       "members",
+       "applied",
+       "total"
+     ],
+     "properties": {
+       "group": {
+         "type": "integer"
+       },
+       "action": {
+         "type": "string",
+         "enum": [
+           "mute",
+           "unmute",
+           "stop"
+         ]
+       },
+       "members": {
+         "type": "array",
+         "items": {
+           "type": "object",
+           "required": [
+             "name",
+             "address",
+             "port",
+             "result"
+           ],
+           "properties": {
+             "name": {
+               "type": "string"
+             },
+             "address": {
+               "type": "string"
+             },
+             "port": {
+               "type": "integer"
+             },
+             "result": {
+               "type": "string",
+               "enum": [
+                 "applied",
+                 "unpaired",
+                 "failed",
+                 "unreachable"
+               ]
+             }
+           }
+         }
+       },
+       "applied": {
+         "type": "integer"
+       },
+       "total": {
+         "type": "integer"
+       }
+     }
    }
   }
  }

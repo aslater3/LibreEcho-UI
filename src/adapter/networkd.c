@@ -3494,12 +3494,18 @@ static int connect_network(struct daemon_ctx *ctx, const char *ssid,
             return -6;
         }
     }
+    if (snprintf(command, sizeof(command), "SET_NETWORK %d scan_ssid 1\n",
+                 id) >= (int)sizeof(command) ||
+        wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
+        restore_network_profile(ctx, *previous_id, id);
+        return -7;
+    }
     if (snprintf(command, sizeof(command), "ENABLE_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0 ||
         snprintf(command, sizeof(command), "SELECT_NETWORK %d\n", id) >=
             (int)sizeof(command) || wpa_ok(ctx, command, reply, sizeof(reply)) < 0) {
         restore_network_profile(ctx, *previous_id, id);
-        return -7;
+        return -8;
     }
     return id;
 }
@@ -3881,7 +3887,8 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
                               connect_result == -4 ? "SSID rejected by wpa_supplicant" :
                               connect_result == -5 ? "WPA2 security rejected by wpa_supplicant" :
                               connect_result == -6 ? "Wi-Fi password rejected by wpa_supplicant" :
-                              connect_result == -7 ? "Wi-Fi network could not be enabled or selected" :
+                              connect_result == -7 ? "Wi-Fi profile scan setting rejected by wpa_supplicant" :
+                              connect_result == -8 ? "Wi-Fi network could not be enabled or selected" :
                               "wpa_supplicant rejected the network");
             return;
         }

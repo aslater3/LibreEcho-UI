@@ -33,23 +33,28 @@
 </svg>
 <div class="app-shell">
   <aside class="sidebar">
-    <div class="brand"><img class="brand-mark" src="/assets/mark.svg" alt=""><div><strong><em>Libre</em>Echo</strong><small>Open. Private. Yours.</small></div></div>
+    <div class="brand"><img class="brand-mark" src="/assets/mark.svg" alt=""><div><strong><em>Libre</em>Echo</strong><small data-i18n="brand.tagline">Open. Private. Yours.</small></div></div>
     <nav id="nav"></nav>
     <div class="side-bottom">
-      <div class="status-card"><div class="online" id="device-online"><span></span>Connecting…</div><p id="sidebar-uptime">Uptime: —</p><div class="version-line"><p id="sidebar-version">LibreEcho OS</p><button id="update-available" class="update-available" type="button" hidden>Update available</button></div></div>
-      <a class="github-card" href="https://github.com/aslater3/LibreEcho"><span class="github-dot">●</span><span>View on GitHub<small>github.com/aslater3/LibreEcho</small></span></a>
+      <div class="status-card"><div class="online" id="device-online"><span></span><span data-i18n="status.connecting">Connecting…</span></div><p id="sidebar-uptime"><span data-i18n="status.uptime">Uptime</span>: —</p><div class="version-line"><p id="sidebar-version">LibreEcho OS</p><button id="update-available" class="update-available" type="button" hidden data-i18n="status.update_available">Update available</button></div></div>
+      <a class="github-card" href="https://github.com/aslater3/LibreEcho"><span class="github-dot">●</span><span><span data-i18n="sidebar.github">View on GitHub</span><small>github.com/aslater3/LibreEcho</small></span></a>
     </div>
   </aside>
   <main>
-    <header><button class="menu-btn" id="menu" aria-label="Toggle navigation">☰</button><div><h1 id="page-title">Overview</h1><p id="page-subtitle">Your LibreEcho at a glance</p></div><div class="header-actions"><span class="backend-badge" id="backend-badge">Connecting</span><button id="reboot" class="outline-btn">↻&nbsp; Reboot</button><button class="icon-btn" id="theme" aria-label="Toggle colour theme">☼</button><button class="outline-btn auth-control" id="auth-control" type="button">Sign in</button></div></header>
-    <section id="content" aria-live="polite"><div class="panel loading">Loading device state…</div></section>
+    <header><button class="menu-btn" id="menu" data-i18n-aria="header.menu_aria" aria-label="Toggle navigation">☰</button><div><h1 id="page-title">Overview</h1><p id="page-subtitle">Your LibreEcho at a glance</p></div><div class="header-actions"><span class="backend-badge" id="backend-badge" data-i18n="status.connecting_short">Connecting</span><button id="reboot" class="outline-btn">↻&nbsp; <span data-i18n="header.reboot">Reboot</span></button><button class="icon-btn" id="theme" data-i18n-aria="header.theme_aria" aria-label="Toggle colour theme">☼</button><button class="outline-btn auth-control" id="auth-control" type="button" data-i18n="auth.sign_in">Sign in</button></div></header>
+    <section id="content" aria-live="polite"><div class="panel loading" data-i18n="status.loading">Loading device state…</div></section>
   </main>
 </div>
 <div id="bt-pairing-live" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 <div class="toast" id="toast">Saved</div>
+<script src="/js/i18n.js?rev=1"></script>
+<script src="/js/i18n-en.js?rev=1"></script>
+<script src="/js/i18n-de.js?rev=1"></script>
 <script src="/js/bluetooth.js?rev=36"></script>
-<script src="/js/app.js?rev=41"></script>
+<script src="/js/timezones.js?rev=1"></script>
+<script src="/js/timezone-ui.js?rev=1"></script>
+<script src="/js/app.js?rev=43"></script>
 <script src="/js/integrations-ui.js?rev=39"></script>
-<script src="/js/privacy-ui.js?rev=41"></script>
+<script src="/js/privacy-ui.js?rev=42"></script>
 </body>
 </html>

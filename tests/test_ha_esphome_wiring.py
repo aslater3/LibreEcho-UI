@@ -50,6 +50,17 @@ class RealHAGateWiring(unittest.TestCase):
         self.assertIn('aiohasupervisor==0.6.0', requirements,
                       'bluetooth import chain (usb -> hassio) needs aiohasupervisor pinned')
 
+    def test_acceptance_installs_a_bluetooth_manager(self):
+        """The daemon advertises Bluetooth proxy feature flags, so HA's ESPHome
+        on_connect calls connect_scanner(), which needs habluetooth's manager.
+        Stubbing bluetooth.async_setup to a no-op leaves it unset: HA raises
+        RuntimeError('BluetoothManager has not been set') inside on_connect, the
+        connection is dropped after the entity list and the assist_satellite
+        platform never loads (only the media player and mute switch appear)."""
+        source = (ROOT / 'tests/test_ha_esphome_integration.py').read_text()
+        self.assertNotIn('"homeassistant.components.bluetooth.async_setup", AsyncMock', source)
+        self.assertIn('set_manager(manager)', source)
+
     def test_normal_runner_checks_gate_wiring(self):
         runner = (ROOT / 'tests/run_tests.sh').read_text()
         self.assertIn('python3 tests/test_ha_esphome_wiring.py', runner)

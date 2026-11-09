@@ -134,6 +134,11 @@ Validates and applies the first-boot hostname, initial volume, Wi-Fi profile,
 wake-word preferences, and privacy choices. Hostname, audio, Wi-Fi, and durable
 configuration failures abort the transaction with stage-specific errors.
 
+`timezone` (POSIX TZ string) and `timezone_name` (IANA name) are optional;
+the wizard sends the browser's zone. They follow the rules of
+`PUT /api/v1/system/timezone`; `timezone_name` without `timezone`, or an
+invalid value, is rejected with 400. Without them the device keeps UTC.
+
 Wake-word support is optional: if its companion service returns
 `LE_NOT_SUPPORTED`, setup continues, the submitted `wake_word` and
 `wake_sensitivity` are still written to the canonical configuration, and the
@@ -496,6 +501,10 @@ render the existing unsupported state without logging an HTTP error.
     "amplifier_on": true,
     "output_available": true,
     "volume_leveling": false,
+    "reply_volume": 50,
+    "reply_volume_custom": false,
+    "microphone_mix": "beamformer",
+    "microphone_lane": -1,
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
@@ -516,18 +525,51 @@ Update audio settings.
   "volume": 75,
   "microphone_gain": 80,
   "microphone_muted": false,
+  "microphone_mix": "beamformer",
+  "microphone_lane": -1,
   "tts_voice": "southern-female",
-  "volume_leveling": true
+  "volume_leveling": true,
+  "reply_volume": 35
 }
 ```
 
-All fields are optional. `volume_leveling` switches the audio engine's
+All fields are optional. `microphone_mix` chooses how the four speech
+microphones become the mono voice stream: `beamformer` (the default; fixed
+beams, following the strongest talker), `average` (the mean of the four
+speech microphones) or `single` (the lowest-numbered speech microphone). It
+is persisted, applied to the running voice stream without a restart, and an
+unknown value is rejected with `400`. `microphone_lane` picks the array
+microphone used by `single`: `0` to `6` is array microphone 1 to 7, and `-1`
+(the default) is automatic, the lowest-numbered speech microphone. It is
+persisted, applied at once, and kept while the mode is not `single`; a value
+outside `-1` to `6` is rejected with `400`. Only one array microphone can be
+chosen this way: USB and Bluetooth microphones are not available on this
+hardware (see `docs/MICROPHONE_ARCHITECTURE.md`). The beamformer keeps running in every
+mode, so the direction-of-arrival preview stays live; only the output
+changes. `volume_leveling` switches the audio engine's
 stock-style music automatic volume leveling (AVL) on or off. It is
 **experimental and off by default** (the current leveler can make loudness
 surge on some music; a stock-accurate rework is planned), persisted across
 restarts, and applies only to music (Bluetooth,
 media and AirPlay), never to announcements, alarms or system sounds. A
 non-boolean value is rejected with `400`.
+
+`reply_volume` (integer `0`–`100`) gives spoken assistant replies (local and
+Home Assistant), announcements and chimes their own level, separate from the
+music: audiod persists it and publishes it as
+`/run/libreecho-audio/reply.volume`, and the audio engine plays the system and
+announcement buses at that level on the same curve as the master, while music,
+other media and alarms keep `volume`. Master volume `0` still silences
+everything. `"reply_volume_custom": false` returns replies to following the
+master (the default; the runtime file is then absent). GET reports
+`reply_volume` (equal to `volume` while following), `reply_volume_custom`, and
+`notification_volume` as the level replies actually use. An out-of-range or
+non-integer `reply_volume`, a non-boolean `reply_volume_custom`, or
+`reply_volume_custom: true` without `reply_volume` is rejected with `400`
+before anything changes. Home Assistant sees the same level as the `Reply
+volume` number entity (config category, 0–100 %); setting it there sets a
+separate level. The audible effect needs a LibreEcho-Platform audio engine
+that reads `reply.volume` (0.14.6 and later); older engines ignore it.
 
 **Response:** Updated audio state (same as GET).
 
@@ -670,9 +712,11 @@ is aborted when the browser closes the connection.
 
 #### GET /api/v1/timers
 
-Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`
-or `alarm`), `state` (`pending` or `ringing`), `seconds_remaining`, and an
-optional `label`. The response also includes `ringing`, `missed`, and
+Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`,
+`alarm` or `reminder`), `state` (`pending` or `ringing`), `seconds_remaining`,
+and an optional `label`. A `reminder` also carries its `time` (local `HH:MM`)
+and `days`, and is never in the `ringing` state: the device speaks it at its
+time and it leaves the schedule, or moves to its next day when it repeats. The response also includes `ringing`, `missed`, and
 `available`. When `timerd` is absent, this GET still returns HTTP 200 with
 `available: false`, an empty `timers` array, and zero `ringing`/`missed`
 counts. Timer writes return the standard 503 unavailable response instead.
@@ -707,9 +751,176 @@ must be a nonzero decimal integer; malformed, ringing, out-of-range, missing,
 or already-cancelled IDs return HTTP 404 without removing another timer.
 Requires `X-LibreEcho-CSRF`.
 
+#### POST /api/v1/reminders
+
+Sets a spoken reminder and requires `X-LibreEcho-CSRF`. At its time the device
+plays a short chime and then says "Reminder: " followed by the label.
+
+```json
+{ "time": "08:00", "label": "take the pills", "days": "weekdays" }
+```
+
+`time`, `label` and `days` follow the rules for `POST /api/v1/alarms`, except
+that `label` is the spoken text. Leave `days` out for a one-off reminder, which
+fires at the next occurrence of `time` and then leaves the schedule. Success
+returns HTTP 201 with `{ "id", "time", "days", "due_epoch" }`. Reminders share
+the schedule and its 16-entry capacity, persist across restarts, and are listed
+on `GET /api/v1/timers` with `kind: "reminder"`. Cancel one with
+`DELETE /api/v1/timers/{id}`. A malformed body returns 400; an unset clock or a
+full schedule returns 409 with error code `busy`.
+
+#### GET /api/v1/alarms
+
+Returns the pending and ringing alarms, a subset of the shared timer schedule
+(`/timers` lists them too, with `kind: "alarm"`). Each entry has an `id`,
+`state` (`pending` or `ringing`), `time` (the local 24-hour `HH:MM` it rings
+at), `days` (the repeat days as a comma list, or `""` for a one-off),
+`due_epoch` (the same instant as Unix seconds), `seconds_remaining`, and an
+optional `label`. A repeating alarm's `time` is the time it is set for, even
+while a snooze has moved its `due_epoch`. `available` is `false` when `timerd`
+is absent.
+
+#### POST /api/v1/alarms
+
+Sets an alarm and requires `X-LibreEcho-CSRF`.
+
+```json
+{ "time": "07:00", "label": "wake up", "days": "weekdays" }
+```
+
+`days` is optional. Leave it out (or send `""`) for a one-off alarm. Otherwise
+send a comma list of lower-case names (`sun,mon,tue,wed,thu,fri,sat`), or one
+of `daily`, `weekdays`, `weekends`. A repeating alarm rings at its time on each
+of those days, in the device time zone, and after it rings or is stopped it
+moves to its next day rather than disappearing. Cancelling it removes the
+whole repeat. An unknown day list returns 400.
+
+`time` is required and must be `HH:MM` on a 24-hour clock (no seconds and no
+am/pm). It rings at the next occurrence of that time in the device time zone:
+if the time has passed today it is tomorrow, so an alarm is never in the past.
+`label` is optional, with the same rules as timer labels. Success returns HTTP
+201 with `{ "id", "time", "days", "due_epoch" }`. A malformed body or time returns 400.
+An unset clock (no network time yet), a full schedule, or a time-of-day that
+cannot be placed returns 409 with error code `busy`; retry once the clock is
+set. Alarms survive a restart: they are persisted with the other timers and
+restored once the clock is valid.
+
+#### DELETE /api/v1/alarms/{id}
+
+Cancels one pending alarm. The id must name an alarm: a countdown id, a
+ringing alarm, or an unknown id returns HTTP 404 and removes nothing. Use
+`/timers/dismiss` to silence a ringing alarm. Requires `X-LibreEcho-CSRF`.
+
+#### POST /api/v1/alarms/snooze
+
+Snoozes every ringing alarm for five minutes; it rings again then, and a
+repeating alarm keeps its days. Countdowns are not snoozed. Returns 200 with
+`{ "snoozed": n }`, where `n` is zero when no alarm was ringing. Requires
+`X-LibreEcho-CSRF`. The same snooze is available from the action button while
+an alarm rings, and by saying "snooze".
+
+#### GET /api/v1/alarms/sunrise
+
+Returns the sunrise wake light lead time as `{ "lead_minutes": n }`. Zero is
+off, the default. While an alarm is pending and inside its lead, the LED ring
+fades up from dark red to warm white over that many minutes, then holds warm
+white until the alarm is dismissed or snoozed. Voice, playback and other ring
+states keep priority over the fade.
+
+#### PUT /api/v1/alarms/sunrise
+
+Sets the lead time for every alarm. The body is a single top-level integer,
+`{ "lead_minutes": n }`, where `n` is 0 (off) or from 5 to 30. Anything else
+returns HTTP 400 and changes nothing. Returns 200 with the saved value. The
+setting is stored separately from the alarm schedule and survives restarts.
+Requires `X-LibreEcho-CSRF`.
+
+Alarms can also be set and cancelled by voice without a language model:
+"set an alarm for 7am", "wake me at seven thirty in the evening", "set an
+alarm for 6:30am on weekdays", "cancel my alarm", "snooze". Reminders work the
+same way: "remind me to take the pills at 6pm", "remind me every weekday at 8
+am to check the cooker", "cancel my reminder". A reminder's text runs from "to"
+to the last "at" in the request; a time without am or pm is asked about. A clock time
+without am or pm is asked about, not guessed. Snooze only does something while
+an alarm rings; otherwise the request goes to the language model as before.
+
 The timer page refreshes its status while open so countdowns and ringing state
 remain current. Timer state is persisted atomically with a restrictive
 permissions policy and is restored after the wall clock becomes valid.
+
+### Owner sounds
+
+The owner can replace three device sounds with their own (#410). Nothing
+changes until a sound is uploaded: with no upload every event keeps its
+built-in sound.
+
+| Event | Plays | Built-in sound | Longest sound |
+|---|---|---|---|
+| `wake` | when the local assistant starts listening | the short chirp | 1000 ms |
+| `end` | when the local assistant stops listening | none | 2000 ms |
+| `timer` | while a timer or alarm rings | the two-tone ring | 5000 ms |
+
+The `wake` and `end` chimes belong to the local assistant pipeline. The Home
+Assistant (ESPHome) path stays visual-only, as before. A timer sound longer
+than the two-second ring period plays back to back. Dismissing the timer stops
+it: the writer ends on a faded chunk, and what is already queued for the
+speaker (at most about a third of a second) plays out. The speaker can take
+about 1.5 seconds to wake from idle; a longer sound waits for it and then plays
+in full.
+
+Sounds are stored as 48 kHz mono files (`sound-<event>.raw`, mode 0600)
+directly in `/data/libreecho/config`. They survive reboots and OTA updates,
+are included in a device backup and are removed by a factory reset. They are
+not part of the JSON configuration export.
+
+#### GET /api/v1/sounds
+
+Returns `rate`, `format` (`"wav"`), `max_upload_bytes` and a `sounds` array.
+Each entry has `id`, `name`, `selected` (`custom` or `default`), `uploaded`,
+`duration_ms` of the uploaded sound, `max_ms` and `default` (the built-in
+sound).
+
+#### PUT /api/v1/sounds/{event}
+
+Uploads the owner's sound and selects it. The body is a WAV file sent as-is
+(`Content-Type: audio/wav`). It must be 16-bit integer PCM, mono or stereo,
+8000-48000 Hz, and no larger than 1 MiB. It is averaged to mono, resampled to
+48 kHz and stored atomically. This route streams past the 16 KiB API body
+limit like the OTA upload, one upload at a time. It requires
+`X-LibreEcho-CSRF`.
+
+```sh
+curl -X PUT -H "X-LibreEcho-CSRF: $CSRF" -H 'Content-Type: audio/wav' \
+     --data-binary @chime.wav http://echo.local:8080/api/v1/sounds/wake
+```
+
+Invalid files are rejected and the stored sound is left unchanged:
+
+- 400 `invalid_sound`: not WAV, or not 16-bit PCM mono or stereo at 8-48 kHz
+- 413 `sound_too_long`: longer than the event allows
+- 413 `sound_size`: larger than 1 MiB
+- 404: unknown event
+- 409 `busy`: another upload is running
+
+The web UI also accepts Opus, Ogg, MP3 and anything else the browser can
+decode. It converts the file to WAV in the browser before uploading.
+
+#### POST /api/v1/sounds/{event}/select
+
+`{ "selected": "custom" }` or `{ "selected": "default" }`. Switching to
+`default` keeps the uploaded sound so it can be selected again. Selecting
+`custom` with nothing uploaded returns 409. Requires `X-LibreEcho-CSRF`.
+
+#### POST /api/v1/sounds/{event}/preview
+
+Plays the uploaded sound on the device, whether or not it is selected.
+Returns 409 when nothing is uploaded or another sound is still playing.
+Requires `X-LibreEcho-CSRF`.
+
+#### DELETE /api/v1/sounds/{event}
+
+Removes the uploaded sound. The event goes back to its built-in sound.
+Requires `X-LibreEcho-CSRF`.
 
 ### Voice assistant
 
@@ -728,6 +939,7 @@ includes the persisted `listening` object and the latest bounded restart state:
   "max_utterance_ms": 6000,
   "end_silence_ms": 1500,
   "vad_floor_rms": 45,
+  "noise_suppression": false,
   "restart": {
     "state": "ready",
     "error": ""
@@ -740,6 +952,15 @@ includes the persisted `listening` object and the latest bounded restart state:
 read from the same persisted `web-config.json` used by `libreecho-sttd`; they
 are not inferred from the web daemon's environment.
 
+`noise_suppression` (boolean, default `false`, stored as
+`voice_noise_suppression`) runs an on-device steady-noise suppressor on the
+speech sent to the assistant: the audio `libreecho-esphomed` streams to Home
+Assistant and the audio the local pipeline in `libreecho-agentd` sends to
+speech recognition. It is a short-time Wiener filter (256-point frames, 15 dB
+deepest cut, 16 ms added delay) that runs after echo cancellation; the wake
+word keeps hearing the unsuppressed audio. Changing it restarts the voice
+pipeline like the other listening fields.
+
 #### PUT /api/v1/voice-pipeline
 
 Updates the pipeline mode and optional Wyoming settings. The listening fields
@@ -750,7 +971,8 @@ are writable here and are validated before any setting is committed:
   "mode": "local",
   "max_utterance_ms": 6000,
   "end_silence_ms": 1500,
-  "vad_floor_rms": 45
+  "vad_floor_rms": 45,
+  "noise_suppression": true
 }
 ```
 
@@ -838,7 +1060,9 @@ does not restart the voice pipeline.
 Returns assistant configuration, ChatGPT device-login state, pipeline
 connectivity, local STT timing, and first-audio latency telemetry. The
 returned configuration includes `clock_format`, the format used when the time
-is spoken aloud. The latency measurement is from the estimated end of speech to
+is spoken aloud, and `stop_without_wake` (see below). `stop_listening` is true
+while a wake-free stop window is open; `stop_windows` and `stops_heard` count
+the windows opened and the stops acted on since agentd started. The latency measurement is from the estimated end of speech to
 the first PCM submitted to the announcement bus; the current target is 3000 ms.
 
 #### GET /api/v1/live
@@ -924,6 +1148,7 @@ Updates the provider-neutral assistant configuration:
   "provider": "openai-codex",
   "model": "gpt-5.4",
   "clock_format": "12",
+  "stop_without_wake": false,
   "prompt": "Reply in concise, natural spoken English without markdown."
 }
 ```
@@ -937,6 +1162,21 @@ an external action succeeded without tool confirmation.
 device that has never stored a choice receives it, while an explicit `"12"` or
 `"24"` is kept. Any other value is rejected with HTTP 400 and the previous
 configuration is left unchanged.
+
+`stop_without_wake` (boolean, default `false`) lets a bare "stop" end a ringing
+timer or alarm, or a reply that is playing, without the wake word first. Only
+while one of those is sounding, agentd keeps short wake-free recognition windows
+open on the on-device recogniser (sttd's Zipformer). A window's transcript is
+never a turn: unless the whole utterance is one of the local stop phrases
+("stop", "stop the timer", "quiet", "dismiss the alarm", ...) it is dropped
+without being logged, kept or sent anywhere. A heard stop dismisses every
+ringing timer and alarm and cancels the reply; music and pending timers are left
+alone, as the wake-word stop does while something rings. It appears in the voice
+history as a completed turn. With a Wyoming (`custom` pipeline) recogniser no
+window is ever opened, because that would carry room audio to another machine;
+in Home Assistant mode agentd is not running and the wake word is still needed.
+The listening ring does not light for a stop window. A non-boolean value is
+rejected with HTTP 400.
 
 `home_location`, `latitude` and `longitude` place the device for weather and
 local answers: the place name is what the assistant says back, the coordinates
@@ -1137,6 +1377,35 @@ correct or the window fires at the wrong hour. See
 `PUT /api/v1/system/timezone`. Current state is reported by `GET /api/v1/led`
 under `night`, including whether the cap is currently `active`.
 
+#### GET /api/v1/dnd
+
+Reports the do-not-disturb switch.
+
+```json
+{ "ok": true, "data": { "enabled": false }, "error": null }
+```
+
+#### PUT /api/v1/dnd
+
+Turns do-not-disturb on or off. The choice is saved in the web configuration
+(`do_not_disturb`) so it survives a reboot, and applied at once:
+
+- **Sounds:** audiod drops chimes, press tones, wake chirps and action samples.
+  The reply is still `ok` with `"suppressed": true` on the audio command. Timer
+  alarms are sent as priority and still ring.
+- **Home Assistant announcements:** esphomed acknowledges an announcement as
+  finished without playing it while the switch is on.
+- **Ring:** the ring shows the saved do-not-disturb theme as a steady pattern
+  owned by `dnd`. Turning the switch off clears it.
+
+Body: `{ "enabled": true }`. A non-boolean `enabled` is `400`. A failed apply
+returns `503` and nothing is saved. The wake word and assistant replies are not
+silenced by this switch.
+
+```json
+{ "enabled": true }
+```
+
 ### Network
 
 #### GET /api/v1/network
@@ -1234,6 +1503,8 @@ false.
   "hostname": "myecho",
   "ssh": false,
   "api_lan": true,
+  "discoverable": true,
+  "nearest_answers": false,
   "wifi_mac": "<six hexadecimal octets>",
   "bt_mac": "<six hexadecimal octets>"
 }
@@ -1251,6 +1522,269 @@ The response fields `wifi_mac` and `bt_mac` report live interface values;
 `*_factory` reports board identity values when available; and `*_configured`
 reports persisted overrides. Empty strings mean that a value is unavailable or
 unset.
+
+`discoverable` (default `true`, persisted, also reported by `GET
+/api/v1/network`) lets other LibreEcho devices list this one. While it is on
+and the HTTP listener is reachable from the LAN (any bind other than
+loopback), the web daemon holds a `_libreecho._tcp` lease on the
+shared `libreecho-mdnsd` responder. The record's instance name is the
+hostname; its TXT records are `version` (LibreEcho version), `room` (may be
+empty) and `path=/`. Turning it off withdraws the record within a few seconds.
+A hostname or room change is re-advertised within about five seconds.
+
+`nearest_answers` (default `false`, persisted, also reported by `GET
+/api/v1/network`, exported and imported with the configuration) makes only
+the nearest device answer when several hear the wake word (#408). It works
+only while this device is paired (see Device pairing below); turn it on on
+every paired device that should take part. On each wake, `libreecho-waked`
+broadcasts a signed claim (LESIG1 type `wake.claim`, UDP port 6054 on the
+local network) with the wake word's level, waits 450 ms for the other
+devices' claims, and passes the wake to the voice assistant only when no
+claim is louder. A device that hears a claim from more than 150 ms before its
+own wake treats that turn as taken and stays quiet. Claims that are not
+signed with this house key, are replayed, or are more than 30 s off this
+device's clock are ignored, so an unpaired device can never silence a paired
+one. waked re-reads the switch and the key every two seconds. Its `status`
+command reports `nearest_answers` with `enabled`, `paired`, `active`, `won`,
+`yielded`, `heard` and `rejected`. A device whose own voice assistant is not
+set up should be left off: it would still win a turn it cannot answer.
+
+#### GET /api/v1/network/peers
+
+Lists LibreEcho devices on the local network, with a link to each control
+centre (#413). The daemon sends one DNS-SD browse for `_libreecho._tcp.local`
+as an mDNS legacy-unicast query and collects answers for one second; repeated
+requests within three seconds reuse the last answer. At most 16 devices are
+returned; `truncated` is true when more answered. A device that answers
+without an SRV record (port) is not listed. `self` marks this device's own
+record: one that points at one of this device's IPv4 addresses and its HTTP
+port (not a hostname match, since Avahi renames a clashing record). `advertising` is true while this device holds its own lease.
+
+`paired` and `key_id` describe this device's house key (see Device pairing
+below). Each device has a `trust` value. While this device is paired, every
+other listed device is asked for a signed proof, all in parallel and at most
+0.8 s in total:
+
+| `trust` | Meaning |
+|---|---|
+| `off` | This device is not paired. Nothing is checked or sent. |
+| `self` | This device. |
+| `paired` | Answered with a valid proof signed with this house key. |
+| `unpaired` | Answered, but has no house key, has another one, or runs a version without pairing. |
+| `failed` | No answer, or a proof that did not verify (forged, replayed or relayed). |
+
+GET only; other methods answer 405. 503 `io_error` means no socket could be
+opened to search.
+
+**Response:**
+```json
+{
+  "ok": true,
+  "data": {
+    "discoverable": true,
+    "advertising": true,
+    "devices": [
+      {
+        "name": "kitchen-echo", "room": "Kitchen", "version": "0.14.6",
+        "address": "192.0.2.20", "port": 8080,
+        "url": "http://192.0.2.20:8080/", "self": false, "trust": "paired"
+      }
+    ],
+    "truncated": false
+  },
+  "error": null
+}
+```
+
+#### Device pairing and signed device-to-device traffic (#450)
+
+Devices in one home share a 32-byte **house key**. The owner creates it on one
+device and enters its pairing code on the others. A device without the key
+signs nothing and trusts no device. This is off until the owner pairs a
+device.
+
+The key is stored in `peer.key` beside the configuration file (mode 0600,
+temp file + fsync + rename, no backup copy). It is not part of the
+configuration export or any GET answer. `key_id` is a fingerprint of the key
+(the first 4 bytes of HMAC-SHA256(key, "LibreEcho key id v1"), in hex). It is
+the same on every device paired with that key and does not reveal the key.
+
+**GET /api/v1/network/pairing** returns `{"supported", "paired", "key_id"}`.
+
+**POST /api/v1/network/pairing** (CSRF required):
+- `{"action":"create"}` makes a new random key and returns it once as `code`
+  (16 groups of 4 hex digits).
+- `{"action":"join","code":"..."}` takes the code from another device. Any
+  case is accepted, with `-` or spaces between digits.
+- `{"action":"show"}` returns `code` again so another device can join.
+
+A paired device answers 409 to `create` and `join` until it is unpaired.
+Unknown fields and bad codes answer 400.
+
+The pairing endpoints follow the API's normal authentication. On a device
+with no web login and LAN API access on, anyone on the network can call
+`show` and read the house key, and with it pose as any paired device. Set up
+a login on every paired device.
+
+The trust label belongs to the device's address and port (the one the list
+opens), not to the advertised name: the device list still shows the name,
+room and version from discovery.
+
+**DELETE /api/v1/network/pairing** unpairs this device and removes the key.
+
+**GET /api/v1/peer/proof?nonce=&lt;32 lowercase hex&gt;** is the one
+device-to-device endpoint that needs no session. Another device asks with a
+fresh nonce. The answer `data` holds `key_id`, `type` (`peer-proof`), `ts`,
+the same `nonce`, `name`, `room`, `version`, `host` and `mac`. It is answered
+only when `Host` is one of this device's IPv4 addresses and its plain HTTP
+port. The asker checks that the signed `host` is the address it connected to,
+so a machine that relays a real device's proof under its own address is
+caught. The nonce makes every proof single use, so the clocks do not have to
+agree. An unpaired device answers 409 `not_paired`. A bad nonce or a foreign
+Host answers 400. Other methods are not exempt from authentication.
+
+**Message authentication.** All device-to-device messages use one MAC (`src/peer_auth.h`):
+
+```
+mac_key = HMAC-SHA256(house_key, "LibreEcho peer mac v1")
+mac     = HMAC-SHA256(mac_key, "LESIG1\n" type "\n" ts "\n" nonce "\n" body)
+```
+
+`type` is `[a-z0-9.-]{1,32}`, `ts` is decimal Unix seconds and `nonce` is 32
+lowercase hex digits. A distinct `type` per message kind keeps a signature
+for one kind from being accepted as another. For the proof, the body is
+`name`, `room`, `version` and `host` joined by `\n`. These fields cannot hold
+control characters. Channels that carry raw packets (arbitration, intercom
+control and groups, when they arrive) use the sealed form
+`LESIG1 <key_id> <type> <ts> <nonce> <mac>\n<body>`. The receiver checks the
+key id, the MAC (constant time), the type and a time window, and keeps a
+64-entry replay cache. That cache fails closed: when it is full of in-window
+messages, anything as old as an evicted entry is refused.
+
+#### Device groups and group control (#448)
+
+An owner groups LibreEcho devices and sends one command to the whole group.
+Groups are kept on the device that made them, in `peer-groups` beside the
+configuration file (mode 0600, written atomically). A member is a device as
+shown in the device list (#413): its IPv4 `address` and HTTP `port`, and a
+display `name`. A device holds at most 8 groups of 8 members each.
+
+**GET /api/v1/network/groups** returns `{"groups": [{"id", "name", "members": [{"address", "port", "name"}]}]}`.
+
+**POST /api/v1/network/groups** (CSRF required) with `{"name"}` creates an empty
+group (1 to 47 characters, no control characters) and returns the list.
+
+**DELETE /api/v1/network/groups/{id}** removes a group and returns the list.
+
+**POST /api/v1/network/groups/{id}/members** (CSRF required) with `{"address", "port", "name"}`
+adds a device. A bad IPv4 address, a port outside 1 to 65535, an empty name, a
+full group or a device already listed answers 400.
+
+**POST /api/v1/network/groups/{id}/command** (CSRF required) with
+`{"action": "mute" | "unmute" | "stop"}` sends the command to every member.
+`mute` and `unmute` set the microphone mute. `stop` stops speech and radio
+playback. A member on this device is applied directly. Every other member gets
+a signed packet, `POST /api/v1/peer/command`, of type `group-command`, sealed
+with the house key (#450). The answer holds one `result` per member:
+
+| `result` | Meaning |
+|---|---|
+| `applied` | The member verified the packet and applied the command. |
+| `unpaired` | The member has no house key, another key, or runs older firmware. |
+| `failed` | The member answered, but not with a successful result. |
+| `unreachable` | No answer inside the fan-out budget (about 2 seconds for the whole group). |
+
+The owner must be paired (409 `not_paired` otherwise). The answer holds
+`{"group", "action", "members": [...], "applied", "total"}`.
+
+**POST /api/v1/peer/command** is device-to-device and needs no session or CSRF
+token, like the proof endpoint; the signed packet is its credential. The body is the sealed packet
+`LESIG1 <key_id> group-command <ts> <nonce> <mac>` newline and then the action
+name. A packet that does not verify, falls outside a 300 second window or was
+already accepted answers 401 `not_verified`. A device without a key answers
+409 `not_paired`. Other methods are not exempt from authentication. The clocks
+must agree within the window; a device whose clock is far off reports
+`unreachable` or `unpaired`, never a silent success.
+
+#### Copy settings between devices (#449)
+
+An owner copies the settings of one device to another paired device in one
+step. The device the owner is on is the source; the target is a device from
+the device list. Only these groups can be chosen, and only these keys are sent
+or applied:
+
+| Group | Keys |
+|---|---|
+| `voice` | `wake_word`, `wake_sensitivity`, `stt_max_utterance_ms`, `stt_end_silence_ms`, `stt_vad_floor_rms` |
+| `audio` | `volume`, `microphone_gain` |
+| `ha` | `home_assistant_url` (sent only when this device has one set) |
+| `led` | `led_brightness`, `led_visualizer_enabled`, `button_action_brightness`, `button_mute_brightness` |
+
+Never copied: identity and network (hostname, MAC addresses, Wi-Fi, room,
+timezone), SSH and API exposure, privacy, feature switches, buttons, appearance,
+accounts, passwords, tokens and the ESPHome key. Each device keeps its own.
+
+**POST /api/v1/network/settings/copy** (CSRF required) with
+`{"address", "port", "voice", "audio", "ha", "led"}`. The group flags are
+optional booleans; at least one must be `true`. The address must be IPv4 and not
+this device. This device must be paired (409 otherwise), and a group with
+nothing to send answers 409. The answer holds `{"result", "groups", "address", "port"}`
+with `result` one of:
+
+| `result` | Meaning |
+|---|---|
+| `applied` | The target verified the packet and applied every listed key. |
+| `unpaired` | The target has no house key, another key, or runs older firmware. |
+| `failed` | The target answered, but not with a successful result. |
+| `unreachable` | No answer inside about 3 seconds. |
+
+**POST /api/v1/peer/settings** is device-to-device and needs no session or CSRF
+token; the signed packet is its credential. The body is the sealed packet
+`LESIG1 <key_id> settings-copy <ts> <nonce> <mac>`, newline, then a flat JSON
+object of setting values (for example `{"volume":33,"led_brightness":35}`).
+The target checks the packet (house key, 300 second window, replay cache) and
+then every listed key. A key outside the table above is ignored; a listed key
+with a wrong type or a value out of range refuses the whole packet with 400, and
+nothing is changed. A packet that does not verify answers 401 `not_verified`, and
+a device without a key answers 409 `not_paired`.
+
+**POST /api/v1/network/broadcast** (CSRF required) speaks a short text on every
+paired device (#412, first slice). The body is `{"text"}`, 1 to 240 UTF-8 bytes
+with no control characters. With `{"text", "address", "port"}` the text goes to
+that one device only. Without an address the device searches the LAN, checks
+which devices are paired (the device list's check, not cached), and sends to each
+paired device other than itself; this device speaks the text too. The answer holds
+`{"this_device", "devices", "sent", "applied", "skipped", "truncated"}`.
+`this_device` is `applied`, `not_supported`, `failed`, or `not_included` for a
+single-device send. Each entry of `devices` is `{"name", "address", "port", "result"}`
+(a single-device send lists its one target without a name) with `result` one of:
+
+| `result` | Meaning |
+|---|---|
+| `applied` | The target verified the packet and spoke the text. |
+| `not_supported` | The target verified the packet but has no speaker. |
+| `unpaired` | The target has no house key, another key, or runs older firmware. |
+| `failed` | The target answered, but not with a successful result. |
+| `unreachable` | No answer inside the fan-out budget (about 3 seconds). |
+
+Devices of another house and devices that are off are counted in `skipped` or
+reported as `unreachable`. The packet is signed with the house key but not
+encrypted: the text is spoken aloud on each receiving device, so do not put
+secrets in it. Do-not-disturb, two-way calls, Drop In and voice-started calls
+are not part of this slice.
+
+**POST /api/v1/peer/announce** is device-to-device and needs no session or CSRF
+token; the signed packet is its credential. The body is the sealed packet
+`LESIG1 <key_id> announcement <ts> <nonce> <mac>`, newline, then the text. The
+target checks the packet (house key, 300 second window, replay cache) and the
+text (1 to 240 bytes, no control characters). A packet that does not verify
+answers 401 `not_verified`; a device without a key answers 409 `not_paired`; a
+bad text answers 400; a verified announcement answers 200 `{"spoken": true}`
+or, on a device with no speaker, 501 `not_supported`.
+
+Grouping is a first slice. Devices can be grouped and commanded from the
+device API. Ring and volume commands, the Web UI for groups, and Home Assistant
+entities for each group are not in this release.
 
 #### GET /api/v1/network/wifi/scan
 
@@ -1366,6 +1900,8 @@ state. The hardware clock is maintained in UTC.
       "rollback_available": false
     },
     "timezone": "UTC",
+    "timezone_name": "",
+    "timezone_source": "manual",
     "boot_estimate_seconds": null,
     "ntp": true,
     "ntp_state": "synchronized",
@@ -1607,21 +2143,44 @@ trust decision before uploading.
 
 #### GET /api/v1/system/timezone
 
-Returns the configured timezone.
+Returns the configured timezone, the IANA name it was picked as, and who sets it:
+
+```json
+{ "timezone": "GMT0BST,M3.5.0/1,M10.5.0", "name": "Europe/London", "source": "manual" }
+```
+
+`name` is `""` when unknown (an older client, or a zone Home Assistant sent).
+`source` is `manual` or `home_assistant`.
 
 #### PUT /api/v1/system/timezone
 
 Sets the timezone as a POSIX TZ string, for example `CST6CDT,M3.2.0,M11.1.0`.
 There is no zoneinfo database on the device, so Olson names such as
-`America/Chicago` are **not** accepted; busybox honours `TZ` from the
-environment and that is what this sets.
+`America/Chicago` are **not** accepted as `timezone`; the web UI maps them
+with its own table (`web/js/timezones.js`, generated from tzdata by
+`tools/generate-timezones.py`). `name` optionally records the IANA name so the
+picker can show it again; it is cleared when omitted.
 
 ```json
-{ "timezone": "CST6CDT,M3.2.0,M11.1.0" }
+{ "timezone": "CST6CDT,M3.2.0,M11.1.0", "name": "America/Chicago", "source": "manual" }
 ```
 
-Daemons read `TZ` when they start, so the response reports
-`"applies": "after restart"`. Anything that is not a plausible TZ string is
+Angle-bracket names, as tzdata and Home Assistant write zones without a letter
+abbreviation (`<+04>-4`), are stored with letters instead (`LST-4`, and `LDT`
+for a second name): the offsets and rules are unchanged, only the abbreviation
+`%Z` prints differs, and the initramfs only exports plain characters as `TZ`.
+
+`"source": "home_assistant"` makes esphomed take the zone Home Assistant
+reports over the ESPHome connection (GetTimeResponse, sent for HA's configured
+zone) and store it as `timezone`, with `name` cleared. `timezone` is optional
+then: the current zone stays in use until HA reports one. While HA is the
+source, the zone in `web-config.json` is authoritative and is never
+overwritten by the web daemon's copy.
+
+The daemons that render local time (LED night mode, the assistant's clock, the
+live-session time tool) follow the stored zone within seconds, so the
+response reports `"applies": "now"`; every other daemon gets it as `TZ` at the
+next boot. Anything that is not a plausible TZ string, name or source is
 rejected with 400 rather than written.
 
 #### GET /api/v1/system/features
@@ -1727,6 +2286,41 @@ switch is register writes only and returns immediately.
 ```
 
 The listener binds at startup, so the change is stored and applies after a restart; disabling it also removes the persisted sessions.
+
+### HTTPS certificate and private CA
+
+Both routes need the CSRF header on writes. Each returns the usual envelope; a
+failed write changes nothing on disk. On builds without TLS (`tls_available`
+false) every write answers 501.
+
+**`GET /api/v1/https/certificate`** returns `tls_available`, `custom` (an owner
+certificate is installed), `https_expires` and `https_fingerprint` for the
+certificate in use. The private key is never returned.
+
+**`PUT /api/v1/https/certificate`** takes `{"certificate_pem": "...", "private_key_pem": "..."}`.
+The certificate must parse, the key must be unencrypted and match it, and the
+certificate must not have expired; otherwise the answer is 400. A valid pair
+replaces the self-signed certificate in the configuration directory. New TLS
+connections use it immediately, and boot keeps it rather than regenerating a
+self-signed pair while the custom marker exists.
+
+**`DELETE /api/v1/https/certificate`** removes the owner certificate and generates a
+new self-signed pair.
+
+**`GET /api/v1/https/private-ca`** returns `configured`.
+
+**`PUT /api/v1/https/private-ca`** takes `{"ca_pem": "..."}` with one or more CA
+certificates (basic constraints CA:TRUE). The system roots and the CA are written
+to `trust-bundle.pem` in the configuration directory, so the CA is added to the
+roots and never replaces them. Verification stays on. News refresh reads the bundle
+right away; the LLM agent, live voice and Home Assistant services (`agentd`,
+`lived`, `esphomed`) read it when they next start.
+
+**`DELETE /api/v1/https/private-ca`** removes the CA and the bundle built from it.
+
+The web UI does not yet have a certificate page; these routes are the supported
+path for now. Radio streams and OTA downloads are outside this change (see the
+release notes).
 
 ### Configuration
 
@@ -2036,7 +2630,8 @@ reports `Alexa` and accepts only `Alexa` or `alexa` through its existing
 `set_word` command; LibreEcho, Computer, Echo and Custom model are not installed
 choices. Unsupported selections fail rather than switching models. The web UI
 therefore displays the adapter-reported word read-only and saves sensitivity
-only. There is no model upload, training or phrase-selection flow here.
+only. Owner-staged models are managed by the endpoints below; training is not
+part of this API.
 
 Custom voice mode selects STT/TTS engines, not another wake model. Home
 Assistant can select or disable the installed Alexa model through the ESPHome
@@ -2044,6 +2639,66 @@ native API; its `esphome_active_wake_word` setting is separate from saved
 Local/Custom preferences. The web page reports the wake adapter, not that HA
 selection or proof that voice capture is active. Existing settings are not
 migrated or rewritten by viewing the page or saving sensitivity.
+
+#### Owner-staged wake models
+
+An owner-staged model is a folder under `/data/libreecho/wakeword-models/<name>/`
+holding `melspectrogram.onnx`, `embedding_model.onnx` and `alexa_v0.1.onnx` (the
+classifier, whatever the word is). The contract is in
+`docs/wake-word-training.md` in the product repository. The stock model is
+always installed and remains the default. Folder names may use letters, digits,
+`.`, `_` and `-`, may not start with `.`, may be 63 characters at most, and
+`alexa_v0.1` is reserved for the stock model.
+
+Uploads are chunked because a request body is capped at 16 KiB: each file is
+sent as base64 chunks that decode to at most 8192 bytes, each file is at most
+8 MiB, and a chunk's `offset` must equal the bytes already staged for that file.
+Nothing is installed until `commit` passes.
+
+`GET /api/v1/wake-word/models` lists committed folders with validation results:
+
+```json
+{
+  "ok": true,
+  "data": {
+    "stock": {"name": "alexa_v0.1", "wake_word": "Alexa"},
+    "selected": "my-word",
+    "selection_error": false,
+    "models": [
+      {"name": "my-word", "valid": true, "reason": "", "bytes": 2650112, "selected": true}
+    ],
+    "truncated": false,
+    "limits": {"files": 3, "file_bytes_max": 8388608, "chunk_bytes_max": 8192}
+  },
+  "error": null
+}
+```
+
+`PUT /api/v1/wake-word/model` with `{"model": "my-word"}` selects a committed
+folder; `{"model": "alexa_v0.1"}` or `{"model": ""}` selects the stock model. The
+response carries `restart_required: true`: the wake service reads the selection
+when it starts, so the change applies after a reboot or
+`/etc/init.d/libreecho-waked.init restart`. A folder that fails the check cannot
+be selected (`400`), and a missing one returns `404`.
+
+`POST /api/v1/wake-word/models/{name}/files/{file}` with
+`{"offset": 0, "data": "<base64>"}` stages one chunk. `file` is one of the three
+names above.
+
+`POST /api/v1/wake-word/models/{name}/commit` checks the staged files and moves
+the folder into place. The check covers the names and sizes of the three files,
+the graph input and output names, the operators, opset 13 and Sigmoid output of
+the classifier, and the absence of external weight data. A folder that fails is
+discarded and the `422` response says why. Shapes are not checked here; the
+detector refuses a model it cannot load and falls back to the stock model.
+
+`DELETE /api/v1/wake-word/models/{name}` removes a folder. The selected folder
+cannot be removed (`409`); select the stock model first.
+
+The wake status reports the loaded model: `wake_word` is `Alexa` for the stock
+model and the folder name for an owner-staged one, and `model` is `alexa_v0.1` or
+the folder name. Detection events carry at most 23 characters of the name. The
+ESPHome/Home Assistant wake selection still reports and accepts only `Alexa`.
 
 #### POST /api/v1/wake-word/test
 
@@ -2109,17 +2764,42 @@ the action-button ring flash.
 Update any supported button setting. The request is persisted after every
 successful update. `tones` controls the short rising/falling press cues;
 `action` controls the separate action-button behavior, and `action_brightness`
-and `mute_brightness` are LED-ring brightness values from 0 to 100. The
-wired actions are `sound` and `noise`; `listen`, `playpause`, and `disabled` are
-accepted settings with the corresponding behavior reported by the daemon.
-`noise` makes the action button a sleep-sound switch: a press while no sleep
-sound is playing starts white noise with no timer (level 40), and a press while
-any sleep sound is playing stops it.
+and `mute_brightness` are LED-ring brightness values from 0 to 100. `action`
+is one of `sound`, `noise`, `listen`, `playpause` or `disabled`:
+
+- `sound` plays the next sound in `action_sounds`.
+- `noise` makes the action button a sleep-sound switch: a press while no sleep
+  sound is playing starts white noise with no timer (level 40), and a press
+  while any sleep sound is playing stops it.
+- `listen` starts a voice request as if the wake word had been heard
+  (push-to-talk), in whichever voice mode is active: on-device, Home Assistant
+  or a live session. `libreecho-waked` publishes the same `wake_detected` event
+  a detection does, with `model` set to `button`, and lights the listening
+  ring. While the microphone is muted the press is refused with a low tone and
+  a ring flash, since the request could not hear anything.
+- `playpause` pauses internet radio and resumes it on the next press. A sleep
+  sound has no pause, so it is stopped and the next press starts it again with
+  the same source, bed and level (without its timer). AirPlay and Bluetooth are
+  controlled from the phone; with only those playing, or nothing at all, the
+  press is refused with a low tone and a ring flash.
+- `disabled` does nothing.
+
+`action_long` is what holding the action button does: `same` (the default) or
+any `action` value. With `same` there is no separate long press and the button
+acts the moment it is pressed, as before. With any other value a press held
+for 800 ms runs `action_long` while the button is still down, and a shorter
+press runs `action` when the button is released.
+
+Whatever the action, a press while a Home Assistant voice request is in
+progress (listening, thinking or replying) cancels that request instead; a
+`disabled` button stays inert. See `docs/HOME_ASSISTANT_VOICE.md`.
 `action_sounds` is a comma-separated list of installed sound names in rotation
 order. Each name follows the same 1–48-character lowercase-name rule as the
 preview endpoint; an empty string is valid and means no sound is played.
 At least one recognized button field is required. The legacy `short_press` and
-`long_press` strings are limited to 31 bytes each. Missing settings, malformed
+`long_press` strings are limited to 31 bytes each; they are stored and returned
+for compatibility, but no daemon acts on them and the web UI no longer offers
+them: `action` and `action_long` are the action button's short and long press. Missing settings, malformed
 fields, unsupported actions, and brightness values outside 0–100 return the
 standard 400 error envelope. If persistence fails, the API returns 503 and the
 previous in-memory preferences remain active.
@@ -2131,6 +2811,7 @@ previous in-memory preferences remain active.
   "long_press": "Open pairing mode",
   "tones": true,
   "action": "sound",
+  "action_long": "same",
   "action_sounds": "action-1,action-2,action-3",
   "action_brightness": 70,
   "mute_brightness": 60
@@ -2153,6 +2834,7 @@ previous in-memory preferences remain active.
     "stale": true,
     "tones": true,
     "action": "sound",
+    "action_long": "same",
     "action_sounds": "action-1,action-2,action-3",
     "available_sounds": ["action-1", "action-2", "action-3"],
     "action_brightness": 70,
@@ -2162,9 +2844,10 @@ previous in-memory preferences remain active.
 }
 ```
 
-Configuration export/import includes `button_action_sounds` alongside the other
-button settings. Imports from older exports may omit it; omitted values retain
-the current setting, while any present value is validated and restored.
+Configuration export/import includes `button_action_sounds` and
+`button_action_long` alongside the other button settings. Imports from older
+exports may omit them; omitted values retain the current setting, while any
+present value is validated and restored.
 
 ### Bluetooth
 
@@ -2202,6 +2885,9 @@ Update one controller setting:
 
 `discoverable` and `connectable` can also be supplied as booleans. Enabling
 the controller is explicit and is limited to one activation attempt per boot.
+A successful `enabled` change is saved as the `bluetooth` integration (the same
+setting as `PUT /api/v1/integrations/bluetooth`), so it survives a reboot; if
+the save fails the response is 503 `io_error`.
 
 #### POST /api/v1/bluetooth/pairing-mode
 
@@ -2340,6 +3026,38 @@ mutations persist atomically using the existing `0600` configuration store.
 
 ### Integrations
 
+#### GET /api/v1/voice/clips
+
+Lists wake near-miss clips. A near miss is a wake score that reaches the
+near-miss floor (0.35) with speech present but stays under the detection
+threshold. Clip capture is off by default. The response reports
+`near_miss_enabled`, `count`, `bytes`, the store `limits` (`max_count` 32,
+`max_bytes` 4 MiB, `max_samples` 32768, `sample_rate` 16000) and the clips
+newest first as `{id, kind, created, bytes}`. Clips are kept under
+`/data/libreecho/voice-clips` as 16 kHz mono WAV files at mode 0600, and the
+oldest are removed first when a bound is reached.
+
+#### PUT /api/v1/voice/clips
+
+Enables or disables near-miss clip capture. Requires `X-LibreEcho-CSRF`.
+Body: `{"near_miss_enabled": true}`. Disabling stops new clips; saved clips
+stay until deleted. A non-boolean value returns 400.
+
+#### GET /api/v1/voice/clips/{id}
+
+Downloads one clip as `audio/wav`. This is the only response that is not a JSON
+envelope. An unknown or malformed id returns 404 with the JSON error envelope.
+
+#### DELETE /api/v1/voice/clips/{id}
+
+Deletes one clip. Requires `X-LibreEcho-CSRF`. Returns 404 when the clip does
+not exist.
+
+#### POST /api/v1/voice/clips/clear
+
+Deletes every saved clip. Requires `X-LibreEcho-CSRF`. Returns
+`{"removed": N}`.
+
 #### GET /api/v1/spotify
 
 Returns the current Spotify Connect status. This endpoint is read-only; `HEAD`
@@ -2401,7 +3119,9 @@ is not yet listening), `waiting` (listening and advertised over mDNS, no server
 connected), `connected` or `playing`. The other fields come from the running
 player: `volume` is `null` while it is not running, `server` is the connected
 server's JSON-escaped name or `null`, and `paired` is true when that server
-connected with a stored pairing. Status never contains pairing material.
+connected with a stored pairing. `unpaired_access` is the play-without-pairing
+choice (see `PUT /api/v1/sendspin/unpaired-access`); it is kept while the player
+is stopped. Status never contains pairing material.
 
 Sendspin volume is the device volume: a server volume change is applied like
 the volume buttons, and local changes are reported back to the server. A
@@ -2423,6 +3143,25 @@ like every changing request.
 
 The token is never part of status, logs or configuration export, and clients
 must not store it.
+
+#### PUT /api/v1/sendspin/unpaired-access
+
+Sets whether Music Assistant servers that have not paired with this player may
+play to it. Off by default on every install, and paired servers are never
+affected. Body: `{ "enabled": true }` or `{ "enabled": false }`. The choice is
+stored by the supervisor and applied by restarting the player when it is
+running. Requires authentication and the CSRF header.
+
+**Response:**
+```json
+{ "ok": true, "data": { "unpaired_access": true }, "error": null }
+```
+
+- **400** — the body has no boolean `enabled`.
+- **503** — the choice could not be stored.
+
+The pending-approval queue (holding a first connection from a new server until
+the owner approves it) is not part of this setting and is not implemented yet.
 
 #### POST /api/v1/sendspin/unpair
 

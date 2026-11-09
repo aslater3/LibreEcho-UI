@@ -5,8 +5,21 @@
 #include <string.h>
 
 #include "adapter/bt_profile.h"
+#include "adapter/bt-sbc/sbc.h"
 
 static int failures;
+
+/* A2DP SBC codec information byte 1 (spec 4.3.2): block length in bits 7-4,
+ * subbands in bits 3-2 (0x08 = 4, 0x04 = 8), allocation in bits 1-0 (0x02 =
+ * SNR, 0x01 = loudness). Every one-hot combination is checked. */
+static const uint8_t sbc_block_bits[4] = { 0x80, 0x40, 0x20, 0x10 };
+static const uint8_t sbc_block_codes[4] = {
+    SBC_BLK_4, SBC_BLK_8, SBC_BLK_12, SBC_BLK_16
+};
+static const uint8_t sbc_subband_bits[2] = { 0x08, 0x04 };
+static const uint8_t sbc_subband_codes[2] = { SBC_SB_4, SBC_SB_8 };
+static const uint8_t sbc_alloc_bits[2] = { 0x02, 0x01 };
+static const uint8_t sbc_alloc_codes[2] = { SBC_AM_SNR, SBC_AM_LOUDNESS };
 
 static void check(int condition, const char *what)
 {
@@ -58,6 +71,51 @@ int main(void)
                  sizeof(expected_capabilities)) == 0,
           "AVDTP SBC capability separates media type and codec type octets");
     le_profile_test_cleanup(&profiles);
+
+    /* SET_CONFIGURATION, transaction 2, ACP SEID 1, INT SEID 1, one Media
+     * Codec element. Byte 3 of the SBC element is varied; each combination
+     * starts from fresh profile state because a configured session rejects a
+     * second SET_CONFIGURATION. */
+    {
+        int b, s, a;
+
+        for (b = 0; b < 4; ++b) {
+            for (s = 0; s < 2; ++s) {
+                for (a = 0; a < 2; ++a) {
+                    uint8_t byte3 = (uint8_t)(sbc_block_bits[b] |
+                                              sbc_subband_bits[s] |
+                                              sbc_alloc_bits[a]);
+                    const uint8_t set_configuration[] = {
+                        0x20, 0x03,
+                        0x04, 0x04,
+                        0x07, 0x06,
+                        0x00, 0x00,
+                        0x21, byte3, 0x02, 0x35,
+                    };
+                    uint8_t blocks = 0xff, subbands = 0xff, allocation = 0xff;
+                    char what[96];
+
+                    check(le_profile_test_init(&profiles, "LibreEcho") == 0,
+                          "profile test state initializes for SBC byte 3");
+                    length = le_profile_test_avdtp_exchange(
+                        &profiles, set_configuration,
+                        sizeof(set_configuration), response, sizeof(response));
+                    check(length >= 2 && (response[0] & 0x03) == 0x02,
+                          "SET_CONFIGURATION with SBC element is accepted");
+                    snprintf(what, sizeof(what),
+                             "SBC byte 3 0x%02x configures block, subband "
+                             "and allocation", (unsigned)byte3);
+                    check(le_profile_test_avdtp_sbc_byte3(&profiles, &blocks,
+                                                          &subbands,
+                                                          &allocation) == 0 &&
+                          blocks == sbc_block_codes[b] &&
+                          subbands == sbc_subband_codes[s] &&
+                          allocation == sbc_alloc_codes[a], what);
+                    le_profile_test_cleanup(&profiles);
+                }
+            }
+        }
+    }
 
     if (failures) {
         printf("avdtp wire format: %d FAILURE(s)\n", failures);

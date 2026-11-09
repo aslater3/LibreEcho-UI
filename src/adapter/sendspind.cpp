@@ -104,6 +104,9 @@ void usage(std::FILE* out) {
         "                            (--run; default /run/libreecho/sendspin.sock)\n"
         "  --state-file PATH         0600 file holding the player identity and\n"
         "                            pairings (--run; without it nothing persists)\n"
+        "  --unpaired-access on|off play without pairing (--run): on accepts servers\n"
+        "                            that have not paired, off (default) requires pairing;\n"
+        "                            the choice is stored in --state-file when given\n"
         "  --dev-allow-unpaired      DEVELOPMENT ONLY: accept unpaired (Sentinel)\n"
         "                            servers; anyone on the LAN can stream audio\n",
         LE_AUDIO_SINK_DEFAULT_SOCKET_PATH, kSessionMaxOpTimeoutMs,
@@ -128,6 +131,8 @@ struct Options {
     bool quiet = false;
     std::string state_file;
     std::string control_socket = "/run/libreecho/sendspin.sock";
+    // Owner choice from the Web UI: -1 leaves the stored setting alone, 0 or 1 is applied.
+    int unpaired_access = -1;
     // Development only. Never set by the shipped service definition.
     bool dev_allow_unpaired = false;
 };
@@ -207,6 +212,12 @@ int parse_args(int argc, char** argv, Options* opts) {
             opts->control_socket = argv[++i];
         } else if (std::strcmp(a, "--state-file") == 0 && i + 1 < argc) {
             opts->state_file = argv[++i];
+        } else if (std::strcmp(a, "--unpaired-access") == 0) {
+            if (!need(&value) || (std::strcmp(value, "on") != 0 && std::strcmp(value, "off") != 0)) {
+                std::fprintf(stderr, "sendspind: --unpaired-access must be on or off\n");
+                return 2;
+            }
+            opts->unpaired_access = std::strcmp(value, "on") == 0 ? 1 : 0;
         } else if (std::strcmp(a, "--dev-allow-unpaired") == 0) {
             opts->dev_allow_unpaired = true;
         } else {
@@ -217,6 +228,14 @@ int parse_args(int argc, char** argv, Options* opts) {
     }
     if (opts->check && opts->run) {
         std::fprintf(stderr, "sendspind: --check and --run are mutually exclusive\n");
+        return 2;
+    }
+    if (opts->unpaired_access >= 0 && !opts->run) {
+        std::fprintf(stderr, "sendspind: --unpaired-access applies only to --run\n");
+        return 2;
+    }
+    if (opts->unpaired_access >= 0 && opts->dev_allow_unpaired) {
+        std::fprintf(stderr, "sendspind: --unpaired-access and --dev-allow-unpaired are mutually exclusive\n");
         return 2;
     }
     if (opts->dev_allow_unpaired && !opts->run) {
@@ -311,6 +330,12 @@ int run_companion(const Options& opts) {
     ::sendspin::SendspinClientConfig cfg;
     cfg.name = opts.name;
     cfg.server_port = static_cast<uint16_t>(opts.port);
+    // The owner's setting, as applied at start. Absent means the SDK default (off).
+    const bool unpaired_on = opts.unpaired_access == 1 || opts.dev_allow_unpaired;
+    if (opts.unpaired_access >= 0 && opts.state_file.empty()) {
+        // No persistence provider: the seed applies on every start.
+        cfg.initial_unpaired_access_enabled = unpaired_on;
+    }
     if (opts.dev_allow_unpaired) {
         // No persistence provider is registered, so every start is a first
         // boot and this seed takes effect; nothing outlives the process.
@@ -336,6 +361,12 @@ int run_companion(const Options& opts) {
             std::fprintf(stderr,
                          "sendspind: stored Sendspin state '%s' is corrupt; refusing to start "
                          "(unpair or reset Sendspin to recover)\n", bad.c_str());
+            session.disconnect();
+            return 3;
+        }
+        if (opts.unpaired_access >= 0 && !libreecho::sendspin::apply_unpaired_access(
+                                              *persistence, unpaired_on)) {
+            std::fprintf(stderr, "sendspind: could not store the play-without-pairing setting\n");
             session.disconnect();
             return 3;
         }
@@ -434,6 +465,8 @@ int run_companion(const Options& opts) {
                         ? "\"paired\"" : "\"unpaired\"";
             data += ",\"server\":";
             data += server ? json_string(server->name) : "null";
+            data += ",\"unpaired_access\":";
+            data += unpaired_on ? "true" : "false";
             data += ",\"streaming\":";
             data += session.streaming() ? "true" : "false";
             data += ",\"time_synced\":";

@@ -317,6 +317,149 @@ int main(void)
     assert_post_commit_retry(path, backup, &le_timerd_test_fail_chmod);
     assert_post_commit_retry(path, backup, &le_timerd_test_fail_parent_fsync);
 
+    /* A repeating alarm persists as a v4 record with its days and its set
+       time, and reloads as the same alarm. */
+    {
+        struct context repeat;
+        struct context restored;
+        char rtext[512];
+        unsigned int alarm_id = 0;
+        struct le_timer *timer;
+        long long due;
+
+        unlink(path);
+        unlink(backup);
+        memset(&repeat, 0, sizeof(repeat));
+        repeat.state_path = path;
+        repeat.state_loaded = 1;
+        le_timer_set_init(&repeat.timers);
+        assert(le_timer_add_repeat_alarm(&repeat.timers, 7, 30, 0x3eU, "work",
+                                         SYNCED_EPOCH, &alarm_id) == LE_TIMER_OK);
+        assert(state_save_at(&repeat, 1000, SYNCED_EPOCH) == STATE_SAVE_OK);
+        read_text(path, rtext, sizeof(rtext));
+        assert(strstr(rtext, "v4 alarm ") != NULL);
+        assert(strstr(rtext, " 62 7 30 ") != NULL);
+
+        memset(&restored, 0, sizeof(restored));
+        restored.state_path = path;
+        le_timer_set_init(&restored.timers);
+        assert(state_load_at(&restored, 1000, SYNCED_EPOCH) == 1);
+        timer = le_timer_find(&restored.timers, alarm_id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->hour == 7 &&
+               timer->minute == 30 && !strcmp(timer->label, "work"));
+        assert(timer->due_epoch == SYNCED_EPOCH + 7 * 3600LL + 1800LL);
+        assert(restored.timers.missed == 0);
+
+        /* A snoozed repeating alarm keeps its repeat and its set time, while
+           its due instant moves to the snooze. */
+        due = timer->due_epoch;
+        repeat.state_loaded = 1;
+        assert(le_timer_step(&repeat.timers, 2000, due, NULL, 0) == 1);
+        assert(le_timer_snooze_ringing(&repeat.timers, due + 5) == 1);
+        assert(state_save_at(&repeat, 3000, due + 5) == STATE_SAVE_OK);
+        memset(&restored, 0, sizeof(restored));
+        restored.state_path = path;
+        le_timer_set_init(&restored.timers);
+        assert(state_load_at(&restored, 1000, due + 10) == 1);
+        timer = le_timer_find(&restored.timers, alarm_id);
+        assert(timer && timer->repeat_days == 0x3eU && timer->hour == 7 &&
+               timer->minute == 30);
+        assert(timer->due_epoch == due + 5 + LE_TIMER_SNOOZE_SECONDS);
+    }
+
+    /* Reminders persist as v5 records with their time and days, reload as
+       reminders, and a v5 line this build cannot parse is skipped. */
+    {
+        struct context reminders;
+        struct context restored;
+        char rtext[768];
+        unsigned int once_id = 0, repeat_id = 0, countdown_id = 0;
+        struct le_timer *timer;
+
+        unlink(path);
+        unlink(backup);
+        memset(&reminders, 0, sizeof(reminders));
+        reminders.state_path = path;
+        reminders.state_loaded = 1;
+        le_timer_set_init(&reminders.timers);
+        assert(le_timer_add_reminder(&reminders.timers, 7, 30, 0, "pills",
+                                     SYNCED_EPOCH, &once_id) == LE_TIMER_OK);
+        assert(le_timer_add_reminder(&reminders.timers, 8, 0, 0x3eU,
+                                     "standup", SYNCED_EPOCH, &repeat_id) ==
+               LE_TIMER_OK);
+        assert(le_timer_add_countdown(&reminders.timers, 600, "tea", 1000,
+                                      &countdown_id) == LE_TIMER_OK);
+        assert(state_save_at(&reminders, 1000, SYNCED_EPOCH) == STATE_SAVE_OK);
+        read_text(path, rtext, sizeof(rtext));
+        /* Fresh schedule: the one-off is id 1, the repeat id 2, the countdown 3. */
+        assert(once_id == 1 && repeat_id == 2 && countdown_id == 3);
+        assert(strstr(rtext, "v5 reminder 1 ") != NULL);
+        assert(strstr(rtext, " 0 7 30 @hex:70696c6c73") != NULL);
+        assert(strstr(rtext, "v5 reminder 2 ") != NULL);
+        assert(strstr(rtext, " 62 8 0 @hex:7374616e647570") != NULL);
+        assert(strstr(rtext, "v3 countdown 3 ") != NULL);
+        assert(strstr(rtext, "v4 alarm ") == NULL);
+
+        memset(&restored, 0, sizeof(restored));
+        restored.state_path = path;
+        le_timer_set_init(&restored.timers);
+        assert(state_load_at(&restored, 1000, SYNCED_EPOCH) == 1);
+        timer = le_timer_find(&restored.timers, once_id);
+        assert(timer && timer->reminder == 1 && timer->repeat_days == 0 &&
+               timer->hour == 7 && timer->minute == 30 &&
+               !strcmp(timer->label, "pills"));
+        timer = le_timer_find(&restored.timers, repeat_id);
+        assert(timer && timer->reminder == 1 && timer->repeat_days == 0x3eU &&
+               timer->hour == 8 && timer->minute == 0);
+        timer = le_timer_find(&restored.timers, countdown_id);
+        assert(timer && timer->reminder == 0 && timer->kind == LE_TIMER_COUNTDOWN);
+        assert(restored.timers.missed == 0);
+
+        /* An unparseable v5 line is skipped and the rest still loads. */
+        write_text(path, "v5 reminder notanid 1 0 7 30 @hex:61\n"
+                         "v3 countdown 9 1767226200 @hex:6f6e65\n");
+        memset(&restored, 0, sizeof(restored));
+        restored.state_path = path;
+        le_timer_set_init(&restored.timers);
+        assert(state_load_at(&restored, 1000, SYNCED_EPOCH) == 1);
+        assert(le_timer_active_count(&restored.timers) == 1);
+        assert(le_timer_find(&restored.timers, 9) != NULL);
+
+        /* A due reminder is announced once and cleared; a one-off leaves the
+           schedule, a repeating reminder moves to its next occurrence. The
+           speech socket does not exist here, so the announcement is logged
+           and dropped, which is the documented fallback. */
+        memset(&reminders, 0, sizeof(reminders));
+        reminders.state_path = path;
+        reminders.state_loaded = 1;
+        reminders.tts_socket = "/nonexistent/tts.sock";
+        reminders.audio_sock = "/nonexistent/audio.sock";
+        le_timer_set_init(&reminders.timers);
+        assert(le_timer_add_reminder(&reminders.timers, 7, 30, 0, "pills",
+                                     SYNCED_EPOCH, &once_id) == LE_TIMER_OK);
+        assert(le_timer_add_reminder(&reminders.timers, 8, 0, 0x7fU, "daily",
+                                     SYNCED_EPOCH, &repeat_id) == LE_TIMER_OK);
+        le_timerd_test_block_audio_ms = 1;
+        /* The loop's step rings a due reminder first; announce then clears it. */
+        assert(le_timer_step(&reminders.timers, 1000, SYNCED_EPOCH + 7 * 3600LL + 1800LL,
+                             NULL, 0) == 1);
+        announce_reminder(&reminders, once_id, SYNCED_EPOCH + 7 * 3600LL + 1800LL);
+        assert(le_timer_find(&reminders.timers, once_id) == NULL);
+        /* The daily reminder was not announced, so it keeps its 08:00 instant. */
+        timer = le_timer_find(&reminders.timers, repeat_id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == SYNCED_EPOCH + 8 * 3600LL);
+        assert(reminders.dirty == 1);
+
+        /* Announcing the daily one moves it to the next day, not the same time. */
+        assert(le_timer_step(&reminders.timers, 1000, SYNCED_EPOCH + 8 * 3600LL,
+                             NULL, 0) == 1);
+        announce_reminder(&reminders, repeat_id, SYNCED_EPOCH + 8 * 3600LL);
+        timer = le_timer_find(&reminders.timers, repeat_id);
+        assert(timer && timer->state == LE_TIMER_STATE_PENDING);
+        assert(timer->due_epoch == SYNCED_EPOCH + 86400LL + 8 * 3600LL);
+    }
+
     puts("timer persistence: ok");
     return 0;
 }

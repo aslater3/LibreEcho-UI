@@ -40,7 +40,25 @@ int le_mdns_sendspin_encode(char *message, size_t capacity, unsigned int port,
 int le_mdns_sendspin_decode(const char *message, size_t length, unsigned int *port,
                             char *name, size_t name_capacity);
 
-/* One fixed owner per lease (ESPHome, Sendspin). The supervisor owns the directory fd.
+/* LibreEcho control centre (_libreecho._tcp), so other LibreEcho devices on
+ * the LAN can list this one. The supervisor publishes TXT version, room and
+ * path=/. Wire: LIBREECHO/1 <decimal-port> name=<hex> version=<hex>
+ * room=<hex>\n, those three keys once each in that order. name (the device
+ * hostname) and version are required; room may be empty. name and room are
+ * UTF-8 without control characters; version is [0-9A-Za-z._+-] only. */
+#define LE_MDNS_LIBREECHO_PACKET_MAX 384
+#define LE_MDNS_LIBREECHO_TYPE "_libreecho._tcp"
+struct le_mdns_libreecho_metadata {
+    char name[64];
+    char version[32];
+    char room[64];
+};
+int le_mdns_libreecho_encode(char *message, size_t capacity, unsigned int port,
+                             const struct le_mdns_libreecho_metadata *metadata);
+int le_mdns_libreecho_decode(const char *message, size_t length, unsigned int *port,
+                             struct le_mdns_libreecho_metadata *metadata);
+
+/* One fixed owner per lease (ESPHome, Sendspin, LibreEcho web). The supervisor owns the directory fd.
  * Return values describe local file state, never confirmed publication. */
 struct le_mdns_lease {
     int directory_fd;
@@ -54,5 +72,8 @@ int le_mdns_lease_register_esphome(struct le_mdns_lease *lease, int owner_fd,
                                   const struct le_mdns_esphome_metadata *metadata);
 int le_mdns_lease_register_sendspin(struct le_mdns_lease *lease, int owner_fd,
                                    unsigned int port, const char *name);
+int le_mdns_lease_register_libreecho(struct le_mdns_lease *lease, int owner_fd,
+                                    unsigned int port,
+                                    const struct le_mdns_libreecho_metadata *metadata);
 int le_mdns_lease_withdraw(struct le_mdns_lease *lease, int owner_fd);
 #endif

@@ -281,9 +281,14 @@ int main(void)
                "{\"text\":\"Say hello.\"}",
                response, sizeof(response)) == 0);
     CHECK(strstr(response, "\"text\":\"Hello\"") != NULL);
-    for (i = 0; i < 300 && access(audio_capture, F_OK) != 0; ++i)
+    /* The mock audio adapter creates the capture file before it writes the
+       line, so wait for content rather than for the file to exist. */
+    for (i = 0; i < 300; ++i) {
+        if (stat(audio_capture, &status) == 0 && status.st_size > 0)
+            break;
         nanosleep(&delay, NULL);
-    CHECK(access(audio_capture, F_OK) == 0);
+    }
+    CHECK(stat(audio_capture, &status) == 0 && status.st_size > 0);
     {
         FILE *capture = fopen(audio_capture, "r");
         char spoken[512];

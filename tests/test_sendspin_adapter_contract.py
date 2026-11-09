@@ -503,6 +503,20 @@ class NativeBridgeCompanionTests(unittest.TestCase):
                 text = path.read_text(encoding="utf-8", errors="ignore")
                 self.assertNotIn("--dev-allow-unpaired", text, str(path))
 
+    def test_play_without_pairing_is_an_owner_switch_off_by_default(self) -> None:
+        # The owner's switch is stored beside the player state and passed to the
+        # companion only once the owner has set it, so an older payload still
+        # starts. Only an explicit "1" turns it on.
+        daemon = (UI / "src/adapter/airplayd.c").read_text(encoding="utf-8")
+        self.assertIn('"--unpaired-access", setting ? "on" : "off"', daemon)
+        self.assertIn("value[0] == '1'", daemon)
+        self.assertIn('"set_sendspin_unpaired"', daemon)
+        player = (UI / "src/adapter/sendspind.cpp").read_text(encoding="utf-8")
+        self.assertIn('"--unpaired-access"', player)
+        self.assertIn("apply_unpaired_access(", player)
+        self.assertIn("int unpaired_access = -1;", player)
+        self.assertIn("unpaired_access >= 0", player)
+
     def test_bridge_is_not_linked_into_the_c99_daemon(self) -> None:
         makefile = MAKEFILE.read_text(encoding="utf-8")
         prefix = makefile.split("test-sendspin-sink:", 1)[0]

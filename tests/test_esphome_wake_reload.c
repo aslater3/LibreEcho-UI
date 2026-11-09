@@ -33,9 +33,11 @@ static char last_directory[1024];
 static pthread_t inference_thread;
 static int have_inference_thread;
 
-struct le_wake_engine *le_wake_engine_create(const char *directory,
-                                             unsigned int threads)
+struct le_wake_engine *le_wake_engine_create_words(const char *directory,
+                                                   unsigned int threads,
+                                                   const char *second_classifier)
 {
+    (void)second_classifier;
     struct le_wake_engine *engine;
     if (slow_load) {
         struct timespec delay = {6, 0};
@@ -61,9 +63,10 @@ struct le_wake_engine *le_wake_engine_create(const char *directory,
     return engine;
 }
 
-int le_wake_engine_feed(struct le_wake_engine *engine,
-                        const int16_t *samples, size_t count,
-                        float *score, int *new_score)
+int le_wake_engine_feed_words(struct le_wake_engine *engine,
+                              const int16_t *samples, size_t count,
+                              float *scores, size_t score_slots,
+                              int *new_score)
 {
     struct timespec delay = {0, 2000000};
     int failed;
@@ -91,7 +94,9 @@ int le_wake_engine_feed(struct le_wake_engine *engine,
     --compute_active;
     pthread_cond_broadcast(&engine_condition);
     pthread_mutex_unlock(&engine_mutex);
-    *score = (float)samples[0] / 1000.0f;
+    scores[0] = (float)samples[0] / 1000.0f;
+    for (size_t slot = 1; slot < score_slots; ++slot)
+        scores[slot] = 0.0f;
     *new_score = 1;
     return failed ? -1 : 0;
 }
@@ -186,7 +191,10 @@ static unsigned int events(struct waked_ipc *ipc)
     unsigned int found = 0;
     while ((count = read(ipc->event_pipe[0], &event, sizeof(event))) > 0) {
         require(count == (ssize_t)sizeof(event), "partial wake event");
-        require(!strcmp(event.model_name, "alexa_v0.1"), "wrong model event");
+        /* The event names the model the worker loaded: the stock model is
+         * alexa_v0.1, and any other directory reports its own folder name. This
+         * harness loads from a folder called models. */
+        require(!strcmp(event.model_name, "models"), "wrong model event");
         ++found;
     }
     require(count < 0 && errno == EAGAIN, "event pipe read failed");
