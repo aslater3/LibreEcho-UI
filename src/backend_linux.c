@@ -2417,7 +2417,8 @@ static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
     }
     if (!timer_valid_utf8(item->label, strlen(item->label)))
         return 0;
-    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
+    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm") &&
+         strcmp(item->kind, "reminder")) ||
         (strcmp(item->state, "pending") && strcmp(item->state, "ringing")))
         return 0;
     item->id = (unsigned)id;
@@ -2589,6 +2590,36 @@ static int timer_add_repeat(struct le_backend *b, int hour, int minute,
              "{\"hour\":%d,\"minute\":%d,\"days\":%u,\"label\":\"%s\"}",
              hour, minute, days, escaped);
     rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add_repeat", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
+        *id = (unsigned)value;
+    return LE_OK;
+}
+
+/* A spoken reminder at hour:minute. Zero days is a one-off. The daemon owns
+   the next-occurrence rule and the speaking; this only places the record. */
+static int timer_add_reminder(struct le_backend *b, int hour, int minute,
+                              unsigned days, const char *label, unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || (days & ~0x7fU))
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args),
+             "{\"hour\":%d,\"minute\":%d,\"days\":%u,\"label\":\"%s\"}",
+             hour, minute, days, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add_reminder", args, response,
                          sizeof(response));
     if (rc != LE_OK)
         return rc;
@@ -3355,7 +3386,7 @@ static const struct le_backend_ops ops = {
     linux_reboot_bootloader,
     volume_leveling,
     sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing,
-    timer_add_repeat, timer_snooze
+    timer_add_repeat, timer_snooze, timer_add_reminder
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

@@ -58,6 +58,8 @@ struct le_backend_ops {
     unsupported. */
  int (*timer_add_repeat)(struct le_backend*,int,int,unsigned,const char*,unsigned*);
  int (*timer_snooze)(struct le_backend*,int*);
+ /* Spoken reminders. Appended last, like the alarm entries above. */
+ int (*timer_add_reminder)(struct le_backend*,int,int,unsigned,const char*,unsigned*);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);

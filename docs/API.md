@@ -670,9 +670,11 @@ is aborted when the browser closes the connection.
 
 #### GET /api/v1/timers
 
-Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`
-or `alarm`), `state` (`pending` or `ringing`), `seconds_remaining`, and an
-optional `label`. The response also includes `ringing`, `missed`, and
+Returns the bounded timer schedule. Each entry has an `id`, `kind` (`countdown`,
+`alarm` or `reminder`), `state` (`pending` or `ringing`), `seconds_remaining`,
+and an optional `label`. A `reminder` also carries its `time` (local `HH:MM`)
+and `days`, and is never in the `ringing` state: the device speaks it at its
+time and it leaves the schedule, or moves to its next day when it repeats. The response also includes `ringing`, `missed`, and
 `available`. When `timerd` is absent, this GET still returns HTTP 200 with
 `available: false`, an empty `timers` array, and zero `ringing`/`missed`
 counts. Timer writes return the standard 503 unavailable response instead.
@@ -706,6 +708,24 @@ this route; use `/timers/dismiss` to silence them. The entire path component
 must be a nonzero decimal integer; malformed, ringing, out-of-range, missing,
 or already-cancelled IDs return HTTP 404 without removing another timer.
 Requires `X-LibreEcho-CSRF`.
+
+#### POST /api/v1/reminders
+
+Sets a spoken reminder and requires `X-LibreEcho-CSRF`. At its time the device
+plays a short chime and then says "Reminder: " followed by the label.
+
+```json
+{ "time": "08:00", "label": "take the pills", "days": "weekdays" }
+```
+
+`time`, `label` and `days` follow the rules for `POST /api/v1/alarms`, except
+that `label` is the spoken text. Leave `days` out for a one-off reminder, which
+fires at the next occurrence of `time` and then leaves the schedule. Success
+returns HTTP 201 with `{ "id", "time", "days", "due_epoch" }`. Reminders share
+the schedule and its 16-entry capacity, persist across restarts, and are listed
+on `GET /api/v1/timers` with `kind: "reminder"`. Cancel one with
+`DELETE /api/v1/timers/{id}`. A malformed body returns 400; an unset clock or a
+full schedule returns 409 with error code `busy`.
 
 #### GET /api/v1/alarms
 
@@ -759,7 +779,10 @@ an alarm rings, and by saying "snooze".
 
 Alarms can also be set and cancelled by voice without a language model:
 "set an alarm for 7am", "wake me at seven thirty in the evening", "set an
-alarm for 6:30am on weekdays", "cancel my alarm", "snooze". A clock time
+alarm for 6:30am on weekdays", "cancel my alarm", "snooze". Reminders work the
+same way: "remind me to take the pills at 6pm", "remind me every weekday at 8
+am to check the cooker", "cancel my reminder". A reminder's text runs from "to"
+to the last "at" in the request; a time without am or pm is asked about. A clock time
 without am or pm is asked about, not guessed. Snooze only does something while
 an alarm rings; otherwise the request goes to the language model as before.
 
