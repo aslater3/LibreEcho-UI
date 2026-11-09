@@ -73,7 +73,7 @@ class PinnedFixture(Fixture):
   async def run():
    client=APIClient('127.0.0.1',self.port,client_info='LibreEcho isolated acceptance',provide_time=False)
    try:
-    await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61)
+    await client.connect(login=True);info=await client.device_info();self.assertEqual(info.name,'fixture-satellite');self.assertEqual(info.mac_address,'02:00:00:00:00:01');self.assertEqual(info.voice_assistant_feature_flags,61);self.assertEqual(info.bluetooth_proxy_feature_flags,0,'BLE proxy is opt-in (esphome_bluetooth_proxy), off by default')
     self.assertEqual((client.api_version.major,client.api_version.minor),(1,14));entities,services=await client.list_entities_services();self.assertEqual({e.key for e in entities},{1,2,50,404,10,11,12,13,20,21,22,30,40,41,42,43,70});self.assertEqual(sorted(x.name for x in services),['announce','play_sound','set_ring'])
     from aioesphomeapi.model import ButtonInfo
     cancel=next(e for e in entities if isinstance(e,ButtonInfo));self.assertEqual((cancel.key,cancel.object_id,cancel.name),(404,'cancel_request','Cancel request'))
@@ -188,6 +188,18 @@ class PinnedServerWake(PinnedFixture):
     client.switch_command(2,False);await self.wait_for(lambda:len(starts)==2,'server-wake restart after unmute')
     self.assertEqual(starts[1][1],3);self.assertFalse(starts[1][2])
     unsubscribe();await client.disconnect()
+   finally:await client.disconnect(force=True)
+  asyncio.run(asyncio.wait_for(run(),12))
+# Owner option esphome_bluetooth_proxy (off by default, see the plain test above): enabling it reports
+# PASSIVE_SCAN|RAW_ADVERTISEMENTS (33) in the device info the pinned client parses.
+class PinnedBluetoothProxy(PinnedFixture):
+ config_fields={'hostname':'fixture-satellite','wifi_mac':'02:00:00:00:00:01','ha_protocol':'esphome','voice_assistant_mode':1,'esphome_noise_key':'','esphome_bluetooth_proxy':True}
+ def test_pinned_enabled_bluetooth_proxy_reports_flags(self):
+  self.s.close();time.sleep(.05)
+  async def run():
+   client=APIClient('127.0.0.1',self.port,client_info='LibreEcho ble proxy acceptance',provide_time=False)
+   try:
+    await client.connect(login=True);info=await client.device_info();self.assertEqual(info.bluetooth_proxy_feature_flags,33)
    finally:await client.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),12))
 if __name__=='__main__':unittest.main(defaultTest='PinnedFixture')

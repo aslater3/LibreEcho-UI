@@ -171,6 +171,20 @@ after one second, unless it is muted or privacy is on. Nothing streams while
 the option is off or Home Assistant does not own voice. Saves from the web UI
 keep the `esphome_server_wake` key.
 
+## Bluetooth proxy (experimental, off by default)
+
+The satellite can offer Home Assistant a Bluetooth proxy that forwards raw LE
+advertisements from `btd`. This is experimental: on current hardware no LE
+advertisements have been observed reaching the device, so it is not advertised
+unless the owner opts in with `"esphome_bluetooth_proxy": true` in
+`web-config.json` (no web control yet). The option is read when the daemon
+starts or on SIGHUP, and web saves keep the key.
+
+While it is off (the default) the device info reports
+`bluetooth_proxy_feature_flags = 0`, Home Assistant creates no Bluetooth
+scanner for the device, a Bluetooth subscribe request is ignored, and
+`esphomed` never asks `btd` to scan.
+
 ## Protocol contract
 
 The reviewed interoperability baseline is Home Assistant **2026.9.4**, which

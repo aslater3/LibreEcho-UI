@@ -128,7 +128,7 @@ struct state {
  /* Last-turn text sensors (#398) and the voice-history generation they clear on. */
  char last_wake[TEXT_VALUE_MAX],last_transcript[TEXT_VALUE_MAX],last_reply[TEXT_VALUE_MAX];int speech_text,history_known;long long history_generation;
  /* Room level sensor (#399), opt-in through esphome_room_level_sensor; the LEQ window and what was last published. */
- int room_level_sensor,level_known,level_sent_ok;float level_db,level_sent_db;double level_sum;unsigned level_n;uint64_t level_at,level_sent_at;
+ int ble_proxy,room_level_sensor,level_known,level_sent_ok;float level_db,level_sent_db;double level_sum;unsigned level_n;uint64_t level_at,level_sent_at;
  const char *agent_path;
 };
 static struct state S;static struct le_ble_proxy B;static volatile sig_atomic_t running=1,reload_config;
@@ -359,7 +359,7 @@ static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(es
  * alive until RUN_END so its delayed event cannot address a new capture. */
 static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
 static int valid_proto(const void *p,size_t n){struct ep_reader r;struct ep_field f;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0){}return r.error?-1:0;}
-static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);if(S.room[0])ep_string(&w,16,S.room);ep_uint(&w,15,LE_BLE_PROXY_FEATURES);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
+static void device_info(struct client *c){unsigned char b[512];struct ep_writer w={b,sizeof b,0,0};ep_string(&w,2,S.name);ep_string(&w,3,S.mac);ep_string(&w,4,"2026.9.0");ep_string(&w,6,"radar-puffin");ep_string(&w,8,"libreecho.satellite");ep_string(&w,9,"0.14.0");ep_string(&w,12,"LibreEcho");ep_string(&w,13,S.friendly);if(S.room[0])ep_string(&w,16,S.room);ep_uint(&w,15,S.ble_proxy?LE_BLE_PROXY_FEATURES:0);ep_uint(&w,17,61);ep_uint(&w,19,1);ep_uint(&w,26,!S.provisioned);(void)send_writer(c,10,&w);}
 /* User-defined ESPHome services (#397): Home Assistant automations call announce, play_sound and
  * set_ring. Each call is validated here, then sent to the daemon command the web UI and voice path
  * already use: audiod speak (which goes through ttsd), audiod sample (bundled sounds) and ledd pattern.
@@ -558,7 +558,7 @@ static int dispatch(unsigned idx,unsigned type,const unsigned char *p,size_t n){
  case 121:configuration(c);return 0;
  case 123:{struct ep_reader r;struct ep_field f;unsigned count=0;int active=0;ep_reader_init(&r,p,n);while(ep_next(&r,&f)>0)if(f.number==1){if(++count>1||ep_text(&f,url,sizeof url)||strcmp(url,"alexa_v0.1"))return -1;active=1;}
  if(wake_set_active(active))return -1;configuration(c);return 0;}
- case LE_BLE_PROXY_MSG_SUBSCRIBE:return le_ble_proxy_subscribe(&B,(int)idx,p,n);
+ case LE_BLE_PROXY_MSG_SUBSCRIBE:if(!S.ble_proxy)return 0;return le_ble_proxy_subscribe(&B,(int)idx,p,n);
  case 124:return provision(c,p,n);
  case 33:if(ep_get_uint(p,n,1,0)==WAKE_SWITCH_KEY){if(wake_set_active(!!ep_get_uint(p,n,2,0)))return -1;all_states();settings_sync();return 0;}if(ep_get_uint(p,n,1,0)!=MUTE_KEY)return -1;{int mute=!!ep_get_uint(p,n,2,0);if(!mute&&S.privacy!=0){all_states();return 0;}if(mute){S.local_mute_gate=1;S.muted=1;if(S.turn==1)cancel_turn("muted");else if(S.turn==2)stop_capture("muted");all_states();}snprintf(args,sizeof args,"{\"muted\":%s}",mute?"true":"false");return job(S.audio_path,"set_mute",args,3,mute);}
  case 62:if(ep_get_uint(p,n,1,0)!=CANCEL_KEY)return -1;user_cancel("Home Assistant");return 0;
@@ -663,6 +663,8 @@ static int load_configuration(void){char b[16384],key[45],mac[64],name[64],wake[
  int selected=json_get_string_top_level(b,"esphome_active_wake_word",wake,sizeof wake);if(selected<0||json_duplicate_key(b,(size_t)n,"esphome_active_wake_word")||(selected>0&&wake[0]&&strcmp(wake,"alexa_v0.1")))return -1;S.active_wake=selected<=0||!!wake[0];
  /* Speech text sensors (#398) are off unless the owner sets esphome_speech_text_sensors; turning them off drops what was held. */
  {int speech=0;(void)json_get_bool(b,"esphome_speech_text_sensors",&speech);S.speech_text=speech!=0;if(!S.speech_text){text_set(TEXT_TRANSCRIPT_KEY,"");text_set(TEXT_REPLY_KEY,"");}}
+ /* Bluetooth proxy (#496) is experimental and off unless the owner sets esphome_bluetooth_proxy: no advertised feature flags, no subscription, no btd scan. */
+ {int ble=0;(void)json_get_bool(b,"esphome_bluetooth_proxy",&ble);S.ble_proxy=ble>0;if(!S.ble_proxy)for(unsigned i=0;i<(unsigned)(sizeof S.clients/sizeof S.clients[0]);i++)le_ble_proxy_close(&B,(int)i);}
  /* Room level sensor (#399) is off unless the owner sets esphome_room_level_sensor; a reload restarts the window. */
  {int room=0;(void)json_get_bool(b,"esphome_room_level_sensor",&room);S.room_level_sensor=room!=0;S.level_known=S.level_sent_ok=0;S.level_n=0;S.level_sum=0;}
  /* esphome_server_wake: Home Assistant runs wake detection on a continuous stream. Absent or invalid means off. */

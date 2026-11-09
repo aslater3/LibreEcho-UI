@@ -101,6 +101,9 @@ with tempfile.TemporaryDirectory(prefix="test-esphome-http-", dir=SCRATCH) as di
                     stored.pop("esphome_server_wake", None)
                 else:
                     stored["esphome_server_wake"] = server_wake
+                stored.pop("esphome_bluetooth_proxy", None)
+                if server_wake is not None:
+                    stored["esphome_bluetooth_proxy"] = server_wake
                 config.write_text(json.dumps(stored))
                 for enabled in (True, False):
                     assert request("/integrations/mqtt", {"enabled": enabled})[0] == 200
@@ -111,6 +114,9 @@ with tempfile.TemporaryDirectory(prefix="test-esphome-http-", dir=SCRATCH) as di
                     assert ("esphome_server_wake" in loaded) == (server_wake is not None)
                     if server_wake is not None:
                         assert loaded["esphome_server_wake"] is server_wake
+                    assert ("esphome_bluetooth_proxy" in loaded) == (server_wake is not None)
+                    if server_wake is not None:
+                        assert loaded["esphome_bluetooth_proxy"] is server_wake
                     assert loaded["wake_word"] == "HeyJarvis" and loaded["wake_sensitivity"] == 55
             for path in ("/config", "/config/export", "/voice-pipeline", "/diagnostics/export", "/logs"):
                 status, result = request(path, body={} if path == "/diagnostics/export" else None,

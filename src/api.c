@@ -1846,7 +1846,7 @@ static int persist_configuration(struct api_context*c)
     char config[8192];
     struct le_esphome_config esphome;
     char mode[48], stt_uri[640], stt_model[256];
-    char tts_uri[640], tts_voice[256], previous_mode[48], esphome_wake[96];
+    char tts_uri[640], tts_voice[256], previous_mode[48], esphome_wake[192];
     size_t length;
     int rc;
 
@@ -1871,6 +1871,8 @@ static int persist_configuration(struct api_context*c)
     /* Owner option esphome_server_wake survives HA/web saves; the daemon reads it on start and reload. */
     if(esphome.esphome_server_wake_present)
         snprintf(esphome_wake+strlen(esphome_wake),sizeof esphome_wake-strlen(esphome_wake),",\n  \"esphome_server_wake\": %s",esphome.esphome_server_wake?"true":"false");
+    if(esphome.esphome_bluetooth_proxy_present)
+        snprintf(esphome_wake+strlen(esphome_wake),sizeof esphome_wake-strlen(esphome_wake),",\n  \"esphome_bluetooth_proxy\": %s",esphome.esphome_bluetooth_proxy?"true":"false");
     --length;
     if (snprintf(
             config + length, sizeof(config) - length,

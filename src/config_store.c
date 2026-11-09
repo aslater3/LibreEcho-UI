@@ -41,5 +41,6 @@ int config_esphome_read(const char *path, struct le_esphome_config *config)
     config->esphome_active_wake_word_present=field>0;
     /* Owner option: invalid or absent means off, and is then dropped on the next save. */
     {int server=0;config->esphome_server_wake_present=json_get_bool(data,"esphome_server_wake",&server)>0;config->esphome_server_wake=config->esphome_server_wake_present&&server;}
+    {int ble=0;config->esphome_bluetooth_proxy_present=json_get_bool(data,"esphome_bluetooth_proxy",&ble)>0;config->esphome_bluetooth_proxy=config->esphome_bluetooth_proxy_present&&ble;}
     return 0;
 }
