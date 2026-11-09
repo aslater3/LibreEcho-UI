@@ -45,6 +45,15 @@ int remaining_ms(int64_t deadline_us) {
 
 constexpr size_t kSockaddrPath = sizeof(((struct sockaddr_un*)nullptr)->sun_path);
 
+// The engine answers with one of these when the generation the companion is
+// driving is no longer live on its side: it was cancelled (for example after a
+// PCM write error) or the engine restarted. Nothing already offered can still
+// be accepted for it.
+bool engine_dropped_generation(uint32_t status) {
+    return status == LE_AUDIO_SINK_ERR_STALE_GENERATION ||
+           status == LE_AUDIO_SINK_ERR_STALE_EPOCH;
+}
+
 }  // namespace
 
 EngineSink::~EngineSink() {
@@ -73,6 +82,22 @@ void EngineSink::fence_locked() {
     pending_frames_ = 0;
     pending_ready_ = false;
     cached_progress_us_ = 0;
+}
+
+void EngineSink::lose_stream_locked() {
+    // Only an armed generation can be lost; a finished or fenced one is already
+    // out of the offer path and its late replies are not a stream loss.
+    if (!armed_) return;
+    stream_lost_ = true;
+    // Disarm so the next offer does not send DATA into a dead generation. The
+    // generation identity (last_generation_) is kept, so a re-open must use a
+    // strictly higher generation.
+    fence_locked();
+}
+
+bool EngineSink::stream_lost() const {
+    std::lock_guard<std::mutex> guard(mu_);
+    return stream_lost_;
 }
 
 bool EngineSink::connected() const {
@@ -261,6 +286,7 @@ SinkResult EngineSink::connect(const std::string& socket_path,
     fd_ = fd;
     connected_ = true;
     armed_ = false;
+    stream_lost_ = false;
     epoch_ = 0;
     generation_ = 0;
     last_generation_ = 0;
@@ -280,6 +306,7 @@ SinkResult EngineSink::connect(const std::string& socket_path,
 void EngineSink::disconnect() {
     std::lock_guard<std::mutex> guard(mu_);
     close_socket_locked();
+    stream_lost_ = false;
     epoch_ = 0;
     generation_ = 0;
     last_generation_ = 0;
@@ -382,6 +409,7 @@ SinkResult EngineSink::open(uint32_t generation, uint32_t timeout_ms) {
         capacity_bound_known_ = false;  // a new generation starts empty
         last_write_full_ = false;
         armed_ = true;
+        stream_lost_ = false;
         last_error_ = 0;
         period_frames_ = le_audio_sink_get_u32(pl + 20);
         capacity_frames_ = le_audio_sink_get_u32(pl + 24);
@@ -537,6 +565,12 @@ size_t EngineSink::on_audio_write(const uint8_t* pcm, size_t length,
         last_result_ = SinkResult::Ok;
         if (now_us() >= deadline) break;
     }
+    // The engine dropped the armed generation (a PCM error cancels it engine
+    // side) or the socket died. Disarm now: later offers would only draw the
+    // same refusal, which is what left playback silent after a voice reply.
+    if (last_result_ == SinkResult::Closed || last_result_ == SinkResult::Io ||
+        (last_result_ == SinkResult::Rejected && engine_dropped_generation(last_error_)))
+        lose_stream_locked();
 #ifdef LE_SENDSPIND_CLOCK_TRACE
     // Development-only (never in release builds): one line per SDK write.
     {
@@ -784,12 +818,14 @@ SinkResult EngineSink::progress(EngineSinkTiming* out, uint32_t timeout_ms) {
         uint32_t len = 0;
         r = recv_datagram(&type, &pl, &len, deadline);
         if (r != SinkResult::Ok) {
+            if (r == SinkResult::Closed || r == SinkResult::Io) lose_stream_locked();
             last_result_ = r;
             return r;
         }
         if (type == LE_AUDIO_SINK_TYPE_ERROR) {
             if (len >= 4) last_error_ = le_audio_sink_get_u32(pl);
             last_result_ = SinkResult::Rejected;
+            if (engine_dropped_generation(last_error_)) lose_stream_locked();
             return last_result_;
         }
         if (type == LE_AUDIO_SINK_TYPE_CREDIT && pending_frames_) {

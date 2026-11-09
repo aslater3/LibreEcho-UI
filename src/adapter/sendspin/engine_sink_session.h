@@ -64,6 +64,12 @@ namespace sendspin {
 // main-loop control call cannot block on the sync thread for longer than this.
 inline constexpr uint32_t kSessionMaxOpTimeoutMs = 50;
 
+// Re-arm budget after the engine drops the live generation (see rearm_stream()).
+// Each attempt that fails for a reason other than an OPEN still in progress
+// counts; a dead engine therefore costs at most this many attempts before the
+// companion waits for the next stream start instead of retrying forever.
+inline constexpr uint32_t kRearmMaxFailures = 5;
+
 struct EngineSinkSessionConfig {
     std::string socket_path;
     uint32_t connect_timeout_ms = 1000;
@@ -82,6 +88,9 @@ enum class SessionState {
     Connected,
     Streaming,
     Fenced,
+    // The engine dropped the live generation while the SDK stream was still
+    // open. No audio is accepted until rearm_stream() opens a successor.
+    Lost,
 };
 
 class EngineSinkSession {
@@ -122,6 +131,22 @@ public:
     // Main-loop progress poll for the live/opened generation.
     SinkResult poll(EngineSinkTiming* out);
 
+    // Re-arm after the engine dropped the live generation: open a strictly
+    // higher generation so the still-open SDK stream resumes without the server
+    // restarting it. Main loop only. Each call is bounded like the other control
+    // ops. Returns Ok once re-armed, Timeout while the engine is still opening
+    // its PCM (call again), NotOpen when nothing needs re-arming or the budget
+    // (kRearmMaxFailures, and a wall-clock deadline) is spent, otherwise the
+    // failure of this attempt.
+    SinkResult rearm_stream();
+    // True while the stream is Lost and the re-arm budget is not yet spent.
+    bool rearm_pending() const;
+    // Engine-path re-arm attempts since the most recent loss (test/observability).
+    uint32_t rearm_attempts() const {
+        std::lock_guard<std::mutex> guard(mu_);
+        return rearm_attempts_;
+    }
+
     SessionState state() const {
         std::lock_guard<std::mutex> guard(mu_);
         return state_;
@@ -150,6 +175,11 @@ private:
 
     // connect() without taking mu_ (callers already hold it).
     SinkResult connect_locked();
+    // start_stream() without taking mu_ (callers already hold it).
+    SinkResult start_stream_locked();
+    // Streaming -> Lost when the sink reports the engine dropped the generation.
+    void note_loss_locked(const char* cause);
+    bool rearm_budget_left_locked() const;
 
     EngineSinkSessionConfig config_{};
     EngineSink sink_{};
@@ -159,6 +189,10 @@ private:
     // Monotonic; never reset downward. See the file header.
     uint32_t next_generation_ = 1;
     SessionState state_ = SessionState::Disconnected;
+    // Re-arm bookkeeping for the current loss (reset on every loss and success).
+    uint32_t rearm_attempts_ = 0;
+    uint32_t rearm_failures_ = 0;
+    int64_t lost_since_us_ = 0;
 };
 
 }  // namespace sendspin
