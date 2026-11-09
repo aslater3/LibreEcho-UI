@@ -2887,6 +2887,27 @@ static void start_pattern(struct daemon_context *ctx, int kind,
         le_music_director_interrupt(&ctx->music_director);
 }
 
+/* The do-not-disturb ring is a steady pattern owned by "dnd" that the web API
+ * starts once when the switch turns on (#492). A manual colour or brightness
+ * change clears every pattern, so remember a held "dnd" pattern (running or
+ * stacked under another owner) and put it back after the change. */
+static int dnd_pattern_held(const struct daemon_context *ctx, struct colour *colour)
+{
+    if (ctx->pattern_active && !strcmp(ctx->pattern_owner, "dnd") &&
+        ctx->pattern_kind == PATTERN_SOLID) {
+        *colour = ctx->pattern_colour;
+        return 1;
+    }
+    if (ctx->pattern_active && !strcmp(ctx->pattern_previous_owner, "dnd") &&
+        ctx->pattern_previous_kind == PATTERN_SOLID) {
+        *colour = ctx->pattern_previous_colour;
+        return 1;
+    }
+    return 0;
+}
+
+static void update_pattern(struct daemon_context *ctx, double now);
+
 static void update_pattern(struct daemon_context *ctx, double now)
 {
     double elapsed = now - ctx->pattern_started;
@@ -3358,7 +3379,8 @@ static int handle_request(struct daemon_context *ctx, int fd,
                           const char *line)
 {
     struct request request;
-    struct colour colour;
+    struct colour colour, dnd_colour;
+    int dnd_held = 0;
     char data[2048];
     unsigned int r, g, b, brightness;
     unsigned int repeats = 0;
@@ -3391,6 +3413,7 @@ static int handle_request(struct daemon_context *ctx, int fd,
             get_arg_unsigned(&request, "b", &b, 255) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "set_colour requires r, g and b in 0..255");
+        dnd_held = dnd_pattern_held(ctx, &dnd_colour);
         stop_pattern(ctx, NULL, now);
         ctx->state.current.r = r;
         ctx->state.current.g = g;
@@ -3398,6 +3421,10 @@ static int handle_request(struct daemon_context *ctx, int fd,
         ctx->animation_active = 0;
         apply_current(ctx);
         persist_state(&ctx->state);
+        if (dnd_held) {
+            start_pattern(ctx, PATTERN_SOLID, &dnd_colour, 0, "dnd", now);
+            update_pattern(ctx, now);
+        }
         return send_response(fd, request.id, 1, "{}", NULL);
     }
 
@@ -3405,11 +3432,16 @@ static int handle_request(struct daemon_context *ctx, int fd,
         if (get_arg_unsigned(&request, "brightness", &brightness, 100) != 0)
             return send_response(fd, request.id, 0, NULL,
                                  "brightness must be in 0..100");
+        dnd_held = dnd_pattern_held(ctx, &dnd_colour);
         stop_pattern(ctx, NULL, now);
         ctx->state.current.brightness = brightness;
         ctx->animation_active = 0;
         apply_current(ctx);
         persist_state(&ctx->state);
+        if (dnd_held) {
+            start_pattern(ctx, PATTERN_SOLID, &dnd_colour, 0, "dnd", now);
+            update_pattern(ctx, now);
+        }
         return send_response(fd, request.id, 1, "{}", NULL);
     }
 
