@@ -95,6 +95,12 @@ ssize_t le_profile_test_avdtp_exchange(struct le_profiles *p,
                                        size_t request_len,
                                        uint8_t *response,
                                        size_t response_max);
+/* Read back the SBC block length, subband and allocation values negotiated by
+ * the first AVDTP session's SET_CONFIGURATION (raw sbc_struct codes).
+ * Returns 0 when a codec was configured, -1 otherwise. */
+int le_profile_test_avdtp_sbc_byte3(const struct le_profiles *p,
+                                    uint8_t *blocks, uint8_t *subbands,
+                                    uint8_t *allocation);
 ssize_t le_profile_test_avrcp_exchange(struct le_profiles *p,
                                        const uint8_t *request,
                                        size_t request_len,
