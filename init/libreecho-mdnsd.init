@@ -145,16 +145,24 @@ release_lock() {
     return 0
 }
 
-# Every pid whose argv[0] is exactly $DAEMON. A pidfile is not proof of life,
-# and matching on the executable means this wrapper can never terminate an
-# unrelated process on a device that is shared with other daemons.
+# Every pid running $DAEMON. A pidfile is not proof of life. A process counts
+# when its argv[0] is exactly $DAEMON, or when its resolved executable is the
+# supervisor binary: a supervisor started through a symlink or another path
+# has a different argv[0], and a hot-staged replacement leaves the old image
+# as "(deleted)". Matching only argv[0] let stop report success while such a
+# supervisor kept running. Both checks are exact, so this wrapper still never
+# terminates an unrelated process on a device shared with other daemons.
 running_pids() {
+    want=$(readlink -f "$DAEMON" 2>/dev/null)
+    [ -n "$want" ] || want=$DAEMON
     for entry in /proc/[0-9]*; do
         candidate=${entry#/proc/}
         [ "$candidate" = "$$" ] && continue
-        [ -r "$entry/cmdline" ] || continue
-        argv0=$(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null | sed -n '1p')
-        [ "$argv0" = "$DAEMON" ] && printf '%s\n' "$candidate"
+        if [ -r "$entry/cmdline" ]; then
+            argv0=$(tr '\0' '\n' < "$entry/cmdline" 2>/dev/null | sed -n '1p')
+            [ "$argv0" = "$DAEMON" ] && { printf '%s\n' "$candidate"; continue; }
+        fi
+        [ "$(readlink "$entry/exe" 2>/dev/null)" = "$want" ] && printf '%s\n' "$candidate"
     done
 }
 
@@ -317,6 +325,9 @@ stop_service() {
             failed=1
         fi
     done
+    # Never report success while a supervisor is still found by the same
+    # search that start and status use.
+    [ -z "$(running_pids)" ] || failed=1
     rm -f "$PIDFILE"
     if [ "$failed" -ne 0 ]; then
         echo "libreecho-mdnsd: a supervisor process did not stop" >&2

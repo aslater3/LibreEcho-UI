@@ -68,21 +68,45 @@ start_service() {
     stop_service
     return 1
 }
-stop_service() {
-    target=$(pidfile_pid) || { rm -f "$PIDFILE" "$STATUS_FILE"; return 0; }
-    kill -TERM "$target" 2>/dev/null || true
-    attempts=0
-    while pidfile_pid >/dev/null && [ "$attempts" -lt 50 ]; do
-        sleep 0.1
-        attempts=$((attempts + 1))
+# Every pid whose resolved executable is $DAEMON, whether or not the pidfile
+# names it. A missing or stale pidfile (cleared /run, a crash, a manual start)
+# used to make stop a no-op, so restart started a second daemon that could not
+# bind port 6053 while the old one kept serving Home Assistant.
+running_pids() {
+    want=$(readlink -f "$DAEMON" 2>/dev/null)
+    [ -n "$want" ] || want=$DAEMON
+    for entry in /proc/[0-9]*; do
+        candidate=${entry#/proc/}
+        [ "$candidate" = "$$" ] && continue
+        if [ "$(readlink "$entry/exe" 2>/dev/null)" = "$want" ]; then
+            printf '%s\n' "$candidate"
+        fi
     done
-    if pidfile_pid >/dev/null; then kill -KILL "$target" 2>/dev/null || true; fi
+}
+stop_service() {
+    targets=$(running_pids)
+    pid=$(pidfile_pid) && targets=$(printf '%s\n%s\n' "$targets" "$pid")
+    for target in $targets; do
+        kill -TERM "$target" 2>/dev/null || true
+        attempts=0
+        while kill -0 "$target" 2>/dev/null && [ "$attempts" -lt 50 ]; do
+            sleep 0.1
+            attempts=$((attempts + 1))
+        done
+        if kill -0 "$target" 2>/dev/null; then kill -KILL "$target" 2>/dev/null || true; fi
+    done
     rm -f "$PIDFILE" "$STATUS_FILE"
+    # Report failure, so restart does not start a second copy beside a survivor.
+    if [ -n "$(running_pids)" ]; then
+        echo "libreecho-esphomed: a daemon process did not stop" >&2
+        return 1
+    fi
+    return 0
 }
 case "${1:-}" in
     start) start_service ;;
     stop) stop_service ;;
-    restart) stop_service; start_service ;;
+    restart) stop_service && start_service ;;
     status) "$DAEMON" --health-check "$PIDFILE" "$STATUS_FILE" "$PORT" "$DAEMON" ready ;;
     *) printf '%s\n' "Usage: $0 {start|stop|restart|status}"; exit 2 ;;
 esac
