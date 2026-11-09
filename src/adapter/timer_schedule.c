@@ -559,3 +559,75 @@ long long le_timer_poll_timeout_ms(const struct le_timer_set *set,
     }
     return timeout;
 }
+
+int le_timer_sunrise_minutes_valid(long long minutes)
+{
+    return minutes == 0 ||
+           (minutes >= LE_TIMER_SUNRISE_MIN_MINUTES &&
+            minutes <= LE_TIMER_SUNRISE_MAX_MINUTES);
+}
+
+/* Lead time in seconds for one alarm, or -1 when sunrise is off. */
+static long long sunrise_lead_seconds(int lead_minutes)
+{
+    if (lead_minutes <= 0)
+        return -1;
+    return (long long)lead_minutes * 60LL;
+}
+
+int le_timer_sunrise_due(const struct le_timer_set *set, long long now_epoch,
+                         int lead_minutes, unsigned int *id,
+                         long long *due_epoch)
+{
+    long long lead = sunrise_lead_seconds(lead_minutes);
+    size_t i;
+    const struct le_timer *best = NULL;
+
+    if (!set || lead < 0 || now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return 0;
+    for (i = 0; i < LE_TIMER_MAX; ++i) {
+        const struct le_timer *timer = &set->timers[i];
+
+        if (timer->state != LE_TIMER_STATE_PENDING ||
+            timer->kind != LE_TIMER_ALARM)
+            continue;
+        if (now_epoch < timer->due_epoch - lead ||
+            now_epoch >= timer->due_epoch)
+            continue;
+        if (!best || timer->due_epoch < best->due_epoch)
+            best = timer;
+    }
+    if (!best)
+        return 0;
+    if (id)
+        *id = best->id;
+    if (due_epoch)
+        *due_epoch = best->due_epoch;
+    return 1;
+}
+
+long long le_timer_sunrise_timeout_ms(const struct le_timer_set *set,
+                                      long long now_epoch, int lead_minutes,
+                                      long long cap_ms)
+{
+    long long lead = sunrise_lead_seconds(lead_minutes);
+    long long timeout = cap_ms;
+    size_t i;
+
+    if (!set || lead < 0 || now_epoch < LE_TIMER_CLOCK_VALID_EPOCH)
+        return cap_ms;
+    for (i = 0; i < LE_TIMER_MAX; ++i) {
+        const struct le_timer *timer = &set->timers[i];
+        long long remaining;
+
+        if (timer->state != LE_TIMER_STATE_PENDING ||
+            timer->kind != LE_TIMER_ALARM)
+            continue;
+        remaining = (timer->due_epoch - lead - now_epoch) * 1000LL;
+        if (remaining <= 0)
+            continue;
+        if (remaining < timeout)
+            timeout = remaining;
+    }
+    return timeout;
+}
