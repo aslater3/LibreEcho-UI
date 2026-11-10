@@ -3955,7 +3955,7 @@ static void https_certificate_put(struct api_context*c,const struct api_request*
     key=malloc(cap);
     if(!cert||!key){free(cert);free(key);err(r,503,LE_IO,"The certificate could not be read");return;}
     cert[0]=key[0]=0;
-    if(json_get_string(q->body,"certificate_pem",cert,cap)<=0||json_get_string(q->body,"private_key_pem",key,cap)<=0){free(cert);free(key);err(r,400,LE_INVALID,"certificate_pem and private_key_pem are required");return;}
+    if(json_get_text(q->body,"certificate_pem",cert,cap)<=0||json_get_text(q->body,"private_key_pem",key,cap)<=0){free(cert);free(key);err(r,400,LE_INVALID,"certificate_pem and private_key_pem are required");return;}
     cn=strlen(cert);
     kn=strlen(key);
     rc=le_tls_check_certificate_pair(cert,cn,key,kn);
@@ -3998,7 +3998,7 @@ static void https_private_ca(struct api_context*c,const struct api_request*q,str
     pem=malloc(cap);
     if(!pem){err(r,503,LE_IO,"The certificate could not be read");return;}
     pem[0]=0;
-    if(json_get_string(q->body,"ca_pem",pem,cap)<=0){free(pem);err(r,400,LE_INVALID,"ca_pem is required");return;}
+    if(json_get_text(q->body,"ca_pem",pem,cap)<=0){free(pem);err(r,400,LE_INVALID,"ca_pem is required");return;}
     n=strlen(pem);
     count=le_tls_check_ca_bundle(pem,n);
     if(count<=0){free(pem);err(r,400,LE_INVALID,"ca_pem must hold one or more PEM CA certificates");return;}

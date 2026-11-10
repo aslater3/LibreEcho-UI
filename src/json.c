@@ -455,7 +455,7 @@ static int append_codepoint(char *out, size_t z, size_t *used,
     return 0;
 }
 
-static int json_get_string_at(const char *p, char *out, size_t z)
+static int json_get_string_at(const char *p, char *out, size_t z, int text)
 {
     size_t used = 0;
 
@@ -464,9 +464,11 @@ static int json_get_string_at(const char *p, char *out, size_t z)
     while (*p && *p != '"') {
         uint32_t codepoint;
         unsigned char c = (unsigned char)*p++;
+        int esc = 0;
 
         if (c == '\\') {
             c = (unsigned char)*p++;
+            esc = 1;
             if (c == 'u') {
                 if (!p[0] || !p[1] || !p[2] || !p[3])
                     return -1;
@@ -504,7 +506,11 @@ static int json_get_string_at(const char *p, char *out, size_t z)
                 } else if (codepoint >= 0xdc00 && codepoint <= 0xdfff) {
                     return -1;
                 }
-                if (codepoint < 0x20 || codepoint > 0x10ffff)
+                if (codepoint > 0x10ffff)
+                    return -1;
+                if (codepoint < 0x20 &&
+                    !(text && (codepoint == '\t' || codepoint == '\n' ||
+                               codepoint == '\r')))
                     return -1;
                 if (append_codepoint(out, z, &used, codepoint) < 0)
                     return -1;
@@ -517,7 +523,9 @@ static int json_get_string_at(const char *p, char *out, size_t z)
             else if (c == 'f') c = '\f';
             else if (c != '"' && c != '\\' && c != '/') return -1;
         }
-        if (c < 32 || used + 2 > z) return -1;
+        if (used + 2 > z) return -1;
+        if (c < 32 && !(esc && text && (c == '\t' || c == '\n' || c == '\r')))
+            return -1;
         out[used++] = (char)c;
     }
     if (*p != '"') return -1;
@@ -529,7 +537,17 @@ int json_get_string(const char *s, const char *k, char *out, size_t z)
 {
     const char *p = find_key(s, k);
 
-    return p ? json_get_string_at(p, out, z) : 0;
+    return p ? json_get_string_at(p, out, z, 0) : 0;
+}
+
+/* Like json_get_string(), but the escapes \n, \r, \t (and \u0009, \u000a,
+ * \u000d) decode to the whitespace byte they name, for multi-line text such as
+ * PEM. Raw control bytes, every other control escape and \u0000 still fail. */
+int json_get_text(const char *s, const char *k, char *out, size_t z)
+{
+    const char *p = find_key(s, k);
+
+    return p ? json_get_string_at(p, out, z, 1) : 0;
 }
 
 int json_get_string_top_level(const char *s, const char *k,
@@ -537,7 +555,7 @@ int json_get_string_top_level(const char *s, const char *k,
 {
     const char *p = find_top_level_key(s, k);
 
-    return p ? json_get_string_at(p, out, z) : 0;
+    return p ? json_get_string_at(p, out, z, 0) : 0;
 }
 
 int json_object_members(const char *s, size_t n, struct json_member *out,
@@ -654,7 +672,7 @@ int json_string_span(const char *s, size_t n, char *out, size_t z)
         return -1;
     if (!span_is_single_value(s, n, c.i))
         return -1;
-    return json_get_string_at(s + c.i, out, z);
+    return json_get_string_at(s + c.i, out, z, 0);
 }
 
 int json_int_span(const char *s, size_t n, int *out)
