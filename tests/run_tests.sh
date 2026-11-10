@@ -25,6 +25,8 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tes
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_wifi_motion.c src/wifi_motion.c -o build/test-wifi-motion
 ./build/test-wifi-motion
 ./build/test-unit
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_json_text.c src/json.c -o build/test-json-text
+./build/test-json-text
 make build/test-update-identity
 ./build/test-update-identity
 python3 tests/test_github_link_contract.py
@@ -489,6 +491,7 @@ LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_timezone_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_https_trust_api.sh
+sh tests/test_https_pem_api.sh
 python3 tests/test_voice_clips_contract.py
 LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
