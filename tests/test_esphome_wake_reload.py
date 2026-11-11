@@ -17,7 +17,7 @@ SOURCES = [
     "tests/test_esphome_wake_reload.c",
     "src/adapter/adapter_server.c", "src/adapter/adapter_client.c",
     "src/adapter/wake_led.c", "src/adapter/voice_stream.c",
-    "src/adapter/voice_aec.c", "src/adapter/voice_reference.c",
+    "src/adapter/voice_aec.c", "src/adapter/voice_aec_guard.c", "src/adapter/voice_reference.c",
     "src/adapter/voice_dsp.c", "src/adapter/clap_detector.c",
     "src/adapter/smoke_alarm_detector.c",
     "src/log.c", "src/json.c",

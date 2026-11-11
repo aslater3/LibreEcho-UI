@@ -356,6 +356,7 @@ static void queued_reload(struct le_wake_worker *worker, struct waked_ipc *ipc)
 static void capture_continues(struct le_wake_worker *worker, struct waked_ipc *ipc)
 {
     struct le_voice_aec aec = {0};
+    struct le_voice_aec_guard guard;
     struct le_voice_reference reference = {0};
     struct le_voice_vad vad;
     struct waked_metrics metrics = {0};
@@ -368,12 +369,13 @@ static void capture_continues(struct le_wake_worker *worker, struct waked_ipc *i
     reference.fd = -1;
     require(socketpair(AF_UNIX, SOCK_STREAM, 0, pair) == 0, "PCM socket failed");
     ipc->audio_subscribers[0] = pair[1];
+    le_voice_aec_guard_init(&guard, "");
     le_voice_vad_init(&vad);
     for (i = 0; i < 16; ++i) {
         if (i == 8)
             command(ipc, worker, "set_word", "{\"word\":\"Alexa\"}", 1,
                     "capture reload failed");
-        require(process_frame(&aec, &reference, &vad, worker, ipc, microphone,
+        require(process_frame(&aec, &guard, &reference, &vad, worker, ipc, microphone,
                               preroll, &position, -1, 0, &metrics) == 0,
                 "capture processing stopped across reload");
         require(le_voice_stream_read_frame(pair[0], &frame) == 1,
