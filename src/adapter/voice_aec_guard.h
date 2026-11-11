@@ -20,7 +20,7 @@ struct le_voice_aec_guard {
     int previous_active;
     unsigned int seen_discontinuities;
     unsigned int aec_resets;
-    unsigned int edge_resets;
+    unsigned int edge_clears;
     unsigned int discontinuity_resets;
     unsigned int suppressed_logs;
     uint64_t last_log_ns;

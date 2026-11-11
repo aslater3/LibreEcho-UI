@@ -134,10 +134,10 @@ int main(void)
     CHECK(guard.aec_resets == 0);
     CHECK(reference.count > 1000);
 
-    /* Rising edge: ring cleared and AEC reset exactly once. */
+    /* Rising edge: ring cleared, AEC filter kept. */
     now += 10000000ULL;
     frame(&aec, &guard, &reference, 1, now, &aec_frames);
-    CHECK(guard.aec_resets == 1 && guard.edge_resets == 1);
+    CHECK(guard.aec_resets == 0 && guard.edge_clears == 1);
     CHECK(guard.discontinuity_resets == 0);
     CHECK(reference.count == 0 || reference.underflows >= 1);
     CHECK(reference.count < 200);
@@ -152,7 +152,7 @@ int main(void)
         now += 10000000ULL;
         frame(&aec, &guard, &reference, 1, now, &aec_frames);
     }
-    CHECK(guard.aec_resets == 1);
+    CHECK(guard.aec_resets == 0);
     CHECK(reference.count == before - 20U * LE_VOICE_AEC_FRAME_SAMPLES);
     CHECK(reference.discontinuities == 0);
 
@@ -163,13 +163,13 @@ int main(void)
     CHECK(reference.count < 700);
     now += 10000000ULL;
     frame(&aec, &guard, &reference, 1, now, &aec_frames);
-    CHECK(guard.aec_resets == 2 && guard.discontinuity_resets == 1);
-    CHECK(guard.edge_resets == 1);
+    CHECK(guard.aec_resets == 1 && guard.discontinuity_resets == 1);
+    CHECK(guard.edge_clears == 1);
     for (i = 0; i < 5; ++i) {
         now += 10000000ULL;
         frame(&aec, &guard, &reference, 1, now, &aec_frames);
     }
-    CHECK(guard.aec_resets == 2);
+    CHECK(guard.aec_resets == 1);
 
     /* Playback stops, then starts again: second rising edge. */
     now += 500000000ULL;
@@ -178,13 +178,13 @@ int main(void)
     CHECK(le_voice_reference_drain(&reference) == 1);
     now += 10000000ULL;
     frame(&aec, &guard, &reference, 1, now, &aec_frames);
-    CHECK(guard.aec_resets == 3 && guard.edge_resets == 2);
+    CHECK(guard.aec_resets == 1 && guard.edge_clears == 2);
     CHECK(reference.count < 200);
 
     /* Status file: counters, rate-limited rewrite, forced rewrite. */
     le_voice_aec_guard_status(&guard, &reference, 1, aec_frames, now, 0);
-    CHECK(status_value(status, "aec_resets") == 3);
-    CHECK(status_value(status, "aec_edge_resets") == 2);
+    CHECK(status_value(status, "aec_resets") == 1);
+    CHECK(status_value(status, "ref_edge_clears") == 2);
     CHECK(status_value(status, "aec_discontinuity_resets") == 1);
     CHECK(status_value(status, "ref_discontinuities") == 1);
     CHECK(status_value(status, "ref_packets") == reference.packets);
@@ -206,7 +206,7 @@ int main(void)
                               0);
     CHECK(status_value(status, "aec_frames") ==
           (unsigned int)aec_frames + 9U);
-    puts("voice_aec_guard: reset on rising edge and sequence gap, "
+    puts("voice_aec_guard: ring clear on rising edge, AEC reset on sequence gap, "
          "status file ok");
 
 out:
