@@ -1097,6 +1097,13 @@ $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_re
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
+$(BUILD)/test-voice-aec-guard: tests/test_voice_aec_guard.c \
+		src/adapter/voice_aec_guard.c src/adapter/voice_aec.c \
+		src/adapter/voice_reference.c
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -Isrc/adapter -I$(SPEEX_PREFIX)/include \
+		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
+
 $(BUILD)/test-spoken-time: tests/test_spoken_time.c src/adapter/spoken_time.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
@@ -1255,7 +1262,7 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 	python3 tests/test_voice_listening_callers.py
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
-		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
+		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
@@ -1265,7 +1272,7 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		$(filter %.c,$^) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
-		src/adapter/voice_reference.c src/adapter/voice_dsp.c \
+		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
@@ -1316,7 +1323,7 @@ $(BUILD)/%.wake.arm.o: src/adapter/%.c
 		-c $< -o $@
 
 $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
-	src/adapter/voice_aec.h src/adapter/voice_dsp.h \
+	src/adapter/voice_aec.h src/adapter/voice_aec_guard.h src/adapter/voice_dsp.h \
 	src/adapter/voice_reference.h src/adapter/voice_stream.h \
 	src/adapter/clap_detector.h src/adapter/wake_arbiter.h \
 	src/adapter/smoke_alarm_detector.h \
@@ -1324,6 +1331,8 @@ $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
 	src/adapter/wake_worker.h src/json.h
 $(BUILD)/wake_arbiter.wake.arm.o: src/adapter/wake_arbiter.h src/peer_auth.h
 $(BUILD)/voice_aec.wake.arm.o: src/adapter/voice_aec.h
+$(BUILD)/voice_aec_guard.wake.arm.o: src/adapter/voice_aec_guard.h \
+	src/adapter/voice_aec.h src/adapter/voice_reference.h
 $(BUILD)/clap_detector.wake.arm.o: src/adapter/clap_detector.h
 $(BUILD)/smoke_alarm_detector.wake.arm.o: src/adapter/smoke_alarm_detector.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
@@ -1367,6 +1376,7 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/clap_detector.wake.arm.o \
 	$(BUILD)/smoke_alarm_detector.wake.arm.o \
 	$(BUILD)/voice_aec.wake.arm.o \
+	$(BUILD)/voice_aec_guard.wake.arm.o \
 	$(BUILD)/voice_reference.wake.arm.o \
 	$(BUILD)/voice_dsp.wake.arm.o \
 	$(BUILD)/voice_stream.wake.arm.o \
@@ -1480,6 +1490,7 @@ clean:
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
+		$(BUILD)/test-voice-aec-guard \
 		$(BUILD)/test-voice-ns $(BUILD)/test-voice-pipeline-noise \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \

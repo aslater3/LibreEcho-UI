@@ -369,13 +369,14 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
     -Isrc -Isrc/adapter tests/test_bt_media_resample.c src/adapter/radio_resample.c \
     -lm -o build/test-bt-media-resample
 ./build/test-bt-media-resample
-make build/test-voice-aec build/test-voice-reference build/test-spoken-time build/test-timezone
+make build/test-voice-aec build/test-voice-reference build/test-voice-aec-guard build/test-spoken-time build/test-timezone
 ./build/test-voice-aec
 # #401: noise suppressor, and the local pipeline's off/on contract.
 make build/test-voice-ns build/test-voice-pipeline-noise
 ./build/test-voice-ns
 ./build/test-voice-pipeline-noise
 ./build/test-voice-reference
+./build/test-voice-aec-guard
 ./build/test-spoken-time
 ./build/test-timezone
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
