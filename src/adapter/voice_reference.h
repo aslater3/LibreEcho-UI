@@ -52,6 +52,8 @@ void le_voice_reference_read(struct le_voice_reference *reference,
 int le_voice_reference_active(const struct le_voice_reference *reference,
                               uint64_t now_ns,
                               uint64_t timeout_ns);
+/* Drops buffered samples and resampler history (not the counters). */
+void le_voice_reference_clear(struct le_voice_reference *reference);
 void le_voice_reference_close(struct le_voice_reference *reference);
 
 #endif

@@ -4,6 +4,7 @@
 #include "clap_detector.h"
 #include "smoke_alarm_detector.h"
 #include "voice_aec.h"
+#include "voice_aec_guard.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
 #include "voice_stream.h"
@@ -805,6 +806,7 @@ static void handle_control_client(
 }
 
 static int process_frame(struct le_voice_aec *aec,
+                         struct le_voice_aec_guard *guard,
                          struct le_voice_reference *reference,
                          struct le_voice_vad *vad,
                          struct le_wake_worker *wake_worker,
@@ -826,6 +828,8 @@ static int process_frame(struct le_voice_aec *aec,
     size_t dump_count = LE_VOICE_AEC_FRAME_SAMPLES;
 
     metrics->playback_active = playback_active;
+    (void)le_voice_aec_guard_update(guard, aec, reference,
+                                    playback_active, now_ns);
     if (playback_active) {
         le_voice_reference_read(reference, far_end,
                                 LE_VOICE_AEC_FRAME_SAMPLES);
@@ -916,6 +920,7 @@ static int run_waked(const struct waked_config *config)
 {
     struct le_voice_reference reference;
     struct le_voice_aec aec;
+    struct le_voice_aec_guard aec_guard;
     struct le_voice_vad vad;
     struct le_wake_worker wake_worker;
     struct le_wake_worker_metrics wake_metrics;
@@ -935,6 +940,7 @@ static int run_waked(const struct waked_config *config)
     memset(&reference, 0, sizeof(reference));
     reference.fd = -1;
     memset(&aec, 0, sizeof(aec));
+    le_voice_aec_guard_init(&aec_guard, LE_VOICE_AEC_GUARD_STATUS_PATH);
     memset(&wake_worker, 0, sizeof(wake_worker));
     memset(&wake_metrics, 0, sizeof(wake_metrics));
     memset(&metrics, 0, sizeof(metrics));
@@ -1081,6 +1087,11 @@ static int run_waked(const struct waked_config *config)
                     "waked: warning: unable to stop wake LED indicator\n");
         if (descriptors[1].revents & POLLIN)
             (void)le_voice_reference_drain(&reference);
+        le_voice_aec_guard_status(
+            &aec_guard, &reference,
+            le_voice_reference_active(&reference, monotonic_nanoseconds(),
+                                      REFERENCE_TIMEOUT_NS),
+            metrics.aec_frames, monotonic_nanoseconds(), 0);
         if (descriptors[3].revents & POLLIN) {
             struct le_wake_event event;
             ssize_t count;
@@ -1124,7 +1135,7 @@ static int run_waked(const struct waked_config *config)
                         microphone_used - frame_bytes);
                 microphone_used -= frame_bytes;
                 frame_result = process_frame(
-                    &aec, &reference, &vad, &wake_worker, &ipc, microphone,
+                    &aec, &aec_guard, &reference, &vad, &wake_worker, &ipc, microphone,
                     preroll, &preroll_position, dump_fd, dump_limit,
                     &metrics);
                 if (frame_result < 0)
@@ -1148,13 +1159,16 @@ out:
     metrics.max_wake_score = wake_metrics.max_score;
     metrics.max_inference_us = wake_metrics.max_inference_us;
 #endif
+    le_voice_aec_guard_status(&aec_guard, &reference, 0,
+                              metrics.aec_frames, monotonic_nanoseconds(),
+                              1);
     fprintf(stderr,
             "waked: frames=%llu aec_frames=%llu vad_active_frames=%llu "
             "wake_scores=%llu wake_events=%llu max_wake_score=%.6f "
             "max_inference_us=%u wake_dropped_blocks=%llu "
             "wake_failed=%s "
             "ref_packets=%u ref_underflows=%u ref_overruns=%u "
-            "ref_discontinuities=%u\n",
+            "ref_discontinuities=%u aec_resets=%u\n",
             (unsigned long long)metrics.processed_frames,
             (unsigned long long)metrics.aec_frames,
             (unsigned long long)metrics.vad_active_frames,
@@ -1164,7 +1178,7 @@ out:
             (unsigned long long)wake_metrics.dropped_blocks,
             wake_metrics.failed ? "true" : "false",
             reference.packets, reference.underflows, reference.overruns,
-            reference.discontinuities);
+            reference.discontinuities, aec_guard.aec_resets);
     if (dump_fd >= 0)
         close(dump_fd);
     if (microphone_fd >= 0)
