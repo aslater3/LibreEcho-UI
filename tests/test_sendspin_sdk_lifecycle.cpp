@@ -91,6 +91,21 @@ int main() {
     }
     CHECK(session.streaming() && session.generation()>dropped,"feedback pump re-arms a successor without stream/start");
     CHECK(offer()==pcm.size()*2,"audio resumes after the feedback re-arm");
+    // A mute change between an offer that left a DATA awaiting credit and its
+    // retry changes the bytes. That must end in a re-arm, not a dead socket under
+    // a stream that still looks open.
+    server.pause(); CHECK(offer()==0,"offer awaits credit while the engine is stalled");
+    const auto before_mute=session.generation();
+    callback.on_mute_changed(true);
+    CHECK(offer()==0,"retry with changed (muted) bytes is not credited");
+    server.resume();
+    CHECK(!session.streaming() && session.rearm_pending(),"changed retry reports a stream loss");
+    for(int i=0;i<200 && !session.streaming();++i) {
+        listener.pump_feedback();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(session.streaming() && session.generation()>before_mute,"feedback pump re-arms after a changed offer");
+    CHECK(offer()==pcm.size()*2,"audio resumes after the changed-offer re-arm");
     session.disconnect(); server.stop();
     if(g_failures) return 1;
     std::puts("test_sendspin_sdk_lifecycle: all checks passed"); return 0;

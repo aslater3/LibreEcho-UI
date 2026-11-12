@@ -110,7 +110,11 @@ public:
         ++stream_starts_;
         // The engine may still be opening its PCM; a timed-out OPEN stays in
         // flight and the feedback loop resumes it (bounded per call).
-        pending_start_ = session_.start_stream() == SinkResult::Timeout;
+        const SinkResult started = session_.start_stream();
+        pending_start_ = started == SinkResult::Timeout;
+        // Any other failure keeps the SDK stream open with no generation: retry
+        // from the feedback pump within the bounded re-arm budget.
+        if (started != SinkResult::Ok && !pending_start_) session_.request_rearm("stream start");
     }
 
     // Requires the authenticated downstream SDK lifecycle patches. Natural
@@ -156,7 +160,7 @@ public:
         if (!session_.streaming()) return 0;
         const uint64_t accepted = session_.accepted_frames();
         if (accepted < reported_frames_ || accepted - reported_frames_ > UINT32_MAX) {
-            session_.disconnect();
+            session_.request_rearm("boundary accounting");
             return 0;
         }
         // Retire the old generation's *SDK accounting*, not hardware playback.
@@ -166,14 +170,15 @@ public:
         // New-generation timing still includes the real hardware horizon.
         const uint32_t retired = static_cast<uint32_t>(accepted - reported_frames_);
         if (session_.cancel_stream() != SinkResult::Ok) {
-            session_.disconnect();
+            // Nothing verifiably retired; re-arm a fresh generation instead.
+            session_.request_rearm("boundary cancel");
             return 0;
         }
         reset_feedback_locked();
         mute_.reset_stream();
         const SinkResult started = session_.start_stream();
         pending_start_ = started == SinkResult::Timeout;
-        if (started != SinkResult::Ok && !pending_start_) session_.disconnect();
+        if (started != SinkResult::Ok && !pending_start_) session_.request_rearm("boundary restart");
         return retired;
     }
 
@@ -220,7 +225,10 @@ public:
             const auto result = session_.start_stream();
             if (result == SinkResult::Timeout) return false;
             pending_start_ = false;
-            if (result != SinkResult::Ok) return false;
+            if (result != SinkResult::Ok) {
+                session_.request_rearm("stream start");
+                return false;
+            }
         }
         if (pending_finish_) {
             const auto result = session_.stop_stream();

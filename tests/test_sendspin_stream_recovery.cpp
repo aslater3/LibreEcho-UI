@@ -190,6 +190,104 @@ void test_stream_end_while_lost_does_not_rearm() {
     server.stop();
 }
 
+// Offer `frames` frames of pattern PCM with the first sample XORed by `flip`,
+// so a retry can differ from the offer that left a DATA pending.
+size_t write_variant(EngineSinkSession& s, size_t frames, uint32_t timeout_ms,
+                     int16_t flip) {
+    std::vector<int16_t> pcm(frames * 2);
+    fill_pattern(pcm.data(), frames);
+    pcm[0] = static_cast<int16_t>(pcm[0] ^ flip);
+    return s.write(reinterpret_cast<uint8_t*>(pcm.data()),
+                   frames * kBytesPerFrame, timeout_ms);
+}
+
+// A stalled engine leaves a DATA pending without credit; the SDK then offers
+// different bytes (hard-sync prefix drop, gap-fill silence, mute change).
+void leave_data_pending(EngineServer& server, EngineSinkSession& s) {
+    server.pause();
+    CHECK(write_variant(s, 128, 20, 0) == 0u, "stalled engine credits nothing");
+    CHECK(s.streaming(), "stream still open while the DATA awaits its credit");
+}
+
+void test_changed_offer_with_pending_data_rearms() {
+    std::string path = unique_socket_path("rearm");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Ok, "start gen1");
+    const uint32_t gen1 = s.generation();
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame, "gen1 audio accepted");
+    const uint64_t accepted_before = s.accepted_frames();
+
+    leave_data_pending(server, s);
+    CHECK(write_variant(s, 128, 20, 0x55) == 0u,
+          "changed offer is not credited with the abandoned DATA's bytes");
+    server.resume();
+
+    CHECK(s.accepted_frames() == accepted_before,
+          "no frames of the abandoned datagram are counted as accepted");
+    CHECK(s.state() == SessionState::Lost, "changed offer reports the stream as lost");
+    CHECK(s.rearm_pending(), "a re-arm is pending after the changed offer");
+
+    CHECK(rearm_until_settled(s, 200) == SinkResult::Ok, "re-arm opens a successor");
+    CHECK(s.generation() > gen1, "successor generation is strictly higher");
+    CHECK(s.state() == SessionState::Streaming, "streaming again after re-arm");
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame,
+          "audio accepted again after re-arm");
+    CHECK(s.accepted_frames() == 256u, "only the new offer is counted on the successor");
+
+    s.disconnect();
+    server.stop();
+}
+
+void test_fresh_stream_after_changed_offer() {
+    std::string path = unique_socket_path("rearm");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Ok, "start gen1");
+    const uint32_t gen1 = s.generation();
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame, "gen1 audio accepted");
+
+    leave_data_pending(server, s);
+    CHECK(write_variant(s, 128, 20, 0x55) == 0u, "changed offer accepts nothing");
+    server.resume();
+
+    // What the listener does on a stream end then start, with no re-arm between.
+    (void)s.cancel_stream();
+    CHECK(s.start_stream() == SinkResult::Ok, "fresh stream opens after the failure");
+    CHECK(s.generation() > gen1, "fresh stream generation is strictly higher");
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame,
+          "audio accepted on the fresh stream");
+
+    s.disconnect();
+    server.stop();
+}
+
+void test_request_rearm_retries_a_failed_start() {
+    std::string path = unique_socket_path("rearm");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Ok, "start gen1");
+    const uint32_t gen1 = s.generation();
+    CHECK(s.cancel_stream() == SinkResult::Ok, "fence gen1");
+    CHECK(!s.rearm_pending(), "a fenced stream has no re-arm pending");
+
+    // A failed start/cancel leaves the SDK stream open with no generation.
+    s.request_rearm("test");
+    CHECK(s.state() == SessionState::Lost && s.rearm_pending(), "request marks the stream lost");
+    CHECK(rearm_until_settled(s, 200) == SinkResult::Ok, "re-arm opens a successor");
+    CHECK(s.generation() > gen1, "successor generation is strictly higher");
+    CHECK(write_frames(s, 128, 1000) == 128 * kBytesPerFrame, "audio accepted after the requested re-arm");
+
+    s.disconnect();
+    server.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -199,6 +297,9 @@ int main() {
     test_progress_poll_notices_drop_without_writes();
     test_rearm_attempts_are_bounded_when_engine_is_gone();
     test_stream_end_while_lost_does_not_rearm();
+    test_changed_offer_with_pending_data_rearms();
+    test_fresh_stream_after_changed_offer();
+    test_request_rearm_retries_a_failed_start();
 
     if (libreecho::sendspin::test::g_failures != 0) {
         std::fprintf(stderr,
