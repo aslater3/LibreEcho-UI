@@ -511,9 +511,16 @@ size_t EngineSink::on_audio_write(const uint8_t* pcm, size_t length,
         const size_t remaining = length - accepted_bytes;
         if (pending_frames_) {
             const size_t pending_bytes = pending_frames_ * LE_AUDIO_SINK_BYTES_PER_FRAME;
-            // An SDK retry must offer the same unaccepted prefix. A changed
-            // offer cannot inherit somebody else's delayed application credit.
+            // A changed offer cannot inherit somebody else's delayed application
+            // credit, so the connection is reset. The SDK does not always retry the
+            // same prefix (hard-sync prefix drop, gap-fill silence, a mute change
+            // between offer and retry), so this is a stream loss to re-arm from,
+            // not a dead socket under a stream that still looks open.
             if (remaining < pending_bytes || std::memcmp(src, pending_pcm_, pending_bytes) != 0) {
+                std::fprintf(stderr,
+                             "sendspind: SDK offered different audio while a datagram awaited its credit (generation %u); re-arming\n",
+                             static_cast<unsigned>(generation_));
+                lose_stream_locked();
                 close_socket_locked();
                 last_result_ = SinkResult::Malformed;
                 break;

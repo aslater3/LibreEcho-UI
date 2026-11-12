@@ -139,6 +139,9 @@ public:
     // (kRearmMaxFailures, and a wall-clock deadline) is spent, otherwise the
     // failure of this attempt.
     SinkResult rearm_stream();
+    // A stream the SDK still holds open has no live generation (a failed
+    // start/cancel): mark it Lost with a fresh budget so rearm_stream() retries.
+    void request_rearm(const char* cause);
     // True while the stream is Lost and the re-arm budget is not yet spent.
     bool rearm_pending() const;
     // Engine-path re-arm attempts since the most recent loss (test/observability).
@@ -179,6 +182,7 @@ private:
     SinkResult start_stream_locked();
     // Streaming -> Lost when the sink reports the engine dropped the generation.
     void note_loss_locked(const char* cause);
+    void begin_loss_locked();
     bool rearm_budget_left_locked() const;
 
     EngineSinkSessionConfig config_{};

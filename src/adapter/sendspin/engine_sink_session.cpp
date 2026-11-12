@@ -158,16 +158,26 @@ void EngineSinkSession::disconnect() {
     rearm_failures_ = 0;
 }
 
-void EngineSinkSession::note_loss_locked(const char* cause) {
-    if (state_ != SessionState::Streaming) return;
+void EngineSinkSession::begin_loss_locked() {
     state_ = SessionState::Lost;
     rearm_attempts_ = 0;
     rearm_failures_ = 0;
     lost_since_us_ = session_now_us();
+}
+
+void EngineSinkSession::note_loss_locked(const char* cause) {
+    if (state_ != SessionState::Streaming) return;
+    begin_loss_locked();
     std::fprintf(stderr,
                  "sendspind: engine dropped stream generation %u (%s, err=%u); re-arming\n",
                  static_cast<unsigned>(sink_.generation()), cause,
                  static_cast<unsigned>(sink_.last_error()));
+}
+
+void EngineSinkSession::request_rearm(const char* cause) {
+    std::lock_guard<std::mutex> guard(mu_);
+    begin_loss_locked();
+    std::fprintf(stderr, "sendspind: no live stream generation (%s); re-arming\n", cause);
 }
 
 size_t EngineSinkSession::write(const uint8_t* pcm, size_t length,
@@ -180,6 +190,8 @@ size_t EngineSinkSession::write(const uint8_t* pcm, size_t length,
     const size_t accepted = sink_.on_audio_write(
         pcm, length, clamp(timeout_ms, config_.max_write_timeout_ms));
     if (sink_.stream_lost()) note_loss_locked("write");
+    // Safety net: a Streaming session never outlives its armed, connected sink.
+    else if (!sink_.connected() || !sink_.open_generation()) note_loss_locked("sink closed");
     return accepted;
 }
 
@@ -189,6 +201,7 @@ SinkResult EngineSinkSession::poll(EngineSinkTiming* out) {
                                    kSessionMaxOpTimeoutMs);
     const SinkResult r = sink_.progress(out, timeout);
     if (sink_.stream_lost()) note_loss_locked("progress");
+    else if (!sink_.connected() || !sink_.open_generation()) note_loss_locked("sink closed");
     return r;
 }
 
