@@ -444,6 +444,19 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
     char not_before[16], not_after[16];
     int rc = LE_IO, len;
 
+    mbedtls_pk_init(&key);
+    mbedtls_x509write_crt_init(&crt);
+    mbedtls_ctr_drbg_init(&drbg);
+    mbedtls_entropy_init(&entropy);
+    mbedtls_mpi_init(&serial);
+
+    /* Seeded before the reuse check: Mbed TLS 3.x rejects a NULL RNG in
+       mbedtls_pk_check_pair() for EC keys, which made every start regenerate
+       the pair (#522). */
+    if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
+                              (const unsigned char *)SEED, strlen(SEED)))
+        goto done;
+
     if (!access(cert_path, R_OK) && !access(key_path, R_OK)) {
         mbedtls_x509_crt existing;
         mbedtls_pk_context existing_key;
@@ -451,26 +464,21 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
         mbedtls_x509_crt_init(&existing);
         mbedtls_pk_init(&existing_key);
         if (!mbedtls_x509_crt_parse_file(&existing, cert_path) &&
-            !mbedtls_pk_parse_keyfile(&existing_key, key_path, NULL, NULL, NULL) &&
-            !mbedtls_pk_check_pair(&existing.pk, &existing_key, NULL, NULL) &&
+            !mbedtls_pk_parse_keyfile(&existing_key, key_path, NULL,
+                                      mbedtls_ctr_drbg_random, &drbg) &&
+            !mbedtls_pk_check_pair(&existing.pk, &existing_key,
+                                   mbedtls_ctr_drbg_random, &drbg) &&
             !mbedtls_x509_time_is_past(&existing.valid_to))
             pair_ok = 1;
         mbedtls_pk_free(&existing_key);
         mbedtls_x509_crt_free(&existing);
-        if (pair_ok)
-            return LE_OK;                   /* existing certificate/key pair is current */
+        if (pair_ok) {
+            rc = LE_OK;                     /* existing certificate/key pair is current */
+            goto done;
+        }
         /* A partial write, mismatched key, or expired certificate is replaced. */
     }
 
-    mbedtls_pk_init(&key);
-    mbedtls_x509write_crt_init(&crt);
-    mbedtls_ctr_drbg_init(&drbg);
-    mbedtls_entropy_init(&entropy);
-    mbedtls_mpi_init(&serial);
-
-    if (mbedtls_ctr_drbg_seed(&drbg, mbedtls_entropy_func, &entropy,
-                              (const unsigned char *)SEED, strlen(SEED)))
-        goto done;
     if (mbedtls_pk_setup(&key, mbedtls_pk_info_from_type(MBEDTLS_PK_ECKEY)))
         goto done;
     /* P-256 rather than RSA: seconds instead of minutes to generate on this

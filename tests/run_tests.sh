@@ -27,6 +27,15 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tes
 ./build/test-unit
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_json_text.c src/json.c -o build/test-json-text
 ./build/test-json-text
+# #522: the self-signed HTTPS pair must survive restarts; links the real src/tls.c.
+if [ -n "${ESPHOMED_TEST_TLS_PREFIX:-}" ]; then
+    TP=$ESPHOMED_TEST_TLS_PREFIX
+    cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Werror -Isrc -I"$TP/include" tests/test_tls_self_signed.c src/tls.c \
+        "$TP/lib/libmbedtls.a" "$TP/lib/libmbedx509.a" "$TP/lib/libmbedcrypto.a" -o build/test-tls-self-signed
+    ./build/test-tls-self-signed
+else
+    echo "SKIP test-tls-self-signed: set ESPHOMED_TEST_TLS_PREFIX to a staged mbedTLS 3.6.7 prefix"
+fi
 make build/test-update-identity
 ./build/test-update-identity
 python3 tests/test_github_link_contract.py
