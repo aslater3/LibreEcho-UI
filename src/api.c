@@ -177,8 +177,8 @@ static void update_status_json(struct api_context*c,struct api_response*r)
         key_from_file("/data/libreecho/update/state","state",state,sizeof(state));
         key_from_file("/data/libreecho/update/state","progress",progress_text,
                       sizeof(progress_text));
-        pending=key_from_file("/data/libreecho/update/pending","version",version,
-                              sizeof(version));
+        key_from_file("/data/libreecho/update/pending","version",version,
+                      sizeof(version));
         key_from_file("/data/libreecho/update/pending","slot",pending_slot,
                       sizeof(pending_slot));
         key_from_file("/data/libreecho/update/installed","version",
@@ -227,13 +227,9 @@ static void update_status_json(struct api_context*c,struct api_response*r)
             strcpy(inactive,"a");
         }
     }
-    if(pending&&!strcmp(state,"reboot-pending")&&
-       ((pending_slot[0]=='a'&&!pending_slot[1])||
-        (pending_slot[0]=='b'&&!pending_slot[1]))&&
-       !strcmp(selected,pending_slot)){
-        strcpy(inactive,pending_slot);
-        strcpy(current,pending_slot[0]=='a'?"b":"a");
-    }
+    /* A v3 pending record carries no version=; the slot alone marks it. */
+    pending=supported&&update_pending_resolve(pending_slot,version,check_status,
+        latest_version,state,selected,version,sizeof(version),current,inactive);
     json_escape(escaped_state,sizeof(escaped_state),state);
     json_escape(escaped_version,sizeof(escaped_version),version);
     if(!installed_version[0])snprintf(installed_version,sizeof(installed_version),"%s",LE_OS_VERSION_STRING);

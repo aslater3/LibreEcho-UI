@@ -60,4 +60,27 @@ int update_record_read(const char *path, struct le_update_field *fields,
 int update_identity_tag_valid(const char *value);
 int update_identity_sha256_valid(const char *value);
 
+/* Decide whether an installed update waits for a restart, and what the slots
+ * and version shown for it are.
+ *
+ * A pending record that names its slot ("a" or "b") marks a pending update
+ * while the install state is reboot-pending; the update tool writes the record
+ * before it activates the slot, so a record left by a failed activation does
+ * not count. The current update tool (OTA format v3) writes schema, slot,
+ * transaction_id and manifest_sha256 and no version, while legacy records also
+ * carried version=. The version is the record's own when present; a v3 record
+ * falls back to the check record's latest_version, but only while the check
+ * status is reboot-pending (the check describes that same install), and is
+ * empty otherwise.
+ *
+ * When an update is pending and the bootctl-selected slot is the pending slot, the running slot is the other
+ * one: current and inactive (the caller's slot-view buffers, at least 4 bytes)
+ * are corrected accordingly and otherwise left untouched. record_version may be
+ * empty. Returns 1 when an update is pending, else 0 with version empty. */
+int update_pending_resolve(const char *pending_slot, const char *record_version,
+                           const char *check_status, const char *latest_version,
+                           const char *state, const char *selected,
+                           char *version, size_t version_size,
+                           char *current, char *inactive);
+
 #endif
