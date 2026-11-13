@@ -115,6 +115,9 @@ int main(void)
     memset(&reference, 0, sizeof(reference));
     reference.fd = -1;
     memset(&aec, 0, sizeof(aec));
+    /* Default path must be readable by SSH users: /run/libreecho is 0700. */
+    CHECK(strcmp(LE_VOICE_AEC_GUARD_STATUS_PATH,
+                 "/run/libreecho-audio/waked-aec.status") == 0);
     CHECK(mkdtemp(root) != NULL);
     CHECK(snprintf(sock, sizeof(sock), "%s/ref.sock", root) > 0);
     CHECK(snprintf(status, sizeof(status), "%s/aec.status", root) > 0);

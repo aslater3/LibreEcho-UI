@@ -6,8 +6,10 @@
 #include "voice_aec.h"
 #include "voice_reference.h"
 
-/* Live status file, rewritten in RAM only (never /data or flash). */
-#define LE_VOICE_AEC_GUARD_STATUS_PATH "/run/libreecho/waked-aec.status"
+/* Live status file, rewritten in RAM only (never /data or flash). It lives in
+ * /run/libreecho-audio (0755) because /run/libreecho is root-only (0700) and
+ * SSH accounts could not read it (LibreEcho#356). */
+#define LE_VOICE_AEC_GUARD_STATUS_PATH "/run/libreecho-audio/waked-aec.status"
 #define LE_VOICE_AEC_GUARD_STATUS_INTERVAL_NS 10000000000ULL
 #define LE_VOICE_AEC_GUARD_LOG_INTERVAL_NS 1000000000ULL
 #define LE_VOICE_AEC_GUARD_STATUS_BYTES 512U
