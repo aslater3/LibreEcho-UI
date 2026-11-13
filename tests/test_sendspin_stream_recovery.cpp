@@ -288,6 +288,164 @@ void test_request_rearm_retries_a_failed_start() {
     server.stop();
 }
 
+
+// An engine that outlived a previous sendspind has seen far higher generations
+// than a restarted session (which starts at 1). Raise the engine's
+// last_generation by opening and fencing `gen` from a throwaway session.
+void engine_has_seen(EngineServer& server, const std::string& path, uint32_t gen) {
+    (void)server;
+    EngineSinkSessionConfig cfg = make_config(path);
+    cfg.first_generation = gen;
+    EngineSinkSession prior(cfg);
+    SinkResult r = SinkResult::Timeout;
+    for (int i = 0; i < 200 && r == SinkResult::Timeout; ++i) r = prior.start_stream();
+    CHECK(r == SinkResult::Ok, "prior session opens high generation");
+    r = SinkResult::Timeout;
+    for (int i = 0; i < 200 && r == SinkResult::Timeout; ++i) r = prior.cancel_stream();
+    CHECK(r == SinkResult::Ok, "prior session fences it");
+    prior.disconnect();
+}
+
+void test_start_probes_past_high_engine_generation() {
+    std::string path = unique_socket_path("probe");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+    engine_has_seen(server, path, 1000);
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Ok, "start probes past generation 1000");
+    const uint32_t gen = s.generation();
+    CHECK(gen > 1000u && gen < 1000u + 100000u, "opened just above the engine's generation");
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame, "audio accepted after probing");
+
+    // The next start continues upward; it does not probe again from 1.
+    CHECK(s.cancel_stream() == SinkResult::Ok, "fence");
+    CHECK(s.start_stream() == SinkResult::Ok, "second start");
+    CHECK(s.generation() == gen + 1u, "second start used the next generation, no re-probe");
+
+    s.disconnect();
+    server.stop();
+}
+
+void test_rearm_probes_past_high_engine_generation() {
+    std::string path = unique_socket_path("probe");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Ok, "start gen1");
+    const uint32_t gen1 = s.generation();
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame, "gen1 audio accepted");
+
+    // The engine loses the generation and has meanwhile moved far ahead.
+    engine_drops_generation(server, gen1);
+    s.disconnect();  // the engine serves one peer at a time
+    engine_has_seen(server, path, 5000);
+    s.request_rearm("test");
+    CHECK(s.state() == SessionState::Lost, "loss recorded");
+    CHECK(rearm_until_settled(s, 200) == SinkResult::Ok, "re-arm probes past the engine's generation");
+    CHECK(s.generation() > 5000u, "re-armed above the engine's generation");
+    CHECK(write_frames(s, 256, 1000) == 256 * kBytesPerFrame, "audio accepted after re-arm");
+
+    s.disconnect();
+    server.stop();
+}
+
+// Scripted engine answering every OPEN with `status_for(generation)`; records
+// the generations it was asked to open.
+struct OpenScript {
+    std::mutex mu;
+    std::vector<uint32_t> seen;
+    std::vector<uint32_t> snapshot() {
+        std::lock_guard<std::mutex> g(mu);
+        return seen;
+    }
+};
+
+void serve_opens(OpenScript& script, int fd, uint32_t (*status_for)(uint32_t)) {
+    uint8_t buf[2048];
+    for (;;) {
+        ssize_t n = raw_recv(fd, buf, sizeof(buf));
+        if (n < (ssize_t)(LE_AUDIO_SINK_HEADER_BYTES + 8)) return;
+        const uint32_t gen = le_audio_sink_get_u32(buf + LE_AUDIO_SINK_HEADER_BYTES + 4);
+        { std::lock_guard<std::mutex> g(script.mu); script.seen.push_back(gen); }
+        uint8_t out[LE_AUDIO_SINK_HEADER_BYTES + LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES];
+        le_audio_sink_encode_header(out, LE_AUDIO_SINK_TYPE_OPEN_ACK,
+                                    LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES);
+        uint8_t* p = out + LE_AUDIO_SINK_HEADER_BYTES;
+        std::memset(p, 0, LE_AUDIO_SINK_OPEN_ACK_PAYLOAD_BYTES);
+        le_audio_sink_put_u32(p + 0, status_for(gen));
+        le_audio_sink_put_u32(p + 4, 0x1234u);
+        le_audio_sink_put_u32(p + 8, gen);
+        le_audio_sink_put_u32(p + 12, LE_AUDIO_SINK_OUTPUT_RATE);
+        le_audio_sink_put_u16(p + 16, LE_AUDIO_SINK_OUTPUT_CHANNELS);
+        le_audio_sink_put_u16(p + 18, LE_AUDIO_SINK_FORMAT_S16_LE);
+        le_audio_sink_put_u32(p + 28, LE_AUDIO_SINK_OPEN_READY);
+        raw_send(fd, out, sizeof(out));
+    }
+}
+
+uint32_t geometry_after_two_stale(uint32_t gen) {
+    return gen <= 2u ? LE_AUDIO_SINK_ERR_STALE_GENERATION : LE_AUDIO_SINK_ERR_GEOMETRY;
+}
+
+uint32_t always_stale(uint32_t) { return LE_AUDIO_SINK_ERR_STALE_GENERATION; }
+
+void test_non_stale_rejection_stops_probing() {
+    std::string path = unique_socket_path("probe");
+    OpenScript script;
+    RawPeer peer;
+    CHECK(peer.start(path, [&](int fd) { serve_opens(script, fd, geometry_after_two_stale); }),
+          "peer start");
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Rejected, "GEOMETRY refusal fails the start");
+    const std::vector<uint32_t> seen = script.snapshot();
+    CHECK(seen.size() == 3u && seen[0] == 1u && seen[1] == 2u && seen[2] == 4u,
+          "probed 1, 2, 4 then stopped on the non-stale refusal");
+    CHECK(s.state() == SessionState::Connected, "session not armed");
+    s.disconnect();
+    peer.stop();
+}
+
+void test_probe_bound_and_never_lose_ground() {
+    std::string path = unique_socket_path("probe");
+    OpenScript script;
+    RawPeer peer;
+    CHECK(peer.start(path, [&](int fd) { serve_opens(script, fd, always_stale); }),
+          "peer start");
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Rejected, "engine too far ahead: start fails");
+    std::vector<uint32_t> first = script.snapshot();
+    CHECK(first.size() == 33u, "one OPEN plus 32 probes, then gave up");
+    CHECK(first.front() == 1u, "first call starts at 1");
+    for (size_t i = 1; i < first.size(); ++i)
+        CHECK(first[i] > first[i - 1], "probe generations strictly increase");
+    CHECK(s.start_stream() == SinkResult::Rejected, "still too far ahead");
+    std::vector<uint32_t> all = script.snapshot();
+    CHECK(all.size() == 66u, "second call probed again");
+    CHECK(all[33] == first.back() + 1u,
+          "second call starts one above the highest generation already refused");
+    s.disconnect();
+    peer.stop();
+}
+
+void test_probe_bound_then_success_on_later_call() {
+    std::string path = unique_socket_path("probe");
+    EngineServer server;
+    CHECK(server.start(path), "server start");
+    engine_has_seen(server, path, 3000000u);
+
+    EngineSinkSession s(make_config(path));
+    CHECK(s.start_stream() == SinkResult::Rejected, "beyond one call's reach: start fails");
+    CHECK(s.state() == SessionState::Connected, "not armed");
+    SinkResult r = SinkResult::Rejected;
+    for (int i = 0; i < 4 && r != SinkResult::Ok; ++i) r = s.start_stream();
+    CHECK(r == SinkResult::Ok, "later calls continue upward and succeed");
+    CHECK(s.generation() > 3000000u, "opened above the engine's generation");
+    s.disconnect();
+    server.stop();
+}
+
 }  // namespace
 
 int main() {
@@ -300,6 +458,11 @@ int main() {
     test_changed_offer_with_pending_data_rearms();
     test_fresh_stream_after_changed_offer();
     test_request_rearm_retries_a_failed_start();
+    test_start_probes_past_high_engine_generation();
+    test_rearm_probes_past_high_engine_generation();
+    test_non_stale_rejection_stops_probing();
+    test_probe_bound_and_never_lose_ground();
+    test_probe_bound_then_success_on_later_call();
 
     if (libreecho::sendspin::test::g_failures != 0) {
         std::fprintf(stderr,
