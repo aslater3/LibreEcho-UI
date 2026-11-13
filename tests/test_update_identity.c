@@ -637,8 +637,64 @@ static void torn_read_cases(void)
     }
 }
 
+static void pending_cases(void)
+{
+    char version[96], current[4], inactive[4];
+    int pending;
+
+#define PENDING(slot, rv, cs, lv, st, sel, sc, si) \
+    (strcpy(version, "stale"), strcpy(current, sc), strcpy(inactive, si), \
+     update_pending_resolve(slot, rv, cs, lv, st, sel, version, sizeof(version), \
+                            current, inactive))
+
+    /* v3 record (slot only), restart waiting, check record names the install. */
+    pending = PENDING("b", "", "reboot-pending", "0.14.6", "reboot-pending", "b", "b", "a");
+    check(pending == 1 && !strcmp(version, "0.14.6"),
+          "a v3 pending record takes the check record's version");
+    check(!strcmp(current, "a") && !strcmp(inactive, "b"),
+          "a v3 pending record reports the running slot, not the selected one");
+
+    /* v3 record, check record says something else: pending, version unknown. */
+    pending = PENDING("b", "", "error", "0.14.6", "reboot-pending", "b", "b", "a");
+    check(pending == 1 && !version[0],
+          "a v3 pending record beside a non-reboot-pending check has no version");
+    check(!strcmp(current, "a") && !strcmp(inactive, "b"),
+          "the slot correction does not depend on the check record");
+
+    /* Legacy record with version=: unchanged, its own version wins. */
+    pending = PENDING("a", "0.13.21", "reboot-pending", "0.14.6", "reboot-pending", "a", "a", "b");
+    check(pending == 1 && !strcmp(version, "0.13.21") &&
+          !strcmp(current, "b") && !strcmp(inactive, "a"),
+          "a legacy pending record keeps its own version");
+    /* A record left behind by a failed activation is not pending. */
+    pending = PENDING("a", "0.13.21", "error", "", "failed", "a", "a", "b");
+    check(pending == 0 && !version[0] &&
+          !strcmp(current, "a") && !strcmp(inactive, "b"),
+          "a pending record is ignored unless the update waits for a restart");
+    pending = PENDING("b", "", "error", "0.14.6", "idle", "b", "b", "a");
+    check(pending == 0 && !version[0] && !strcmp(current, "b"),
+          "a stale v3 record after the restart is not pending");
+
+    /* The version may be passed in place, as the daemon does. */
+    strcpy(version, "0.13.21");
+    pending = update_pending_resolve("a", version, "", "", "reboot-pending", "b", version,
+                                     sizeof(version), current, inactive);
+    check(pending == 1 && !strcmp(version, "0.13.21"), "an aliased version survives");
+
+    /* No pending record, or an invalid slot: not pending, nothing changed. */
+    pending = PENDING("-", "", "reboot-pending", "0.14.6", "reboot-pending", "b", "b", "a");
+    check(pending == 0 && !version[0] && !strcmp(current, "b") && !strcmp(inactive, "a"),
+          "no pending record is not pending");
+    pending = PENDING("ab", "1.0", "reboot-pending", "0.14.6", "reboot-pending", "b", "b", "a");
+    check(pending == 0 && !version[0], "an invalid pending slot is not pending");
+    pending = PENDING("c", "", "reboot-pending", "0.14.6", "reboot-pending", "b", "b", "a");
+    check(pending == 0, "an unknown pending slot is not pending");
+#undef PENDING
+}
+
 int main(void)
 {
+    pending_cases();
     validator_cases();
     record_cases();
     torn_read_cases();

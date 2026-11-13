@@ -2048,7 +2048,7 @@ async function systemPage(){const generation=state.renderGeneration,page=state.p
   const checkTime=ota.last_check_epoch?new Date(ota.last_check_epoch*1000).toLocaleString():'Not checked';
   const successTime=ota.last_success_epoch?new Date(ota.last_success_epoch*1000).toLocaleString():'Never';
   const checkLabels={'not-checked':'Not checked',checking:'Checking',downloading:'Downloading','up-to-date':'Up to date','update-available':'Update available','update-held-after-rollback':'Held after rollback','reboot-pending':'Ready to restart',error:'Check failed'};
-  const errorLabels={asset_missing:'Asset missing',asset_access_denied:'Asset access denied',download_transport:'Network error',downloaded_package_invalid:'Invalid signature or package',install_failed:'Installation failed'};
+  const errorLabels={asset_missing:'Asset missing',asset_access_denied:'Asset access denied',download_transport:'Network error',downloaded_package_invalid:'Invalid signature or package',install_failed:'Installation failed',update_already_pending:'Update installed — restart to finish'};
   const checkResult=ota.check_status==='error'?(errorLabels[ota.check_error]||ota.check_error||'Check failed'):(checkLabels[ota.check_status]||ota.check_status);
   const sourceStatus=ota.source_reachable==='true'?'Reachable':ota.source_reachable==='false'?'Unreachable':'Not checked';
   const sourceName=ota.source==='github-releases'?'GitHub Releases':ota.source||'Not configured';
