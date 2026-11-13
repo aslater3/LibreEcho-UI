@@ -254,6 +254,47 @@ function clockFormatField(value,id) {
     `</select></label>`;
 }
 
+/*
+ * PUT /voice-pipeline answers 202 with restart.state "pending" while the voice
+ * daemons are stopped and started (src/api.c voice_pipeline_restart_state():
+ * pending | ready | failed). The assistant daemon is down for that window, so
+ * PUT /assistant returns 503 until it is back (#365). Wait for the restart.
+ * The init scripts can spend up to ~10 s stopping each daemon, so allow two
+ * minutes in total; the server has no restart deadline of its own.
+ */
+const PIPELINE_RESTART_POLL_MS=1000;
+const PIPELINE_RESTART_TIMEOUT_MS=120000;
+/* agentd's init start returns once the process exists, not once its socket is
+   listening, so the first assistant PUT after "ready" can still see 503. */
+const ASSISTANT_RETRY_MS=1000;
+const ASSISTANT_RETRY_ATTEMPTS=10;
+const ASSISTANT_UNAVAILABLE='Voice assistant service is unavailable';
+function integrationsSleep(ms) { return new Promise(resolve=>setTimeout(resolve,ms)); }
+
+async function waitForPipelineRestart(result) {
+  const deadline=Date.now()+PIPELINE_RESTART_TIMEOUT_MS;
+  let restart=result?.restart;
+  /* No restart object: nothing was tracked (mock backend), nothing to wait for. */
+  if(!restart)return;
+  while(restart?.state==='pending') {
+    if(Date.now()>=deadline)throw new Error('Voice pipeline restart timed out; check the Integrations page and try again');
+    await integrationsSleep(PIPELINE_RESTART_POLL_MS);
+    restart=(await api('/voice-pipeline'))?.restart;
+  }
+  if(restart?.state==='failed')throw new Error(restart.error||'Voice pipeline restart failed');
+  if(restart?.state!=='ready')throw new Error('Voice pipeline restart reported an unknown state');
+}
+
+async function putAssistantAfterRestart(body) {
+  for(let attempt=1;;attempt++) {
+    try { return await api('/assistant',{method:'PUT',body:JSON.stringify(body)}); }
+    catch(error) {
+      if(error.message!==ASSISTANT_UNAVAILABLE||attempt>=ASSISTANT_RETRY_ATTEMPTS)throw error;
+    }
+    await integrationsSleep(ASSISTANT_RETRY_MS);
+  }
+}
+
 async function setAssistantProvider(provider,enabled,pipeline,assistant) {
   if(state.busy)return;
   if(enabled&&provider==='openai-codex'&&!chatgptAccount(assistant).signedIn) {
@@ -269,23 +310,27 @@ async function setAssistantProvider(provider,enabled,pipeline,assistant) {
       if(local) {
         await api('/privacy',{method:'PUT',body:JSON.stringify({local_only:false})});
       }
-      await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
+      await waitForPipelineRestart(await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
         mode:local?'custom':'local',
         stt_wyoming_uri:pipeline?.stt?.wyoming_uri||'',
         stt_model:pipeline?.stt?.model||'whisper-small',
         tts_wyoming_uri:pipeline?.tts?.wyoming_uri||'',
         tts_voice:pipeline?.tts?.voice||'en_GB-alan-medium'
-      })});
+      })}));
+      await putAssistantAfterRestart({provider,enabled});
+    } else {
+      await api('/assistant',{method:'PUT',body:JSON.stringify({provider,enabled})});
     }
-    await api('/assistant',{method:'PUT',body:JSON.stringify({provider,enabled})});
     if(!enabled&&provider==='openai-compatible'&&pipeline?.mode==='custom') {
-      await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
+      /* Wait here too, or the page re-renders mid-restart and briefly shows
+         the assistant as unavailable. */
+      await waitForPipelineRestart(await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
         mode:'local',
         stt_wyoming_uri:pipeline?.stt?.wyoming_uri||'',
         stt_model:pipeline?.stt?.model||'whisper-small',
         tts_wyoming_uri:pipeline?.tts?.wyoming_uri||'',
         tts_voice:pipeline?.tts?.voice||'en_GB-alan-medium'
-      })});
+      })}));
     }
     toast(enabled?(provider==='openai-compatible'?'Local LLM enabled':'On Device Voice Assistant enabled'):'Voice assistant disabled');
     await integrationsPage();
@@ -573,13 +618,13 @@ async function integrationsPage() {
         if(localEnabled) {
           await api('/privacy',{method:'PUT',body:JSON.stringify({local_only:false})});
         }
-        await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
+        await waitForPipelineRestart(await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
           mode:localEnabled?'custom':'local',
           stt_wyoming_uri:$('#stt-wyoming-uri').value.trim(),
           stt_model:$('#stt-model').value.trim(),
           tts_wyoming_uri:$('#tts-wyoming-uri').value.trim(),
           tts_voice:$('#tts-voice').value.trim()
-        })});
+        })}));
         const body={
           provider:'openai-compatible',
           enabled:localEnabled,
@@ -590,7 +635,7 @@ async function integrationsPage() {
         };
         const key=$('#local-api-key').value;
         if(key)body.api_key=key;
-        await api('/assistant',{method:'PUT',body:JSON.stringify(body)});
+        await putAssistantAfterRestart(body);
         toast('Local AI stack settings saved');
       } catch(error) {
         toast(error.message,true);
