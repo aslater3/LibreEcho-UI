@@ -10,6 +10,7 @@
 #include "engine_sink_session.h"
 
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 
 namespace libreecho {
@@ -24,6 +25,15 @@ int64_t session_now_us() {
     return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
+}
+
+// Stale-generation probing: at most kStaleProbeMax extra OPENs, steps doubling
+// up to kStaleProbeMaxStep (about one million generations of reach).
+constexpr uint32_t kStaleProbeMax = 32;
+constexpr uint32_t kStaleProbeMaxStep = 1u << 16;
+
+bool stale_refusal(SinkResult r, uint32_t err) {
+    return r == SinkResult::Rejected && err == LE_AUDIO_SINK_ERR_STALE_GENERATION;
 }
 
 }  // namespace
@@ -81,24 +91,35 @@ SinkResult EngineSinkSession::start_stream_locked() {
         r = connect_locked();
         if (r == SinkResult::Ok) r = sink_.open(attempt, timeout);
     }
-    if (r != SinkResult::Ok &&
-        sink_.last_error() == LE_AUDIO_SINK_ERR_STALE_GENERATION) {
-        // The engine already saw this generation (a previous process instance).
-        // Advance our own monotonic counter and retry a bounded number of times;
-        // we never guess the engine's exact value.
-        for (int i = 0; i < 8 && r != SinkResult::Ok; ++i) {
-            ++attempt;
-            r = sink_.open(attempt, timeout);
-            if (r != SinkResult::Ok &&
-                sink_.last_error() != LE_AUDIO_SINK_ERR_STALE_GENERATION)
-                break;
-        }
+    // The engine outlives sendspind, so it may have seen generations far above
+    // ours. Probe upward with doubling steps (bounded) until it accepts. Only a
+    // STALE_GENERATION refusal keeps probing; a Timeout leaves the OPEN in
+    // flight for a resuming retry and must not be read as stale.
+    uint32_t probes = 0;
+    uint32_t step = 1;
+    while (stale_refusal(r, sink_.last_error()) && probes < kStaleProbeMax &&
+           UINT32_MAX - attempt > step) {
+        attempt += step;
+        if (step < kStaleProbeMaxStep) step *= 2u;
+        ++probes;
+        r = sink_.open(attempt, timeout);
     }
     if (r != SinkResult::Ok) {
         state_ = SessionState::Connected;
+        // Never lose ground: every generation up to `attempt` was refused as
+        // stale, so continue above it. Any other outcome (Timeout in flight,
+        // another error) retries `attempt` itself.
+        if (stale_refusal(r, sink_.last_error()))
+            next_generation_ = attempt == UINT32_MAX ? attempt : attempt + 1u;
+        else
+            next_generation_ = attempt;
         return r;
     }
-    next_generation_ = attempt + 1u;
+    if (probes > 0)
+        std::fprintf(stderr,
+                     "sendspind: engine had seen newer generations; opened generation %u after %u probe(s)\n",
+                     static_cast<unsigned>(attempt), static_cast<unsigned>(probes));
+    next_generation_ = attempt == UINT32_MAX ? attempt : attempt + 1u;
     state_ = SessionState::Streaming;
     return SinkResult::Ok;
 }
