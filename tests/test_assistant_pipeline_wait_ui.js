@@ -157,6 +157,22 @@ async function main() {
     if (log.includes('PUT /assistant')) throw new Error('local save sent /assistant after a failed restart');
     eq(toasts.find(x => x.error)?.message, 'Voice pipeline daemon restart failed', 'local save failure toast');
 
-    console.log('assistant waits for the voice pipeline restart (toggle and Local LLM save): ok');
+    // 8. Turning Local LLM off in custom mode restores the local pipeline and waits
+    //    for that restart before the page re-renders.
+    reset(['pending', 'ready']);
+    state.page = 'Integrations';
+    assistant.enabled = true;
+    await integrationsPage();
+    arm();
+    const off = document.querySelector('#use-local-provider');
+    off.checked = false;
+    await off.onchange();
+    const put = log.indexOf('PUT /voice-pipeline');
+    if (put < 0) throw new Error('disable did not restore the local pipeline');
+    eq(log.slice(put, put + 3), ['PUT /voice-pipeline', 'GET /voice-pipeline', 'GET /voice-pipeline'], 'disable waits for the restart');
+    if (log.indexOf('GET /assistant', put) < put + 3) throw new Error('page re-rendered before the restart finished');
+    if (toasts.some(t => t.error)) throw new Error('disable path toasted an error');
+
+    console.log('assistant waits for the voice pipeline restart (toggle on/off and Local LLM save): ok');
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -322,13 +322,15 @@ async function setAssistantProvider(provider,enabled,pipeline,assistant) {
       await api('/assistant',{method:'PUT',body:JSON.stringify({provider,enabled})});
     }
     if(!enabled&&provider==='openai-compatible'&&pipeline?.mode==='custom') {
-      await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
+      /* Wait here too, or the page re-renders mid-restart and briefly shows
+         the assistant as unavailable. */
+      await waitForPipelineRestart(await api('/voice-pipeline',{method:'PUT',body:JSON.stringify({
         mode:'local',
         stt_wyoming_uri:pipeline?.stt?.wyoming_uri||'',
         stt_model:pipeline?.stt?.model||'whisper-small',
         tts_wyoming_uri:pipeline?.tts?.wyoming_uri||'',
         tts_voice:pipeline?.tts?.voice||'en_GB-alan-medium'
-      })});
+      })}));
     }
     toast(enabled?(provider==='openai-compatible'?'Local LLM enabled':'On Device Voice Assistant enabled'):'Voice assistant disabled');
     await integrationsPage();
