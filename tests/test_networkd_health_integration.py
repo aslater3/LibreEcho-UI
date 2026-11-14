@@ -183,7 +183,8 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
                  barrier_at=None, preexisting_reboot=None,
                  preexisting_guard=False, reboot_fifo=False,
                  association_fails=False, scan_results="", fail_command="",
-                 initial_connected=True, dhcp_success=False, no_ip=False):
+                 initial_connected=True, dhcp_success=False, no_ip=False,
+                 no_route=False):
     wpa_path = directory / "wpa.sock"
     adapter_path = directory / "network.sock"
     action_log = directory / "actions.log"
@@ -206,7 +207,7 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
         "LIBREECHO_GATEWAY_PROBE_SCRIPT": script,
         "LIBREECHO_NETWORKD_TEST_ACTION_LOG": str(action_log),
     })
-    if dhcp_success or no_ip:
+    if dhcp_success or no_ip or no_route:
         dhcp = directory / "dhcp-success"
         body = "#!/bin/sh\n"
         if no_ip:
@@ -217,6 +218,13 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
             no_ip_flag.write_text("1\n")
             env["LIBREECHO_NETWORKD_TEST_NO_IP"] = str(no_ip_flag)
             body += f"rm -f {no_ip_flag}\n"
+        if no_route:
+            # The marker models an interface that kept its address but lost
+            # the default route (an interface reset does this).
+            no_route_flag = directory / "no-route-flag"
+            no_route_flag.write_text("1\n")
+            env["LIBREECHO_NETWORKD_TEST_NO_ROUTE"] = str(no_route_flag)
+            body += f"rm -f {no_route_flag}\n"
         dhcp.write_text(body + "exit 0\n")
         dhcp.chmod(0o700)
         env["LIBREECHO_NETWORKD_DHCP_ORACLE"] = str(dhcp)
@@ -615,6 +623,26 @@ def test_late_association_adopts_dhcp():
             stop_daemon(process, wpa)
 
 
+def test_missing_default_route_is_adopted():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-route-") as temp:
+        directory = Path(temp)
+        # The interface keeps its address but loses the default route (an
+        # interface reset does this) and nothing else re-applies it; networkd
+        # must adopt DHCP until the route is back, not just when the address
+        # is missing.
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1,1,1,1,1,1", no_route=True)
+        try:
+            wait_for(lambda: adapter_request(adapter, 1, "status")["data"]
+                     ["gateway"] == "192.0.2.1",
+                     message="restored default route")
+            status = adapter_request(adapter, 2, "status")
+            assert status["data"]["ip"] == "192.0.2.10", status
+            assert not (directory / "no-route-flag").exists()
+        finally:
+            stop_daemon(process, wpa)
+
+
 def test_single_lost_probe_reply_is_retried_before_failing():
     with tempfile.TemporaryDirectory(prefix="libreecho-networkd-probe-retry-") as temp:
         directory = Path(temp)
@@ -657,6 +685,7 @@ def main():
     test_recovery_can_succeed_without_supervisor_request()
     test_explicit_commands_cancel_pending_recovery()
     test_late_association_adopts_dhcp()
+    test_missing_default_route_is_adopted()
     test_single_lost_probe_reply_is_retried_before_failing()
     test_sustained_probe_failures_still_reassociate()
     test_persistent_reboot_guard_blocks_cross_boot_loop()

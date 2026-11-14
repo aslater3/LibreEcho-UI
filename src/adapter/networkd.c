@@ -926,14 +926,18 @@ static void refresh_interface_info(struct daemon_ctx *ctx)
 #ifdef LE_NETWORKD_TESTING
     if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE")) {
         const char *no_ip = getenv("LIBREECHO_NETWORKD_TEST_NO_IP");
+        const char *no_route = getenv("LIBREECHO_NETWORKD_TEST_NO_ROUTE");
         ctx->state.link_up = 1;
-        /* The no-IP marker file lets fixtures model an associated interface
-         * whose DHCP never ran (a late association); the DHCP oracle removes
-         * it so the adopted lease becomes visible on the next refresh. */
+        /* The marker files let fixtures model an associated interface whose
+         * DHCP never ran (a late association) or whose default route is gone
+         * (an interface reset); the DHCP oracle removes them so the adopted
+         * lease becomes visible on the next refresh. */
         if (!no_ip || !no_ip[0] || access(no_ip, F_OK) != 0) {
             copy_string(ctx->state.ip, sizeof(ctx->state.ip), "192.0.2.10");
-            copy_string(ctx->state.gateway, sizeof(ctx->state.gateway), "192.0.2.1");
-            copy_string(ctx->state.dns, sizeof(ctx->state.dns), "192.0.2.53");
+            if (!no_route || !no_route[0] || access(no_route, F_OK) != 0) {
+                copy_string(ctx->state.gateway, sizeof(ctx->state.gateway), "192.0.2.1");
+                copy_string(ctx->state.dns, sizeof(ctx->state.dns), "192.0.2.53");
+            }
         }
     }
 #endif
@@ -1556,19 +1560,20 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
 
     associated = !strcmp(ctx->state.state, "connected") &&
                  ctx->state.ssid[0] && ctx->state.link_up;
-    if (associated && !ctx->state.ip[0]) {
+    if (associated && (!ctx->state.ip[0] || !ctx->state.gateway[0])) {
         if (ctx->no_ip_since_ms == 0)
             ctx->no_ip_since_ms = now_ms;
     } else {
         ctx->no_ip_since_ms = 0;
     }
     if (associated && (ctx->dhcp.active || ctx->scan.active ||
-                       !ctx->state.ip[0])) {
+                       !ctx->state.ip[0] || !ctx->state.gateway[0])) {
         /* No DHCP owner: the boot-time helper only leases when its 45 s
          * carrier wait succeeds, and networkd never adopts an association it
          * did not drive.  Adopt an addressless but associated interface here
          * so a late association converges without user action. */
-        if (!ctx->dhcp.active && !ctx->scan.active && !ctx->state.ip[0] &&
+        if (!ctx->dhcp.active && !ctx->scan.active &&
+            (!ctx->state.ip[0] || !ctx->state.gateway[0]) &&
             !ctx->association.active &&
             !(ctx->recovery_configured &&
               (ctx->recovery.net_configured ||
@@ -1577,7 +1582,8 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
             now_ms - ctx->no_ip_since_ms >= NETWORK_ADOPT_GRACE_MS &&
             now_ms >= ctx->adopt_dhcp_next_ms) {
             if (start_dhcp(ctx, 0, -1, 0, 0) == 0) {
-                le_log_info("networkd: associated without IPv4; adopting DHCP");
+                le_log_info("networkd: associated without %s; adopting DHCP",
+                            ctx->state.ip[0] ? "a default route" : "IPv4");
             } else {
                 le_log_warn("networkd: DHCP adoption could not start: %s",
                             strerror(errno));
