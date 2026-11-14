@@ -21,9 +21,11 @@ class SilentWake(Fixture):
         self.assertEqual(receive(self.s)[0], 90)
         # Calls 0 and 1 are the daemon's startup releases of any stale HA light overlay (#395)
         # and of any stale set_ring overlay (#397); the listening indicator is the next pattern.
+        # The HA turn uses the same Alexa-style direction cue as the wake/local paths: the
+        # Listening theme with an optional azimuth from micd (absent here, so solid).
         listening = self.wait_call('led', 'pattern', 2)['args']
         self.assertEqual((listening['name'], listening['profile'], listening['owner'], listening['repeats']),
-                         ('pulse', 'listening', 'esphome', 0))
+                         ('direction', 'listening', 'esphome', 0))
         # A turn indicator must never persist ring state via animate (#esphome-led).
         self.assertFalse(any(req['cmd'] == 'animate' for req in self.adapters['led'].calls),
                          'ESPHome turn indicators must not use persistent animate')
@@ -42,10 +44,24 @@ class SilentWake(Fixture):
         self.assertEqual(receive(self.s), (90, num(1, 0)))
         self.assertFalse(any(req['cmd'] == 'cue' for req in self.adapters['audio'].calls))
         # The ended turn's indicator must expire on its own: a finite flash or an
-        # owner release, never an open-ended breathing animation.
-        ended = self.wait_call('led', 'pattern', 3)['args']
-        self.assertEqual(ended['owner'], 'esphome')
-        self.assertTrue(ended['name'] == 'stop' or (ended['name'] == 'flash' and 0 < ended['repeats'] <= 5), ended)
+        # owner release, never an open-ended breathing animation. The direction
+        # tracker may have re-sent cues in between, so match by content rather
+        # than a fixed call index.
+        deadline = time.monotonic() + 2
+        ended = None
+        while ended is None and time.monotonic() < deadline:
+            for req in self.adapters['led'].calls:
+                if req['cmd'] != 'pattern':
+                    continue
+                args = req.get('args') or {}
+                if args.get('owner') != 'esphome':
+                    continue
+                if args.get('name') == 'stop' or (args.get('name') == 'flash' and 0 < args.get('repeats', 0) <= 5):
+                    ended = args
+                    break
+            if ended is None:
+                time.sleep(.02)
+        self.assertIsNotNone(ended, 'the ended turn must release or expire its own indicator')
         self.assertFalse(any(req['cmd'] == 'animate' for req in self.adapters['led'].calls))
 
 

@@ -158,6 +158,29 @@ The direction is the loudest beam, refined by a parabola through its
 neighbours. It shows where the most sound comes from, including steady noise,
 while the selected beam follows talkers. The two can therefore differ.
 
+## Listening ring direction cue
+
+While the device is listening, `waked`, the local voice pipeline and the
+Home Assistant/ESPHome turn indicator put `ledd` into the `direction`
+pattern. The ring uses the configured Listening theme colour, and a brighter
+segment points at `micd`'s selected talker beam. `waked` and the local
+pipeline sample the beam once when listening starts; the Home Assistant
+indicator re-reads the snapshot every 300 ms while the turn is capturing, so
+the segment follows a talker who moves. No path starts capture or adds an
+audio thread for this.
+
+The cue only points when the `beams` snapshot reports `running` and its
+`contrast_db` (the peak beam above the average beam) is at least 2 dB. With
+a diffuse field, or when `micd` is unavailable, the ring stays solid in the
+Listening colour rather than pointing at noise. Red remains reserved for
+mute and privacy.
+
+The 12 pixels are mapped as `(45 + 30*i) % 360` degrees clockwise from
+front: pixel 11 is 15 degrees clockwise of front, pixel 10 is 15 degrees
+anticlockwise, and the two are the measured front-centre pair used by the
+idle indicator. If a hardware check shows the LED chain runs anticlockwise,
+the 30-degree step is negated in `ledd.c`.
+
 ## Safety and privacy properties
 
 - No capture starts merely because the device boots.

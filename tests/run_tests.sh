@@ -159,6 +159,8 @@ make build/test-sound-store build/test-event-sound
 ./build/test-buttond-gesture
 make build/test-wake-led-profile
 ./build/test-wake-led-profile
+make build/test-listening-ring
+./build/test-listening-ring
 sh tests/test_voice_listening_led_profile.sh
 sh tests/test_startup_animation.sh
 ./build/test-watchdog-policy
