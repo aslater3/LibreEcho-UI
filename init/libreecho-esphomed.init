@@ -83,7 +83,10 @@ running_pids() {
     for entry in /proc/[0-9]*; do
         candidate=${entry#/proc/}
         [ "$candidate" = "$$" ] && continue
-        if [ "$(readlink "$entry/exe" 2>/dev/null)" = "$want" ]; then
+        # A daemon whose file was replaced while it ran (an update or a
+        # hot-staged build) resolves to "$want (deleted)"; it still owns 6053.
+        exe=$(readlink "$entry/exe" 2>/dev/null)
+        if [ "$exe" = "$want" ] || [ "$exe" = "$want (deleted)" ]; then
             printf '%s\n' "$candidate"
         fi
     done
