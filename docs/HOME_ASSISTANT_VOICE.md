@@ -195,6 +195,23 @@ TTS PCM instead of URL playback. The connection uses Noise; there is no legacy
 AuthRequest gate. Conversation continuation metadata is handled at `INTENT_END`,
 not `RUN_END`.
 
+Replies stream. When the pipeline's TTS accepts streamed text, Home Assistant
+sends `tts_start_streaming` once the conversation agent has written about 60
+characters. The device then opens the reply URL and plays the WAV or MP3 while
+it is still being generated. WAV starts once about 150 ms of audio is
+buffered. If the stream runs dry mid-reply, because the TTS produces a sentence
+slower than it plays, playback waits for 1.5 s of audio or the end of the reply
+before it resumes, giving one pause instead of a stutter. If no data arrives for
+3 s after the reply started, typically TCP backing off after the Wi-Fi dropped
+frames, the device opens a new connection to the same URL. Home Assistant
+serves the stream again from its cache, so the device skips the bytes it
+already has. A replay that starts with different bytes, or ends before them, fails. From the end of speech until the first audio, and whenever the stream
+stalls between sentences, the device feeds the speaker silence. This hides the
+audio output's power-up behind STT and the agent, and keeps the output from
+shutting down mid-reply. Media is ducked from the end of speech, as it is
+during the reply. A reply fails if no data arrives
+for 20 s, or if it runs past 180 s or 32 MiB.
+
 These protocol contracts are host-verification targets, not a claim that this
 image has been deployed or acoustically tested. Protocol/framing, audio and
 media-event implementation are separate from the Web control-plane checks.

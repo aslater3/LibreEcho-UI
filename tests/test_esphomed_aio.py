@@ -59,12 +59,12 @@ class PinnedFixture(Fixture):
   while len(finished)==before and time.monotonic()<end:
    with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
    await asyncio.sleep(.01)
-  self.assertEqual(len(finished),before+1);self.assertTrue(finished[-1].success);self.assertEqual(self.busbytes,struct.pack('<h',1900)*2000);self.busbytes.clear()
+  self.assertEqual(len(finished),before+1);self.assertTrue(finished[-1].success);self.assertEqual(self.sound(),struct.pack('<h',1900)*2000);self.busbytes.clear()
   announce=asyncio.create_task(client.send_voice_assistant_announcement_await_response(url,4,start_conversation=True))
   while not announce.done():
    with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
    await asyncio.sleep(.01)
-  self.assertTrue((await announce).success);self.assertEqual(self.busbytes,struct.pack('<h',1900)*2000);await self.wait_for(lambda:len(starts)==4,'remote START_CONVERSATION with wake disabled');self.assertEqual(starts[-1],('',1,None))
+  self.assertTrue((await announce).success);self.assertEqual(self.sound(),struct.pack('<h',1900)*2000);await self.wait_for(lambda:len(starts)==4,'remote START_CONVERSATION with wake disabled');self.assertEqual(starts[-1],('',1,None))
   unsubscribe();await self.wait_for(lambda:sum(r['cmd']=='remote_clear' for r in self.adapters['timer'].calls)==clears+1,'unsubscribe ownership cleanup');self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress'])
   await client.set_voice_assistant_configuration(['alexa_v0.1']);cfg=await client.get_voice_assistant_configuration(3);self.assertEqual(cfg.active_wake_words,['alexa_v0.1']);self.assertEqual(self.wait_call('wake','set_word')['args'],{'word':'Alexa'})
   client.subscribe_voice_assistant(handle_start=start,handle_stop=stop,handle_audio=capture);await asyncio.sleep(.05);await client.disconnect();await self.wait_for(lambda:sum(r['cmd']=='remote_clear' for r in self.adapters['timer'].calls)==clears+2,'disconnect ownership cleanup');self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress']);await client.connect(login=True)

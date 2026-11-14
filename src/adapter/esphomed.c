@@ -735,6 +735,9 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  if(!S.turn&&S.owner>=0)(void)server_listen_start();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
  if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){playback_stopped();if(rc<0)turn_clear("playback_error",1);else if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else completed();}}
+ /* Thinking: the reply is coming, so power the speaker output up now (about
+  * 1.2 s) behind STT and the LLM instead of after the reply's first byte. */
+ if(S.turn==3&&!S.playing)esp_playback_warm(&S.playback,S.bus_path,S.now);
  mdns_tick(port);
  }
  S.ready=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);

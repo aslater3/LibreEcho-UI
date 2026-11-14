@@ -473,7 +473,10 @@ async def acceptance() -> None:
             event_names = [e.type.value for e in pipeline_events]
             assert required_events <= set(event_names), event_names
             assert not any(e.type.value == "error" for e in pipeline_events)
-            assert pcm and pcm == struct.pack("<h", 1200) * (len(pcm) // 2)
+            # The FIFO also carries the paced silence that keeps the output powered;
+            # the reply is every stereo frame that is not all zero.
+            audible = b"".join(bytes(pcm[i:i + 4]) for i in range(0, len(pcm) // 4 * 4, 4) if pcm[i:i + 4] != b"\0\0\0\0")
+            assert audible and audible == struct.pack("<h", 1200) * (len(audible) // 2)
             observations["voice"] = {"pipeline_events": event_names, "stt_bytes": [len(b) for b in speech.received],
                                      "conversation_turns": len(agent.inputs), "same_conversation_id": True, "input_pcm_exact": True,
                                      "tts_messages": voice.messages, "fifo_pcm_bytes": len(pcm), "state": "idle"}
