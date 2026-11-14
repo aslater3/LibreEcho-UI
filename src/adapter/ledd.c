@@ -75,8 +75,8 @@
    front pair is 10/11, so pixel 11 is 15 degrees clockwise of front, pixel 10
    is 15 degrees anticlockwise, and pixel 0 is one step clockwise of the pair.
    The base ring stays dim so the pointer is the bright part of the cue. */
-#define DIRECTION_DEFAULT_WIDTH_DEG 75U
-#define DIRECTION_BASE_PERCENT 30U
+#define DIRECTION_DEFAULT_WIDTH_DEG 100U
+#define DIRECTION_BASE_PERCENT 40U
 #define RING_PIXEL_ZERO_DEG 45U
 #define RING_PIXEL_STEP_DEG 30U
 /* Unlit gauge pixels keep a faint trace of the colour so the ring reads as a
@@ -2980,11 +2980,11 @@ static void apply_direction_pattern(struct daemon_context *ctx)
     unsigned int base_g = colour->g * DIRECTION_BASE_PERCENT / 100U;
     unsigned int base_b = colour->b * DIRECTION_BASE_PERCENT / 100U;
     unsigned int pointer_r =
-        colour->r + (255U - colour->r) * 45U / 100U;
+        colour->r + (255U - colour->r) * 85U / 100U;
     unsigned int pointer_g =
-        colour->g + (255U - colour->g) * 45U / 100U;
+        colour->g + (255U - colour->g) * 85U / 100U;
     unsigned int pointer_b =
-        colour->b + (255U - colour->b) * 45U / 100U;
+        colour->b + (255U - colour->b) * 85U / 100U;
     unsigned int half_width = ctx->pattern_width / 2U;
     size_t i;
 

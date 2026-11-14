@@ -160,13 +160,14 @@ while the selected beam follows talkers. The two can therefore differ.
 
 ## Listening ring direction cue
 
-While the device is listening, `waked` and the local voice pipeline put
-`ledd` into the `direction` pattern. The ring uses the configured Listening
-theme colour, and a brighter segment points at `micd`'s selected talker
-beam. The cue is sampled once when listening starts and kept for the
-listening window; it does not poll `micd` or start capture. The Home
-Assistant/ESPHome turn indicator keeps its existing solid Listening pulse;
-this directional cue is used by the local wake and voice pipelines.
+While the device is listening, `waked`, the local voice pipeline and the
+Home Assistant/ESPHome turn indicator put `ledd` into the `direction`
+pattern. The ring uses the configured Listening theme colour, and a brighter
+segment points at `micd`'s selected talker beam. `waked` and the local
+pipeline sample the beam once when listening starts; the Home Assistant
+indicator re-reads the snapshot every 300 ms while the turn is capturing, so
+the segment follows a talker who moves. No path starts capture or adds an
+audio thread for this.
 
 The cue only points when the `beams` snapshot reports `running` and its
 `contrast_db` (the peak beam above the average beam) is at least 2 dB. With

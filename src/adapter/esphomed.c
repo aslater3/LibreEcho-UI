@@ -43,6 +43,8 @@
  * the wake and local voice cues use. */
 #define JOB_MIC_BEAMS 17
 #define MICD_SOCK "/run/libreecho/mic.sock"
+#define DIRECTION_POLL_MS 300
+#define DIRECTION_MOVE_DEG 12
 #define RING_SAMPLES 48000U
 #define MEDIA_KEY 1U
 #define MUTE_KEY 2U
@@ -134,6 +136,7 @@ struct state {
  /* Room level sensor (#399), opt-in through esphome_room_level_sensor; the LEQ window and what was last published. */
  int ble_proxy,room_level_sensor,level_known,level_sent_ok;float level_db,level_sent_db;double level_sum;unsigned level_n;uint64_t level_at,level_sent_at;
  const char *agent_path;
+ uint64_t direction_poll;int direction_last;
 };
 static struct state S;static struct le_ble_proxy B;static volatile sig_atomic_t running=1,reload_config;
 static void sigstop(int sig){if(sig==SIGHUP)reload_config=1;else running=0;}
@@ -273,7 +276,10 @@ static void direction_cue(int have_azimuth,int azimuth){char a[192];
  if(have_azimuth)snprintf(a,sizeof a,"{\"name\":\"direction\",\"azimuth\":%d,\"r\":72,\"g\":185,\"b\":255,\"brightness\":100,\"repeats\":0,\"profile\":\"listening\",\"owner\":\"esphome\"}",azimuth);
  else snprintf(a,sizeof a,"{\"name\":\"direction\",\"r\":72,\"g\":185,\"b\":255,\"brightness\":100,\"repeats\":0,\"profile\":\"listening\",\"owner\":\"esphome\"}");
  (void)job(S.led_path,"pattern",a,0,0);}
-static void listening_cue(void){if(job(MICD_SOCK,"beams","{}",JOB_MIC_BEAMS,0)<0)direction_cue(0,0);}
+static void listening_cue(void){if(job(MICD_SOCK,"beams","{}",JOB_MIC_BEAMS,0)<0&&S.direction_last==-2){direction_cue(0,0);S.direction_last=-1;}}
+/* While a turn is listening, re-read the beam snapshot so the segment
+ * follows a talker who moves; only re-send when the chosen beam changes. */
+static void direction_tick(void){if(!(S.turn==1||S.turn==2)){S.direction_last=-2;return;}if(S.now<S.direction_poll)return;S.direction_poll=S.now+DIRECTION_POLL_MS;listening_cue();}
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
@@ -354,7 +360,7 @@ static int voice_start(uint64_t sample,int continued){unsigned char b[256];struc
     already detected here, so HA must start at STT -- with no HA wake engine the
     run otherwise fails instantly with wake-engine-missing. */
  ep_uint(&w,3,1);if(!continued)ep_string(&w,5,"Alexa");if(send_writer(&S.clients[S.owner],90,&w))return -1;
- S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_open=1;if(!continued)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");listening_cue();status_write();return 0;
+ S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_open=1;if(!continued)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");S.direction_last=-2;S.direction_poll=0;status_write();return 0;
 }
 /* Server-side wake (esphome_server_wake, off by default): open an ESPHome run with
  * USE_VAD|USE_WAKE_WORD and no phrase, then stream the mic continuously so Home
@@ -643,7 +649,7 @@ static void capture_tick(void){if(S.turn!=2||S.owner<0)return;if(mic_muted()){st
 }
 static void ble_job_done(struct io *j,int rc){int ok=0;if(rc>0&&j->kind==LE_BLE_JOB_POLL){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);if(ok){unsigned char out[2048];size_t m=le_ble_proxy_poll_result(&B,j->rx,j->rx_n,out,sizeof out);if(m&&B.owner>=0)(void)send_msg(&S.clients[B.owner],LE_BLE_PROXY_MSG_RAW_ADVS,out,m);}}io_close(j);}
 static void ble_tick(void){char args[160];for(unsigned n=0;n<3;n++){int k=le_ble_proxy_due(&B,S.now,args,sizeof args);if(!k)break;(void)job(LE_ADAPTER_BLUETOOTH_SOCK,k==LE_BLE_JOB_LEASE?"proxy_scan":"adverts",args,k,0);}}
-static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i];if(j->stage==3&&j->kind==JOB_TIMER){if(S.timer_pending)continue;if(io_connect(j,S.timer_path)<0){io_close(j);continue;}j->stage=1;j->deadline=S.now+500;}if(j->fd<0)continue;int rc=io_tick(j);if(!rc)continue;if(j->kind==LE_BLE_JOB_POLL||j->kind==LE_BLE_JOB_LEASE){ble_job_done(j,rc);continue;}if(j->kind==JOB_MIC_BEAMS){int aok=0,contrast=0,azimuth=-1;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);if(end)*end=0;(void)json_get_bool(j->rx,"ok",&aok);}if(S.turn==1||S.turn==2){if(aok&&json_get_int(j->rx,"contrast_db",&contrast)>0&&contrast>=2&&json_get_int(j->rx,"selected_deg",&azimuth)>0&&azimuth>=0&&azimuth<360)direction_cue(1,azimuth);else direction_cue(0,0);}io_close(j);continue;}int ok=0;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);}if(ok){
+static void jobs_tick(void){for(unsigned i=0;i<JOBS;i++){struct io *j=&S.jobs[i];if(j->stage==3&&j->kind==JOB_TIMER){if(S.timer_pending)continue;if(io_connect(j,S.timer_path)<0){io_close(j);continue;}j->stage=1;j->deadline=S.now+500;}if(j->fd<0)continue;int rc=io_tick(j);if(!rc)continue;if(j->kind==LE_BLE_JOB_POLL||j->kind==LE_BLE_JOB_LEASE){ble_job_done(j,rc);continue;}if(j->kind==JOB_MIC_BEAMS){int aok=0,contrast=0,azimuth=-1;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);if(end)*end=0;(void)json_get_bool(j->rx,"ok",&aok);}if(S.turn==1||S.turn==2){int confident=aok&&json_get_int(j->rx,"contrast_db",&contrast)>0&&contrast>=2&&json_get_int(j->rx,"selected_deg",&azimuth)>0&&azimuth>=0&&azimuth<360;if(confident){int moved=S.direction_last<0||S.direction_last>359;if(!moved){int delta=azimuth-S.direction_last;if(delta<0)delta=-delta;if(delta>180)delta=360-delta;moved=delta>=DIRECTION_MOVE_DEG;}if(moved){direction_cue(1,azimuth);S.direction_last=azimuth;}}else if(S.direction_last==-2){direction_cue(0,0);S.direction_last=-1;}}io_close(j);continue;}int ok=0;if(rc>0){char *end=memchr(j->rx,'\n',j->rx_n);*end=0;(void)json_get_bool(j->rx,"ok",&ok);}if(ok){
  if(j->kind==1){int muted,volume;if(json_get_bool(j->rx,"muted",&muted)>0&&json_get_int(j->rx,"volume",&volume)>0&&volume>=0&&volume<=100){S.muted=muted;S.volume=volume;S.last_audio_status=S.now;int reply;S.reply_volume=json_get_int(j->rx,"reply_volume",&reply)>0&&reply>=0&&reply<=100?reply:volume;}}
  if(j->kind==2){int playing=0,paused=0;(void)json_get_bool(j->rx,"playing",&playing);(void)json_get_bool(j->rx,"paused",&paused);S.radio_state=paused?3:playing?2:1;}
  if(j->kind==9){S.led_master=j->target;S.led_master_known=1;}
@@ -742,7 +748,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  if(S.button_fd>=0&&(fds[1+CLIENTS].revents&POLLIN))button_tick();
  if(S.now>=S.settings_poll+SETTINGS_POLL_MS){S.settings_poll=S.now;(void)job(S.led_path,"status","{}",10,0);(void)job(S.wake_path,"status","{}",11,0);(void)job(S.agent_path,"voice_history_generation","{}",HISTORY_GENERATION_KIND,0);}
  if(S.now>=S.last_status_poll+250){S.last_status_poll=S.now;privacy_poll();light_poll();(void)job(S.audio_path,"status","{}",1,0);(void)job(S.radio_path,"status","{}",2,0);}
- jobs_tick();ble_tick();led_tick();action_ring_tick();level_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
+ direction_tick();jobs_tick();ble_tick();led_tick();action_ring_tick();level_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);control_tick();capture_tick();
  if(!S.turn&&S.owner>=0)(void)server_listen_start();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
