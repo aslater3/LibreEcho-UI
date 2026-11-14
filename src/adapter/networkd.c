@@ -65,6 +65,16 @@
 #define SCAN_MAX 48
 #define SCAN_OUTPUT_MAX 12
 #define DHCP_TIMEOUT_MS 90000
+#ifdef LE_NETWORKD_TESTING
+#define NETWORK_ADOPT_GRACE_MS 200LL
+#define NETWORK_ADOPT_RETRY_MS 500LL
+#else
+/* An association that finished after the boot-time DHCP window (or any
+ * association networkd did not drive) leaves wlan0 without an address; adopt
+ * it with a daemon-owned DHCP after this grace, retrying on failure. */
+#define NETWORK_ADOPT_GRACE_MS 10000LL
+#define NETWORK_ADOPT_RETRY_MS 30000LL
+#endif
 #define SCAN_TIMEOUT_MS 12000
 #define SCAN_POLL_MS 1800
 #define ASSOCIATION_POLL_MS 100
@@ -190,6 +200,7 @@ struct pending_scan {
 struct pending_dhcp {
     int active;
     int release;
+    int bind_association;
     pid_t pid;
     int client_fd;
     unsigned long id;
@@ -221,6 +232,9 @@ struct daemon_ctx {
     struct network_state state;
     struct le_network_health health;
     struct le_gateway_probe gateway_probe;
+    long long no_ip_since_ms;
+    long long adopt_dhcp_next_ms;
+    int gateway_probe_retried;
     struct client clients[CLIENT_MAX];
     struct pending_scan scan;
     struct pending_association association;
@@ -911,10 +925,16 @@ static void refresh_interface_info(struct daemon_ctx *ctx)
     read_dns(&ctx->state);
 #ifdef LE_NETWORKD_TESTING
     if (getenv("LIBREECHO_NETWORKD_TEST_FIXTURE")) {
+        const char *no_ip = getenv("LIBREECHO_NETWORKD_TEST_NO_IP");
         ctx->state.link_up = 1;
-        copy_string(ctx->state.ip, sizeof(ctx->state.ip), "192.0.2.10");
-        copy_string(ctx->state.gateway, sizeof(ctx->state.gateway), "192.0.2.1");
-        copy_string(ctx->state.dns, sizeof(ctx->state.dns), "192.0.2.53");
+        /* The no-IP marker file lets fixtures model an associated interface
+         * whose DHCP never ran (a late association); the DHCP oracle removes
+         * it so the adopted lease becomes visible on the next refresh. */
+        if (!no_ip || !no_ip[0] || access(no_ip, F_OK) != 0) {
+            copy_string(ctx->state.ip, sizeof(ctx->state.ip), "192.0.2.10");
+            copy_string(ctx->state.gateway, sizeof(ctx->state.gateway), "192.0.2.1");
+            copy_string(ctx->state.dns, sizeof(ctx->state.dns), "192.0.2.53");
+        }
     }
 #endif
 }
@@ -1486,6 +1506,9 @@ static void record_gateway_probe(struct daemon_ctx *ctx,
     enum le_network_health_action action =
         le_network_health_record_probe(&ctx->health, now_ms, result);
 
+    if (result != LE_GATEWAY_UNREACHABLE)
+        ctx->gateway_probe_retried = 0;
+
     if (result == LE_GATEWAY_REACHABLE && prior_failures > 0)
         le_log_info("networkd: gateway liveness recovered after %d failed probe(s)",
                     prior_failures);
@@ -1522,6 +1545,9 @@ static void handle_gateway_probe_event(struct daemon_ctx *ctx, short revents,
     }
 }
 
+static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
+                      unsigned long id, int bind_association);
+
 static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
 {
     struct network_state before = ctx->state;
@@ -1530,8 +1556,34 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
 
     associated = !strcmp(ctx->state.state, "connected") &&
                  ctx->state.ssid[0] && ctx->state.link_up;
+    if (associated && !ctx->state.ip[0]) {
+        if (ctx->no_ip_since_ms == 0)
+            ctx->no_ip_since_ms = now_ms;
+    } else {
+        ctx->no_ip_since_ms = 0;
+    }
     if (associated && (ctx->dhcp.active || ctx->scan.active ||
                        !ctx->state.ip[0])) {
+        /* No DHCP owner: the boot-time helper only leases when its 45 s
+         * carrier wait succeeds, and networkd never adopts an association it
+         * did not drive.  Adopt an addressless but associated interface here
+         * so a late association converges without user action. */
+        if (!ctx->dhcp.active && !ctx->scan.active && !ctx->state.ip[0] &&
+            !ctx->association.active &&
+            !(ctx->recovery_configured &&
+              (ctx->recovery.net_configured ||
+               ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER)) &&
+            ctx->no_ip_since_ms != 0 &&
+            now_ms - ctx->no_ip_since_ms >= NETWORK_ADOPT_GRACE_MS &&
+            now_ms >= ctx->adopt_dhcp_next_ms) {
+            if (start_dhcp(ctx, 0, -1, 0, 0) == 0) {
+                le_log_info("networkd: associated without IPv4; adopting DHCP");
+            } else {
+                le_log_warn("networkd: DHCP adoption could not start: %s",
+                            strerror(errno));
+                ctx->adopt_dhcp_next_ms = now_ms + NETWORK_ADOPT_RETRY_MS;
+            }
+        }
         if (ctx->gateway_probe.active)
             le_gateway_probe_close(&ctx->gateway_probe);
         record_gateway_probe(ctx, LE_GATEWAY_PROBE_UNAVAILABLE, now_ms);
@@ -1539,6 +1591,15 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
     }
     if (le_gateway_probe_timed_out(&ctx->gateway_probe, now_ms)) {
         le_gateway_probe_close(&ctx->gateway_probe);
+        if (!ctx->gateway_probe_retried && ctx->state.gateway[0] &&
+            le_gateway_probe_start(&ctx->gateway_probe, ctx->interface,
+                                   ctx->state.gateway, now_ms) == 0) {
+            /* A single lost echo reply is common on RF; retry once before the
+             * result counts as a liveness failure. */
+            ctx->gateway_probe_retried = 1;
+            return;
+        }
+        ctx->gateway_probe_retried = 0;
         record_gateway_probe(ctx, LE_GATEWAY_UNREACHABLE, now_ms);
         return;
     }
@@ -1583,6 +1644,17 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
         ctx->state.dns[0] = '\0';
         copy_string(ctx->state.state, sizeof(ctx->state.state), "disconnected");
         network_success = success;
+    } else if (!ctx->dhcp.bind_association) {
+        /* Adoption DHCP: there is no association transaction to reconcile,
+         * and a failed lease must not touch the working Wi-Fi association. */
+        refresh_interface_info(ctx);
+        network_success = success && ctx->state.ip[0];
+        if (network_success) {
+            ctx->adopt_dhcp_next_ms = 0;
+        } else {
+            le_log_warn("networkd: DHCP adoption failed; retrying");
+            ctx->adopt_dhcp_next_ms = monotonic_ms() + NETWORK_ADOPT_RETRY_MS;
+        }
     } else {
         int previous = ctx->association.previous_network_id;
         int candidate = ctx->association.candidate_network_id;
@@ -1636,7 +1708,7 @@ static void finish_dhcp(struct daemon_ctx *ctx, int status, int timed_out)
 }
 
 static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
-                      unsigned long id)
+                      unsigned long id, int bind_association)
 {
     pid_t pid;
     if (ctx->dhcp.active)
@@ -1673,6 +1745,7 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     }
     ctx->dhcp.active = 1;
     ctx->dhcp.release = release;
+    ctx->dhcp.bind_association = bind_association;
     ctx->dhcp.pid = pid;
     ctx->dhcp.client_fd = client_fd;
     ctx->dhcp.id = id;
@@ -3569,7 +3642,7 @@ static void finish_association(struct daemon_ctx *ctx, int success)
     copy_string(ctx->state.ssid, sizeof(ctx->state.ssid), ctx->association.ssid);
     copy_string(ctx->state.state, sizeof(ctx->state.state), "connecting");
     ctx->association.active = 0;
-    if (start_dhcp(ctx, 0, fd, id) < 0) {
+    if (start_dhcp(ctx, 0, fd, id, 1) < 0) {
         /* DHCP could not even start: re-arm the recovery AP immediately. */
         if (ctx->recovery_configured &&
             ctx->recovery.mode == LE_RECOVERY_MODE_HANDOVER) {
@@ -3908,7 +3981,7 @@ static void dispatch_request(struct daemon_ctx *ctx, int ci, char *message)
         ctx->state.dns[0] = '\0';
         copy_string(ctx->state.state, sizeof(ctx->state.state), "disconnected");
         ctx->clients[ci].busy = 1;
-        if (start_dhcp(ctx, 1, ctx->clients[ci].fd, id) < 0) {
+        if (start_dhcp(ctx, 1, ctx->clients[ci].fd, id, 0) < 0) {
             ctx->clients[ci].busy = 0;
             (void)send_ok_fd(ctx->clients[ci].fd, id, "{}");
         }
