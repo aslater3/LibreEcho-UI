@@ -85,7 +85,8 @@ class NativeLifecycle(unittest.TestCase):
                 self.busbytes += os.read(self.busfd, 65536)
             time.sleep(.005)
         self.assertEqual(self.sound(), expected, 'must drain actual decoded PCM, not emulate completion')
-        return self.messages_for(.2)
+        # The ack follows real time; this reader drains the silence lead ahead of it.
+        return self.messages_for(.4)
 
     def start_voice(self):
         wake = self.adapters['wake']

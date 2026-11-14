@@ -362,7 +362,11 @@ class CancelRequest(Daemon):
   status=json.loads((self.p/'status.json').read_text());self.assertFalse(status['in_progress']);self.assertEqual(status['last_result'],'cancelled')
   time.sleep(.1);led=[r['args'] for r in self.adapters['led'].calls if r['cmd']=='pattern'];self.assertEqual(led[-1].get('name'),'stop','ring returns to idle');self.assertNotIn('flash',[x.get('name') for x in led],'a cancel is not an error')
  def no_reply(self,url):
-  # Late events from the stopped run start no playback and no new turn.
+  # Late events from the stopped run start no playback and no new turn. Silence
+  # that warmed the output while thinking is discarded first: after the cancel
+  # nothing at all reaches the bus.
+  with contextlib.suppress(BlockingIOError):os.read(self.busfd,1<<20)
+  self.busbytes=bytearray()
   self.s.sendall(frame(92,num(1,8)+text(2,text(1,'url')+text(2,url)))+frame(92,num(1,2)));self.s.settimeout(.4)
   with self.assertRaises(TimeoutError):receive(self.s)
   self.s.settimeout(3);time.sleep(.2)
@@ -379,6 +383,17 @@ class CancelRequest(Daemon):
   self.addCleanup(server.server_close);self.addCleanup(thread.join,2);self.addCleanup(server.shutdown);return f'http://127.0.0.1:{server.server_port}/tts.wav'
  def control(self,message=b'cancel'):
   c=socket.socket(socket.AF_UNIX,socket.SOCK_DGRAM);c.sendto(message,self.ctl);c.close()
+ def test_thinking_warms_the_output_until_the_run_ends(self):
+  self.start(True);end=time.monotonic()+.5
+  while time.monotonic()<end: # drain like the engine; an undrained FIFO only gets a bounded queue
+   with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,1<<20)
+   time.sleep(.01)
+  self.assertGreaterEqual(len(self.busbytes),48000*4*3//10,'silence powers the output up while thinking');self.assertFalse(self.sound(),'nothing but silence before a reply')
+  self.s.sendall(frame(92,num(1,2)));time.sleep(.2)
+  with contextlib.suppress(BlockingIOError):os.read(self.busfd,1<<20)
+  time.sleep(.3);self.busbytes=bytearray()
+  with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,1<<20)
+  self.assertFalse(self.busbytes,'the warm-up ends with a run that has no reply')
  def test_ha_button_cancels_while_thinking(self):
   self.start(True);self.s.sendall(frame(62,b'\x0d'+struct.pack('<I',404)));self.cancelled();self.no_reply(self.wav_url())
  def test_ha_button_with_wrong_key_is_rejected(self):

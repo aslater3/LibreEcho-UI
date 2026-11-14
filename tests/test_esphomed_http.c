@@ -105,22 +105,44 @@ static void bus_fifo_close(void){close(reader);reader=-1;assert(unlink(fifo)==0)
 static size_t first_sound(void){for(size_t i=0;i+1<heard_n;i+=2)if(heard[i]||heard[i+1])return i;return heard_n;}
 static size_t after_sound(void){size_t i=heard_n;while(i>=2&&!heard[i-1]&&!heard[i-2])i-=2;return heard_n-i;}
 static size_t sound_bytes(void){size_t n=0;for(size_t i=0;i+3<heard_n;i+=4)if(memcmp(heard+i,"\0\0\0\0",4))n+=4;return n;}
+static int listener(char *url,size_t cap){struct sockaddr_in a;socklen_t z=sizeof a;int server=socket(AF_INET,SOCK_STREAM,0);memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);
+ assert(server>=0&&bind(server,(struct sockaddr*)&a,sizeof a)==0&&listen(server,1)==0&&getsockname(server,(struct sockaddr*)&a,&z)==0);snprintf(url,cap,"http://127.0.0.1:%u/tts.wav",ntohs(a.sin_port));return server;}
+static void answer(int server){peer=accept(server,NULL,NULL);assert(peer>=0);close(server);char request[512];ssize_t r=recv(peer,request,sizeof request-1,0);assert(r>0);request[r]=0;assert(!strncmp(request,"GET /tts.wav HTTP/1.1\r\n",23));}
 /* Real connect through esp_playback_start: a FIFO bus warms while waiting, the
  * queued silence stays bounded when the engine stops reading, and a stall in
  * the reply is filled with silence instead of letting the engine power down. */
-static void warm_fifo(void){static unsigned char b[44+48000*2*2];size_t n=tone(b,48000*2,1200,1);struct sockaddr_in a;socklen_t z=sizeof a;int server=socket(AF_INET,SOCK_STREAM,0);
- memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_addr.s_addr=htonl(INADDR_LOOPBACK);assert(server>=0&&bind(server,(struct sockaddr*)&a,sizeof a)==0&&listen(server,1)==0&&getsockname(server,(struct sockaddr*)&a,&z)==0);
- char url[64];snprintf(url,sizeof url,"http://127.0.0.1:%u/tts.wav",ntohs(a.sin_port));resp_reset();bus_fifo();esp_playback_init(&p);assert(esp_playback_start(&p,url,fifo,NULL,now_ms)==0);assert(p.fifo);
+static void warm_fifo(void){static unsigned char b[44+48000*2*2];size_t n=tone(b,48000*2,1200,1);char url[64];int server=listener(url,sizeof url);resp_reset();bus_fifo();esp_playback_init(&p);assert(esp_playback_start(&p,url,fifo,NULL,now_ms)==0);assert(p.fifo);
  for(unsigned i=0;i<100;i++){assert(tick()==0);int queued=0;assert(!ioctl(reader,FIONREAD,&queued)&&queued==0);}
- assert(heard_n>=48000*4*900/1000&&heard_n<=48000*4*1100/1000&&first_sound()==heard_n);
+ assert(heard_n>=48000*4*(900+SILENCE_LEAD_MS)/1000&&heard_n<=48000*4*(1100+SILENCE_LEAD_MS)/1000&&first_sound()==heard_n);
  int stalled=reader;reader=-1;for(unsigned i=0;i<50;i++)assert(tick()==0);int queued=0;assert(!ioctl(stalled,FIONREAD,&queued)&&queued>0&&queued<=SILENCE_QUEUE+(int)SILENCE_FRAMES*4);reader=stalled;listen_bus();
- size_t warmed=heard_n;peer=accept(server,NULL,NULL);assert(peer>=0);close(server);char request[512];ssize_t r=recv(peer,request,sizeof request-1,0);assert(r>0);request[r]=0;assert(!strncmp(request,"GET /tts.wav HTTP/1.1\r\n",23));
+ size_t warmed=heard_n;answer(server);
  resp_text("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");resp_chunked(b,n,9600);size_t half=resp_n/2;resp_text("0\r\n\r\n");allow(half);
  for(unsigned i=0;i<150;i++)assert(tick()==0);
  /* About 1 s of audio, then silence for the rest of the 1.5 s. */
  size_t sound=sound_bytes();assert(first_sound()>=warmed&&sound>=48000*4*900/1000&&sound<=48000*4*1100/1000);assert(p.underruns==1&&after_sound()>=48000*4*300/1000);
+ /* Half a second more after running dry does not restart it: it rebuffers 1.5 s or to the end. */
+ allow(half+5*(9600+8));for(unsigned i=0;i<50;i++)assert(tick()==0);assert(p.buffering==2&&sound_bytes()==sound&&p.body_total>48000*2*1400/1000);
  allow_all(1);assert(run(1000)==1);assert(p.input_frames==48000*2&&sound_bytes()==p.audio_frames*4&&heard_n%4==0);end_fetch();bus_fifo_close();
  puts("FIFO bus warmed while connecting, bounded when not drained, fed through a stall: OK");
+}
+/* While thinking, before any reply URL: a FIFO is fed and the reply continues on
+ * that descriptor; a regular-file bus is never warmed, nor reopened each tick. */
+static void warm_before_reply(void){static unsigned char b[44+48000*2];size_t n=tone(b,48000,1500,1);char url[64];int server=listener(url,sizeof url);
+ bus_reset();esp_playback_init(&p);esp_playback_warm(&p,bus,now_ms);assert(p.bus_fd<0&&p.warm_off);esp_playback_warm(&p,bus,now_ms);assert(p.bus_fd<0&&bus_size()==0);esp_playback_close(&p);
+ resp_reset();bus_fifo();esp_playback_init(&p);for(unsigned i=0;i<50;i++){esp_playback_warm(&p,fifo,now_ms);listen_bus();now_ms+=10;}
+ int fd=p.bus_fd;size_t thinking=heard_n;assert(fd>=0&&p.fifo&&!p.state&&thinking>=48000*4*(450+SILENCE_LEAD_MS)/1000&&thinking<=48000*4*(600+SILENCE_LEAD_MS)/1000&&first_sound()==heard_n);
+ assert(esp_playback_start(&p,url,fifo,NULL,now_ms)==0);assert(p.bus_fd==fd);for(unsigned i=0;i<20;i++)assert(tick()==0);
+ /* Real time continues across the hand-over: no second lead, no burst. */
+ assert(heard_n-thinking>=48000*4*180/1000&&heard_n-thinking<=48000*4*230/1000&&first_sound()==heard_n);
+ answer(server);resp_text("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n");resp_chunked(b,n,9600);resp_text("0\r\n\r\n");allow_all(1);
+ assert(run(1000)==1);assert(sound_bytes()==p.audio_frames*4&&p.audio_frames==48000&&first_sound()>thinking&&heard_n%4==0);end_fetch();bus_fifo_close();
+ puts("Warm while thinking, reply continues on the warmed FIFO; regular files stay cold: OK");
+}
+/* Before blocking TLS work a FIFO gets a bounded pre-roll of silence, topped up only to its lead. */
+static void preroll_fifo(void){bus_fifo();esp_playback_init(&p);int z=snprintf(p.bus,sizeof p.bus,"%.250s",fifo);assert(z>0&&(size_t)z==strlen(fifo));assert(!bus_open(&p)&&p.fifo);
+ preroll(&p,now_ms);int queued=0,again=0;assert(!ioctl(reader,FIONREAD,&queued)&&queued>=48000*4*240/1000&&queued<=PREROLL_QUEUE+(int)SILENCE_FRAMES*4&&p.frames*1000/48000>=240);
+ preroll(&p,now_ms);assert(!ioctl(reader,FIONREAD,&again)&&again==queued);listen_bus();assert(heard_n==(size_t)queued&&first_sound()==heard_n);
+ esp_playback_close(&p);bus_fifo_close();puts("TLS pre-roll queues ~250 ms of silence, bounded: OK");
 }
 static void ffmpeg_wav(const char *path){
  static unsigned char b[1U<<20];FILE *f=fopen(path,"rb");assert(f);size_t n=fread(b,1,sizeof b,f);assert(!ferror(f)&&feof(f));assert(fclose(f)==0);assert(n>=44);
@@ -147,6 +169,6 @@ int main(int argc,char **argv){
  /* Run the untouched external capture first so RED identifies the real bug. */
  if(argc==2)ffmpeg_wav(argv[1]);else assert(argc==1);
  wav_boundaries();unsigned char b[52];wav_header(b,sizeof b);put32(b+4,UINT32_MAX);put32(b+40,UINT32_MAX);http_boundaries(b,sizeof b);
- streams_before_eof();long_and_slow();warm_fifo();
+ streams_before_eof();long_and_slow();warm_fifo();warm_before_reply();preroll_fifo();
  assert(unlink(bus)==0);return 0;
 }

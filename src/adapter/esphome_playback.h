@@ -9,13 +9,17 @@
 #include "radio_resample.h"
 #include "../../third-party/minimp3/minimp3.h"
 /* Response body ceiling. The body streams through fixed windows, so this bounds
- * work, not memory: about 170 s of the 48 kHz mono WAV Home Assistant sends. */
+ * work, not memory: about 170 s of the 48 kHz mono WAV Home Assistant sends.
+ * The payload window (the memory the whole-file cache used) absorbs a fast
+ * reply while the output powers up, and holds the rebuffer after a stall. */
 #define ESP_PLAY_BODY_MAX (32U*1024U*1024U)
 #define ESP_PLAY_WIRE (16U*1024U)
-#define ESP_PLAY_PAYLOAD (64U*1024U)
+#define ESP_PLAY_PAYLOAD (2U*1024U*1024U)
 /* Single streaming playback slot. tick does bounded nonblocking work. */
 struct esp_playback {
- int state,fd,bus_fd,fifo,tls,header_done,result,dns_fd,chunked,net_eof,net_done,format,clock,buffering;
+ int state,fd,bus_fd,fifo,warm_off,tls,header_done,result,dns_fd,chunked,net_eof,net_done,format,clock;
+ /* 0 playing, 1 first prebuffer, 2 rebuffering after the stream ran dry. */
+ int buffering;
  unsigned port;char host[254],path[1024],bus[256],request[1536];size_t request_len,request_sent;
  /* Raw response bytes (headers, then the framed body) and the unframed body the decoder reads. */
  unsigned char wire[ESP_PLAY_WIRE];size_t wire_n,wire_pos,expected,body_total;
@@ -35,4 +39,7 @@ void esp_playback_close(struct esp_playback *);
 int esp_playback_start(struct esp_playback *,const char *,const char *,const char *,uint64_t);
 /* 0 active, 1 drained successfully, -1 failed. */
 int esp_playback_tick(struct esp_playback *,uint64_t);
+/* While a turn waits for its reply and no slot is active: feed a FIFO bus
+ * paced silence; esp_playback_start then continues on the same descriptor. */
+void esp_playback_warm(struct esp_playback *,const char *,uint64_t);
 #endif

@@ -26,11 +26,17 @@
  * the reply itself it ducks media. Only a FIFO bus ever gets silence. */
 #define IDLE_MS 20000U        /* no network progress */
 #define TOTAL_MS 180000U      /* whole slot */
-#define AUDIO_LEAD_MS 100U    /* audio written ahead of real time */
-#define SILENCE_LEAD_MS 40U   /* silence ahead of real time: a reply waits behind little of it */
-#define SILENCE_QUEUE 8192    /* and none while the engine stops draining the FIFO */
+/* The audio engine closes its output, powering the amplifier down, as soon as
+ * a whole 2048-frame period is not queued past its ~64 ms ring (~110 ms ahead
+ * of the speaker), and reopening takes ~1.3 s. Both leads stay above that. */
+#define AUDIO_LEAD_MS 200U    /* audio written ahead of real time */
+#define SILENCE_LEAD_MS 160U  /* silence ahead of real time: a reply waits behind no more than this */
+#define SILENCE_QUEUE 40960   /* and none past this while the engine stops draining the FIFO */
 #define SILENCE_FRAMES 512U   /* 2 KiB, one atomic FIFO write */
-#define PREBUFFER_MS 150U     /* WAV held before (re)starting, so a trickled stream does not stutter */
+#define PREBUFFER_MS 150U     /* WAV held before the first audio */
+#define REBUFFER_MS 1500U     /* and after the stream ran dry: one pause, not a stutter, when TTS is slower than real time */
+#define PREROLL_MS 250U       /* silence queued before work that blocks the loop (CA parse, a TLS handshake step) */
+#define PREROLL_QUEUE 49152
 #define WAV_HEADER_MAX (64U*1024U)
 #define MP3_SKIP_MAX (1024U*1024U)
 #define MP3_WINDOW 4612U      /* two largest free-format frames and the next header: minimp3 syncs on whole frames */
@@ -57,9 +63,13 @@ static int dns_name(const unsigned char *b,size_t n,size_t *pos){for(unsigned la
 static int dns_tick(struct esp_playback *p){unsigned char b[1024];ssize_t n=recv(p->dns_fd,b,sizeof b,MSG_DONTWAIT);size_t z=12;struct in_addr ip;if(n<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return 0;if(n<12||be16(b)!=p->dns_id||(b[3]&15)||!(b[2]&128)||be16(b+4)!=1||be16(b+6)>32)return -1;
  if(dns_name(b,(size_t)n,&z)||z+4>(size_t)n)return -1;z+=4;for(unsigned i=0;i<be16(b+6);i++){if(dns_name(b,(size_t)n,&z)||z+10>(size_t)n)return -1;unsigned t=be16(b+z),cl=be16(b+z+2),len=be16(b+z+8);z+=10;if(z+len>(size_t)n)return -1;if(t==1&&cl==1&&len==4){memcpy(&ip,b+z,4);close(p->dns_fd);p->dns_fd=-1;return connect_ip(p,ip);}z+=len;}return -1;
 }
+static void preroll(struct esp_playback *,uint64_t);
 static int bus_open(struct esp_playback *p){struct stat st;if(p->bus_fd>=0)return 0;p->bus_fd=open(p->bus,O_WRONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);if(p->bus_fd<0)return -1;p->fifo=!fstat(p->bus_fd,&st)&&S_ISFIFO(st.st_mode);return 0;}
-int esp_playback_start(struct esp_playback *p,const char *url,const char *bus,const char *ca,uint64_t now){const char *s,*slash,*colon;size_t host_n;struct in_addr ip;char hostport[280];
- if(p->state)return -1;esp_playback_close(p);esp_playback_init(p);
+int esp_playback_start(struct esp_playback *p,const char *url,const char *bus,const char *ca,uint64_t now){const char *s,*slash,*colon;size_t host_n;struct in_addr ip;char hostport[280];int warm=-1,clock;uint64_t origin,frames;
+ if(p->state)return -1;
+ /* Keep a warmed bus and its pacing: the reply follows the silence without a gap or a burst. */
+ if(p->bus_fd>=0&&p->fifo&&!strcmp(p->bus,bus)){warm=p->bus_fd;p->bus_fd=-1;}clock=p->clock;origin=p->origin;frames=p->frames;
+ esp_playback_close(p);esp_playback_init(p);if(warm>=0){p->bus_fd=warm;p->fifo=1;p->clock=clock;p->origin=origin;p->frames=frames;}
  if(!strncmp(url,"http://",7)){s=url+7;p->port=80;}else if(!strncmp(url,"https://",8)){s=url+8;p->port=443;p->tls=1;}else return -1;
  for(const char *v=s;*v;v++)if((unsigned char)*v<33||(unsigned char)*v>126||*v=='@'||*v=='\\'||*v=='#')return -1;
  slash=strchr(s,'/');host_n=slash?(size_t)(slash-s):strlen(s);if(!host_n||host_n>=sizeof hostport||strlen(bus)>=sizeof p->bus)return -1;memcpy(hostport,s,host_n);hostport[host_n]=0;
@@ -67,10 +77,10 @@ int esp_playback_start(struct esp_playback *p,const char *url,const char *bus,co
  if(!host_n||host_n>=sizeof p->host)return -1;memcpy(p->host,hostport,host_n);p->host[host_n]=0;
  for(size_t i=0;i<host_n;i++)if(!(p->host[i]=='.'||p->host[i]=='-'||(p->host[i]>='0'&&p->host[i]<='9')||(p->host[i]>='a'&&p->host[i]<='z')||(p->host[i]>='A'&&p->host[i]<='Z')))return -1;
  if(slash&&strlen(slash)>=sizeof p->path)return -1;snprintf(p->path,sizeof p->path,"%s",slash?slash:"/");snprintf(p->bus,sizeof p->bus,"%s",bus);
- int n=snprintf(p->request,sizeof p->request,"GET %s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\nAccept: audio/wav, audio/mpeg\r\n\r\n",p->path,p->host,p->port);if(n<0||(size_t)n>=sizeof p->request)return -1;p->request_len=(size_t)n;p->expected=SIZE_MAX;p->deadline=now+TOTAL_MS;p->idle_deadline=now+IDLE_MS;p->buffering=1;
- if(p->tls){if(!ca)ca="/etc/ssl/certs/ca-certificates.crt";if(mbedtls_x509_crt_parse_file(&p->ca,ca)||mbedtls_ctr_drbg_seed(&p->rng,mbedtls_entropy_func,&p->entropy,(const unsigned char*)"libreecho-https",14)||mbedtls_ssl_config_defaults(&p->config,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT))return -1;mbedtls_ssl_conf_authmode(&p->config,MBEDTLS_SSL_VERIFY_REQUIRED);mbedtls_ssl_conf_ca_chain(&p->config,&p->ca,NULL);mbedtls_ssl_conf_rng(&p->config,mbedtls_ctr_drbg_random,&p->rng);if(mbedtls_ssl_setup(&p->ssl,&p->config)||mbedtls_ssl_set_hostname(&p->ssl,p->host))return -1;mbedtls_ssl_set_bio(&p->ssl,&p->fd,tls_send,tls_recv,NULL);}
  /* Best effort now, so the output can warm up during the fetch; audio retries and fails without it. */
  (void)bus_open(p);
+ int n=snprintf(p->request,sizeof p->request,"GET %s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\nAccept: audio/wav, audio/mpeg\r\n\r\n",p->path,p->host,p->port);if(n<0||(size_t)n>=sizeof p->request)return -1;p->request_len=(size_t)n;p->expected=SIZE_MAX;p->deadline=now+TOTAL_MS;p->idle_deadline=now+IDLE_MS;p->buffering=1;
+ if(p->tls){preroll(p,now);if(!ca)ca="/etc/ssl/certs/ca-certificates.crt";if(mbedtls_x509_crt_parse_file(&p->ca,ca)||mbedtls_ctr_drbg_seed(&p->rng,mbedtls_entropy_func,&p->entropy,(const unsigned char*)"libreecho-https",14)||mbedtls_ssl_config_defaults(&p->config,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT))return -1;mbedtls_ssl_conf_authmode(&p->config,MBEDTLS_SSL_VERIFY_REQUIRED);mbedtls_ssl_conf_ca_chain(&p->config,&p->ca,NULL);mbedtls_ssl_conf_rng(&p->config,mbedtls_ctr_drbg_random,&p->rng);if(mbedtls_ssl_setup(&p->ssl,&p->config)||mbedtls_ssl_set_hostname(&p->ssl,p->host))return -1;mbedtls_ssl_set_bio(&p->ssl,&p->fd,tls_send,tls_recv,NULL);}
  if(inet_pton(AF_INET,p->host,&ip)==1)return connect_ip(p,ip);return dns_start(p);
 }
 static int headers(struct esp_playback *p){size_t i;for(i=0;i+3<p->wire_n&&i<8192;i++)if(!memcmp(p->wire+i,"\r\n\r\n",4))break;if(i+3>=p->wire_n)return p->wire_n>=8192?-1:0;
@@ -114,7 +124,7 @@ static int net_complete(struct esp_playback *p){int drained=p->wire_pos==p->wire
 static int net_once(struct esp_playback *p,uint64_t now){int rc;
  if(p->state==1){if(dns_tick(p)<0)return -1;return p->state!=1;}
  if(p->state==2){struct sockaddr_in a;socklen_t n=sizeof a;if(getpeername(p->fd,(struct sockaddr*)&a,&n)<0){int err=0;n=sizeof err;if(getsockopt(p->fd,SOL_SOCKET,SO_ERROR,&err,&n)<0||err)return -1;return 0;}p->state=p->tls?3:4;return 1;}
- if(p->state==3){rc=mbedtls_ssl_handshake(&p->ssl);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc||mbedtls_ssl_get_verify_result(&p->ssl))return -1;p->state=4;return 1;}
+ if(p->state==3){preroll(p,now);rc=mbedtls_ssl_handshake(&p->ssl);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc||mbedtls_ssl_get_verify_result(&p->ssl))return -1;p->state=4;return 1;}
  if(p->state==4){size_t left=p->request_len-p->request_sent;rc=p->tls?mbedtls_ssl_write(&p->ssl,(unsigned char*)p->request+p->request_sent,left):tls_send(&p->fd,(unsigned char*)p->request+p->request_sent,left);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc<=0)return -1;p->request_sent+=(size_t)rc;if(p->request_sent==p->request_len)p->state=5;return 1;}
  if(p->state!=5||p->net_done||p->net_eof)return 0;
  if(p->wire_pos){memmove(p->wire,p->wire+p->wire_pos,p->wire_n-p->wire_pos);p->wire_n-=p->wire_pos;p->wire_pos=0;}
@@ -150,7 +160,7 @@ static int decode(struct esp_playback *p){short pcm[MINIMP3_MAX_SAMPLES_PER_FRAM
   else{if(n>=3&&!memcmp(b,"ID3",3)){if(n<10||((b[6]|b[7]|b[8]|b[9])&128))return -1;p->skip=10+((uint64_t)b[6]<<21)+((uint64_t)b[7]<<14)+((uint64_t)b[8]<<7)+b[9];}p->format=FORMAT_MP3;mp3dec_init(&p->decoder);}}
  if(p->format==FORMAT_WAV){int h=wav_chunks(p);if(h<0)return -1;n=p->pay_n-p->pay_pos;b=p->payload+p->pay_pos;
   if(h==1){size_t frame=2U*(unsigned)p->channels,count;if(!p->data_unbounded&&n>p->data_left)n=(size_t)p->data_left;
-   if(p->buffering&&!end&&n<(size_t)p->rate*frame*PREBUFFER_MS/1000&&(p->data_unbounded||n<p->data_left))return 0;
+   if(p->buffering&&!end&&n<(size_t)p->rate*frame*(p->buffering==2?REBUFFER_MS:PREBUFFER_MS)/1000&&(p->data_unbounded||n<p->data_left))return 0;
    count=n/frame;if(count>1024)count=1024;
    if(count){for(size_t i=0;i<count*(size_t)p->channels;i++)pcm[i]=(short)u16(b+2*i);if(wav_take(p,count*frame))return -1;if(!p->data_unbounded&&!(p->data_left-=count*frame))p->wav_stage=WAV_TRAIL;frames=(int)count;channels=p->channels;rate=p->rate;}}
   if(!frames){if(!end)return 0;n=p->pay_n-p->pay_pos;
@@ -177,7 +187,19 @@ static void pace(struct esp_playback *p,uint64_t now){uint64_t written=p->frames
 static int silence(struct esp_playback *p,uint64_t now){static const unsigned char zero[SILENCE_FRAMES*4];int queued=0;
  if(p->bus_fd<0||!p->fifo)return 0;pace(p,now);if(p->frames*1000/48000>now-p->origin+SILENCE_LEAD_MS)return 0;
  if(ioctl(p->bus_fd,FIONREAD,&queued)||queued>=SILENCE_QUEUE||write(p->bus_fd,zero,sizeof zero)!=(ssize_t)sizeof zero)return 0;
- p->frames+=SILENCE_FRAMES;if(p->audio_frames&&!p->buffering){p->underruns++;p->buffering=1;}return 1;
+ p->frames+=SILENCE_FRAMES;if(p->audio_frames&&!p->buffering){p->underruns++;p->buffering=2;}return 1;
+}
+/* Before blocking work: queue enough silence that the engine, which powers its
+ * output down after ~160-340 ms without data, keeps running through it. */
+static void preroll(struct esp_playback *p,uint64_t now){static const unsigned char zero[SILENCE_FRAMES*4];int queued=0;
+ if(p->bus_fd<0||!p->fifo)return;pace(p,now);
+ while(p->frames*1000/48000<now-p->origin+PREROLL_MS&&!ioctl(p->bus_fd,FIONREAD,&queued)&&queued<PREROLL_QUEUE&&write(p->bus_fd,zero,sizeof zero)==(ssize_t)sizeof zero)p->frames+=SILENCE_FRAMES;
+}
+void esp_playback_warm(struct esp_playback *p,const char *bus,uint64_t now){
+ if(p->state||strlen(bus)>=sizeof p->bus)return;
+ if(p->bus_fd<0){if(p->warm_off&&!strcmp(p->bus,bus))return;snprintf(p->bus,sizeof p->bus,"%s",bus);p->warm_off=0;if(bus_open(p))return;
+  if(!p->fifo){close(p->bus_fd);p->bus_fd=-1;p->warm_off=1;return;}p->clock=0;p->frames=p->audio_frames=0;p->underruns=0;}
+ for(unsigned step=0;step<8&&silence(p,now);step++){}
 }
 /* Resampler tail, then wait for the engine to drain what was written. */
 static int finish(struct esp_playback *p){uint64_t desired;
