@@ -1021,6 +1021,7 @@ $(BUILD)/test-voice-ns: tests/test_voice_ns.c src/adapter/voice_ns.c src/adapter
 $(BUILD)/test-voice-pipeline-noise: tests/test_voice_pipeline_noise.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c src/adapter/voice_whisper.c src/adapter/voice_listening_led.c \
+		src/adapter/listening_ring.c \
 		src/adapter/adapter_client.c src/adapter/adapter_server.c \
 		src/json.c src/log.c
 	@mkdir -p $(BUILD)
