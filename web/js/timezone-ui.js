@@ -6,8 +6,9 @@
   /* "UTC" (the factory default) and "UTC0" (tzdata's spelling) are the same zone. */
   const same=(a,b)=>(a==='UTC'?'UTC0':a)===(b==='UTC'?'UTC0':b);
   function posixFor(name){const row=table().find(r=>r[0]===name);return row?row[1]:''}
-  /* The IANA name to show for a stored zone: the saved name when it still matches, else the first name with the same rules. */
-  function nameFor(posix,name){if(name&&same(posixFor(name),posix))return name;const row=table().find(r=>same(r[1],posix));return row?row[0]:''}
+  /* The IANA name to show for a stored zone: the saved name when it still matches, else a name with the same rules, preferring the canonical zone
+     (tzdata zone1970.tab: Europe/London, not Europe/Guernsey) and then the first in the list. Home Assistant only sends the POSIX rule. */
+  function nameFor(posix,name){if(name&&same(posixFor(name),posix))return name;const rows=table().filter(r=>same(r[1],posix)),canon=Array.isArray(window.LE_TIMEZONES_CANONICAL)?window.LE_TIMEZONES_CANONICAL:[],row=rows.find(r=>canon.includes(r[0]))||rows[0];return row?row[0]:''}
   function browserName(){try{return Intl.DateTimeFormat().resolvedOptions().timeZone||''}catch(_){return ''}}
   function label(name){return name.replace(/_/g,' ')}
   /* <option>s grouped by region; an unknown stored zone stays selectable as itself. */

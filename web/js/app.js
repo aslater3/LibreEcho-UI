@@ -261,12 +261,12 @@ async function waitForDevice(title){
    await new Promise(r=>setTimeout(r,1000));
   }
  }finally{clearInterval(ticker)}}
-async function power(path,name){
- const question=path==='factory-reset'
+async function power(path,name,question){
+ question=question||(path==='factory-reset'
   ?'Factory reset this LibreEcho device? This permanently removes accounts, Wi-Fi profiles and passwords, assistant credentials, timers and all device settings.'
   :path==='reboot-bootloader'
   ?'Restart this LibreEcho device into recovery / reflash mode (fastboot)?\n\nThe speaker restarts once into fastboot so the LibreEcho installer can reinstall or diagnose it over USB. Only a one-time start-in-fastboot flag is set; LibreEcho itself is not changed. To return to LibreEcho without installing, run "fastboot reboot" or unplug and replug the device.'
-  :`${name} this LibreEcho device?`;
+  :`${name} this LibreEcho device?`);
  if(!confirm(question))return;
  if(state.busy)return;
  if(path==='shutdown'||path==='reboot-bootloader'){
@@ -2182,7 +2182,7 @@ async function systemPage(){const generation=state.renderGeneration,page=state.p
     }catch(error){toast(error.message,true)}
     finally{setBusy(false);e.target.value=''}
   };
-  if($('#restart-update'))$('#restart-update').onclick=()=>power('reboot','Restart into the update');
+  if($('#restart-update'))$('#restart-update').onclick=()=>power('reboot','Restart into the update','Restart this LibreEcho device into the update?');
   $('#backup').onclick=async()=>{try{const config=await api('/config/export'),blob=new Blob([JSON.stringify(config,null,2)+'\n'],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='libreecho-config.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);toast(config.partial?'Partial configuration downloaded; unsupported fields were omitted':'Configuration downloaded')}catch(e){toast(e.message,true)}};
   $('#restore').onclick=()=>$('#restore-file').click();
   $('#restore-file').onchange=async e=>{const file=e.target.files[0];if(!file)return;try{const config=JSON.parse(await file.text());if(!confirm('Restore this configuration? Current settings will be replaced.'))return;await post('/config/import',config,'Configuration restored');showPage('System')}catch(error){toast(error.message||'Invalid configuration file',true)}finally{e.target.value=''}};

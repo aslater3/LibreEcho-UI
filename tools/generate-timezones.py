@@ -7,6 +7,8 @@ that sits at the end of each TZif file. Zones come from tzdata's zone.tab
 are rewritten to LST/LDT exactly as src/timezone.h does, because the
 initramfs only exports letters, digits and "+-:,./" as TZ.
 
+Also emits LE_TIMEZONES_CANONICAL from zone1970.tab.
+
 Usage: python3 tools/generate-timezones.py [/usr/share/zoneinfo] > web/js/timezones.js
 """
 import pathlib
@@ -41,6 +43,14 @@ def main():
         if first.startswith('# version '):
             version = first[len('# version '):]
     names = {'UTC'}
+    # zone1970.tab names one canonical zone per group of zones that share
+    # history since 1970; zone.tab's extra rows (Europe/Guernsey, Jersey,
+    # Isle_of_Man ... = Europe/London) are link-like aliases. The page prefers
+    # the canonical ones when only a POSIX rule is known.
+    canonical = {'UTC'}
+    for line in (ROOT / 'zone1970.tab').read_text().splitlines():
+        if line and not line.startswith('#'):
+            canonical.add(line.split('\t')[2])
     for line in (ROOT / 'zone.tab').read_text().splitlines():
         if line and not line.startswith('#'):
             names.add(line.split('\t')[2])
@@ -55,6 +65,8 @@ def main():
     print('window.LE_TIMEZONES=[')
     print(',\n'.join('[%s,%s]' % (repr_js(n), repr_js(t)) for n, t in rows))
     print('];')
+    print('/* Canonical zones (tzdata zone1970.tab): preferred when several names share one POSIX rule. */')
+    print('window.LE_TIMEZONES_CANONICAL=[%s];' % ','.join(repr_js(n) for n, _t in rows if n in canonical))
 
 
 def repr_js(text):

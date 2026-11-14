@@ -152,6 +152,16 @@ async function renderWith(value) {
         'update_already_pending was not rendered as a readable label');
     assert(panel.includes('Restart into update') && panel.includes('restart-update'),
         'a pending reboot did not offer the Restart into update button');
+    // The confirm reads naturally for the restart button; other callers keep "<label> this LibreEcho device?".
+    const asked = [];
+    globalThis.confirm = q => { asked.push(q); return false; };
+    elements.get('restart-update').onclick();
+    vm.runInThisContext("power('reboot','Reboot')");
+    vm.runInThisContext("power('shutdown','Shut down')");
+    globalThis.confirm = () => false;
+    assert(asked[0] === 'Restart this LibreEcho device into the update?', `restart confirm was: ${asked[0]}`);
+    assert(asked[1] === 'Reboot this LibreEcho device?', `reboot confirm changed: ${asked[1]}`);
+    assert(asked[2] === 'Shut down this LibreEcho device?', `shutdown confirm changed: ${asked[2]}`);
     html = await renderWith(update({}));
     assert(!updatePanel(html).includes('Restart into update'),
         'the restart button was offered without a pending reboot');
