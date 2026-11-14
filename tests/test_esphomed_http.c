@@ -138,6 +138,28 @@ static void warm_before_reply(void){static unsigned char b[44+48000*2];size_t n=
  assert(run(1000)==1);assert(sound_bytes()==p.audio_frames*4&&p.audio_frames==48000&&first_sound()>thinking&&heard_n%4==0);end_fetch();bus_fifo_close();
  puts("Warm while thinking, reply continues on the warmed FIFO; regular files stay cold: OK");
 }
+static int take_request(int server){int fd=accept(server,NULL,NULL);assert(fd>=0);char request[512];ssize_t r=recv(fd,request,sizeof request-1,0);assert(r>0);request[r]=0;assert(!strncmp(request,"GET /tts.wav HTTP/1.1\r\n",23));return fd;}
+static void send_all(int fd,const void *b,size_t n){const unsigned char *c=b;while(n){ssize_t w=send(fd,c,n,MSG_NOSIGNAL);assert(w>0);c+=w;n-=(size_t)w;}}
+/* A reply that stalls mid-body (TCP backing off after the Wi-Fi dropped frames)
+ * resumes on a fresh connection; the replayed body is skipped exactly, and a
+ * replay that differs or ends early fails instead of splicing audio. */
+static int stalled_then_replayed(const unsigned char *first,size_t first_n,const unsigned char *replay,size_t replay_n,unsigned *reconnects){
+ char url[64];int server=listener(url,sizeof url),rc=0;bus_reset();resp_reset();esp_playback_init(&p);assert(esp_playback_start(&p,url,bus,NULL,now_ms)==0);
+ for(unsigned i=0;i<5;i++)assert(tick()==0);int one=take_request(server);
+ const char *h="HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";send_all(one,h,strlen(h));char size[32];int z=snprintf(size,sizeof size,"%zx\r\n",first_n);send_all(one,size,(size_t)z);send_all(one,first,first_n);send_all(one,"\r\n",2);
+ /* Before 3 s without data nothing happens; then a second connection arrives. */
+ for(unsigned i=0;i<280;i++)assert(tick()==0);assert(p.reconnects==0&&p.delivered==first_n);
+ for(unsigned i=0;i<40&&!p.reconnects;i++)assert(tick()==0);assert(p.reconnects==1);for(unsigned i=0;i<5;i++)assert(tick()==0);
+ peer=take_request(server);close(server);resp_text(h);resp_chunked(replay,replay_n,7000);resp_text("0\r\n\r\n");allow_all(1);rc=run(4000);*reconnects=p.reconnects;close(one);return rc;}
+static void stall_reconnect(void){static unsigned char b[44+48000*4],other[44+48000*4];size_t n=tone(b,48000*2,1300,1);unsigned again=0;assert(tone(other,48000*2,1400,1)==n);
+ assert(stalled_then_replayed(b,n/3,b,n,&again)==1&&again==1);assert(p.input_frames==48000*2&&p.audio_frames==48000*2&&bus_size()==p.audio_frames*4);end_fetch();
+ assert(stalled_then_replayed(b,n/3,other,n,&again)==-1&&again==1);end_fetch();
+ assert(stalled_then_replayed(b,n/3,b,n/4,&again)==-1&&again==1);end_fetch();
+ /* No response at all yet: HA may still be starting the stream, so no reconnect. */
+ char url[64];int server=listener(url,sizeof url);esp_playback_init(&p);assert(esp_playback_start(&p,url,bus,NULL,now_ms)==0);for(unsigned i=0;i<5;i++)assert(tick()==0);
+ int idle=take_request(server);for(unsigned i=0;i<500;i++)assert(tick()==0);assert(p.reconnects==0);close(idle);close(server);esp_playback_close(&p);
+ puts("Stalled reply resumes on a new connection, skipping exactly what played; a differing or short replay fails: OK");
+}
 /* Before blocking TLS work a FIFO gets a bounded pre-roll of silence, topped up only to its lead. */
 static void preroll_fifo(void){bus_fifo();esp_playback_init(&p);int z=snprintf(p.bus,sizeof p.bus,"%.250s",fifo);assert(z>0&&(size_t)z==strlen(fifo));assert(!bus_open(&p)&&p.fifo);
  preroll(&p,now_ms);int queued=0,again=0;assert(!ioctl(reader,FIONREAD,&queued)&&queued>=48000*4*240/1000&&queued<=PREROLL_QUEUE+(int)SILENCE_FRAMES*4&&p.frames*1000/48000>=240);
@@ -169,6 +191,6 @@ int main(int argc,char **argv){
  /* Run the untouched external capture first so RED identifies the real bug. */
  if(argc==2)ffmpeg_wav(argv[1]);else assert(argc==1);
  wav_boundaries();unsigned char b[52];wav_header(b,sizeof b);put32(b+4,UINT32_MAX);put32(b+40,UINT32_MAX);http_boundaries(b,sizeof b);
- streams_before_eof();long_and_slow();warm_fifo();warm_before_reply();preroll_fifo();
+ streams_before_eof();long_and_slow();warm_fifo();warm_before_reply();preroll_fifo();stall_reconnect();
  assert(unlink(bus)==0);return 0;
 }

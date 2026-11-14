@@ -201,7 +201,11 @@ characters. The device then opens the reply URL and plays the WAV or MP3 while
 it is still being generated. WAV starts once about 150 ms of audio is
 buffered. If the stream runs dry mid-reply, because the TTS produces a sentence
 slower than it plays, playback waits for 1.5 s of audio or the end of the reply
-before it resumes, giving one pause instead of a stutter. From the end of speech until the first audio, and whenever the stream
+before it resumes, giving one pause instead of a stutter. If no data arrives for
+3 s after the reply started, typically TCP backing off after the Wi-Fi dropped
+frames, the device opens a new connection to the same URL. Home Assistant
+serves the stream again from its cache, so the device skips the bytes it
+already has. A replay that starts with different bytes, or ends before them, fails. From the end of speech until the first audio, and whenever the stream
 stalls between sentences, the device feeds the speaker silence. This hides the
 audio output's power-up behind STT and the agent, and keeps the output from
 shutting down mid-reply. Media is ducked from the end of speech, as it is

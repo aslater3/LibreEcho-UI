@@ -2,6 +2,7 @@
 #define LE_ESPHOME_PLAYBACK_H
 #include <stdint.h>
 #include <stddef.h>
+#include <netinet/in.h>
 #include <mbedtls/ssl.h>
 #include <mbedtls/x509_crt.h>
 #include <mbedtls/entropy.h>
@@ -31,6 +32,9 @@ struct esp_playback {
  unsigned char dns_query[300];size_t dns_query_len;uint16_t dns_id;
  int rate,channels,source_rate;uint64_t input_frames,audio_frames,frames,origin,deadline,idle_deadline,drain_until;unsigned underruns;
  int16_t output[8192*2];size_t output_len,output_sent;
+ /* Stall recovery: the resolved address, body bytes already handed to the
+  * decoder, bytes of a replayed body still to skip, and its first bytes to compare. */
+ struct in_addr addr;int have_addr;unsigned reconnects;size_t delivered,resume_skip,head_n;uint64_t progress_at;unsigned char head[64];
  mp3dec_t decoder;struct le_radio_resampler resampler;
  mbedtls_ssl_context ssl;mbedtls_ssl_config config;mbedtls_x509_crt ca;mbedtls_entropy_context entropy;mbedtls_ctr_drbg_context rng;
 };

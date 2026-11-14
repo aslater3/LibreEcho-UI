@@ -37,6 +37,8 @@
 #define REBUFFER_MS 1500U     /* and after the stream ran dry: one pause, not a stutter, when TTS is slower than real time */
 #define PREROLL_MS 250U       /* silence queued before work that blocks the loop (CA parse, a TLS handshake step) */
 #define PREROLL_QUEUE 49152
+#define STALL_MS 3000U        /* no progress after the reply started: reconnect and skip what was received */
+#define RECONNECT_MAX 6U
 #define WAV_HEADER_MAX (64U*1024U)
 #define MP3_SKIP_MAX (1024U*1024U)
 #define MP3_WINDOW 4612U      /* two largest free-format frames and the next header: minimp3 syncs on whole frames */
@@ -50,7 +52,7 @@ void esp_playback_init(struct esp_playback *p){memset(p,0,sizeof *p);p->fd=p->bu
 void esp_playback_close(struct esp_playback *p){if(p->fd>=0)close(p->fd);if(p->bus_fd>=0)close(p->bus_fd);if(p->dns_fd>=0)close(p->dns_fd);mbedtls_ssl_free(&p->ssl);mbedtls_ssl_config_free(&p->config);mbedtls_x509_crt_free(&p->ca);mbedtls_ctr_drbg_free(&p->rng);mbedtls_entropy_free(&p->entropy);p->fd=p->bus_fd=p->dns_fd=-1;p->state=0;}
 static int tls_send(void *ctx,const unsigned char *buf,size_t n){int fd=*(int*)ctx;ssize_t w=send(fd,buf,n,MSG_DONTWAIT|MSG_NOSIGNAL);if(w<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return MBEDTLS_ERR_SSL_WANT_WRITE;return w<0?MBEDTLS_ERR_SSL_INTERNAL_ERROR:(int)w;}
 static int tls_recv(void *ctx,unsigned char *buf,size_t n){int fd=*(int*)ctx;ssize_t w=recv(fd,buf,n,MSG_DONTWAIT);if(w<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return MBEDTLS_ERR_SSL_WANT_READ;return w<0?MBEDTLS_ERR_SSL_INTERNAL_ERROR:(int)w;}
-static int connect_ip(struct esp_playback *p,struct in_addr ip){struct sockaddr_in a;memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons((uint16_t)p->port);a.sin_addr=ip;p->fd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);if(p->fd<0)return -1;if(connect(p->fd,(struct sockaddr*)&a,sizeof a)<0&&errno!=EINPROGRESS)return -1;p->state=2;return 0;}
+static int connect_ip(struct esp_playback *p,struct in_addr ip){struct sockaddr_in a;p->addr=ip;p->have_addr=1;memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons((uint16_t)p->port);a.sin_addr=ip;p->fd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);if(p->fd<0)return -1;if(connect(p->fd,(struct sockaddr*)&a,sizeof a)<0&&errno!=EINPROGRESS)return -1;p->state=2;return 0;}
 static int dns_start(struct esp_playback *p){struct sockaddr_in a;FILE *f;char line[512],server[64]="";size_t z=12;const char *s=p->host,*dot;
  f=fopen("/etc/resolv.conf","r");if(!f)return -1;while(fgets(line,sizeof line,f)){if(sscanf(line,"nameserver %63s",server)==1)break;}fclose(f);
  memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons(53);if(inet_pton(AF_INET,server,&a.sin_addr)!=1)return -1;
@@ -79,7 +81,7 @@ int esp_playback_start(struct esp_playback *p,const char *url,const char *bus,co
  if(slash&&strlen(slash)>=sizeof p->path)return -1;snprintf(p->path,sizeof p->path,"%s",slash?slash:"/");snprintf(p->bus,sizeof p->bus,"%s",bus);
  /* Best effort now, so the output can warm up during the fetch; audio retries and fails without it. */
  (void)bus_open(p);
- int n=snprintf(p->request,sizeof p->request,"GET %s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\nAccept: audio/wav, audio/mpeg\r\n\r\n",p->path,p->host,p->port);if(n<0||(size_t)n>=sizeof p->request)return -1;p->request_len=(size_t)n;p->expected=SIZE_MAX;p->deadline=now+TOTAL_MS;p->idle_deadline=now+IDLE_MS;p->buffering=1;
+ int n=snprintf(p->request,sizeof p->request,"GET %s HTTP/1.1\r\nHost: %s:%u\r\nConnection: close\r\nAccept: audio/wav, audio/mpeg\r\n\r\n",p->path,p->host,p->port);if(n<0||(size_t)n>=sizeof p->request)return -1;p->request_len=(size_t)n;p->expected=SIZE_MAX;p->deadline=now+TOTAL_MS;p->progress_at=now;p->idle_deadline=now+IDLE_MS;p->buffering=1;
  if(p->tls){preroll(p,now);if(!ca)ca="/etc/ssl/certs/ca-certificates.crt";if(mbedtls_x509_crt_parse_file(&p->ca,ca)||mbedtls_ctr_drbg_seed(&p->rng,mbedtls_entropy_func,&p->entropy,(const unsigned char*)"libreecho-https",14)||mbedtls_ssl_config_defaults(&p->config,MBEDTLS_SSL_IS_CLIENT,MBEDTLS_SSL_TRANSPORT_STREAM,MBEDTLS_SSL_PRESET_DEFAULT))return -1;mbedtls_ssl_conf_authmode(&p->config,MBEDTLS_SSL_VERIFY_REQUIRED);mbedtls_ssl_conf_ca_chain(&p->config,&p->ca,NULL);mbedtls_ssl_conf_rng(&p->config,mbedtls_ctr_drbg_random,&p->rng);if(mbedtls_ssl_setup(&p->ssl,&p->config)||mbedtls_ssl_set_hostname(&p->ssl,p->host))return -1;mbedtls_ssl_set_bio(&p->ssl,&p->fd,tls_send,tls_recv,NULL);}
  if(inet_pton(AF_INET,p->host,&ip)==1)return connect_ip(p,ip);return dns_start(p);
 }
@@ -97,9 +99,12 @@ static int headers(struct esp_playback *p){size_t i;for(i=0;i+3<p->wire_n&&i<819
 static int unframe(struct esp_playback *p){
  if(p->pay_pos&&(p->pay_n==sizeof p->payload||p->pay_pos>=sizeof p->payload/2)){memmove(p->payload,p->payload+p->pay_pos,p->pay_n-p->pay_pos);p->pay_n-=p->pay_pos;p->pay_pos=0;}
  while(p->wire_pos<p->wire_n){const unsigned char *w=p->wire+p->wire_pos;size_t in=p->wire_n-p->wire_pos,room=sizeof p->payload-p->pay_n,n;unsigned c=*w,v;
-  if(!p->chunked||p->chunk_stage==CHUNK_DATA){n=in<room?in:room;if(p->chunked&&n>p->chunk_left)n=(size_t)p->chunk_left;if(!n)break;
+  if(!p->chunked||p->chunk_stage==CHUNK_DATA){n=p->resume_skip?in:in<room?in:room;if(p->chunked&&n>p->chunk_left)n=(size_t)p->chunk_left;if(p->resume_skip&&n>p->resume_skip)n=p->resume_skip;if(!n)break;
    if(n>ESP_PLAY_BODY_MAX-p->body_total||(p->expected!=SIZE_MAX&&n>p->expected-p->body_total))return -1;
-   memcpy(p->payload+p->pay_n,w,n);p->pay_n+=n;p->wire_pos+=n;p->body_total+=n;if(p->chunked&&!(p->chunk_left-=n))p->chunk_stage=CHUNK_DATA_CR;continue;}
+   /* A replayed body must start with the bytes the first one did. */
+   if(p->resume_skip){for(size_t i=0;i<n&&p->body_total+i<p->head_n;i++)if(w[i]!=p->head[p->body_total+i])return -1;p->resume_skip-=n;}
+   else{for(size_t i=0;i<n&&p->head_n<sizeof p->head;i++)p->head[p->head_n++]=w[i];memcpy(p->payload+p->pay_n,w,n);p->pay_n+=n;p->delivered+=n;}
+   p->wire_pos+=n;p->body_total+=n;if(p->chunked&&!(p->chunk_left-=n))p->chunk_stage=CHUNK_DATA_CR;continue;}
   p->wire_pos++;
   switch(p->chunk_stage){
   case CHUNK_SIZE:if(c=='\r'){if(!p->chunk_digits)return -1;p->chunk_stage=CHUNK_SIZE_LF;break;}
@@ -117,22 +122,31 @@ static int unframe(struct esp_playback *p){
 }
 /* The body is complete once its framing says so; a truncated one fails. */
 static int net_complete(struct esp_playback *p){int drained=p->wire_pos==p->wire_n;if(p->net_done)return 0;
- if((p->chunked&&p->chunk_stage==CHUNK_DONE)||(!p->chunked&&p->expected!=SIZE_MAX&&p->body_total==p->expected)||(p->net_eof&&drained&&!p->chunked&&p->expected==SIZE_MAX)){if(p->fd>=0)close(p->fd);p->fd=-1;p->net_done=1;return 0;}
+ if((p->chunked&&p->chunk_stage==CHUNK_DONE)||(!p->chunked&&p->expected!=SIZE_MAX&&p->body_total==p->expected)||(p->net_eof&&drained&&!p->chunked&&p->expected==SIZE_MAX)){if(p->resume_skip)return -1;if(p->fd>=0)close(p->fd);p->fd=-1;p->net_done=1;return 0;}
  return p->net_eof&&drained?-1:0;
 }
 /* One network step: 1 progress, 0 nothing to do now, -1 failed. */
 static int net_once(struct esp_playback *p,uint64_t now){int rc;
  if(p->state==1){if(dns_tick(p)<0)return -1;return p->state!=1;}
- if(p->state==2){struct sockaddr_in a;socklen_t n=sizeof a;if(getpeername(p->fd,(struct sockaddr*)&a,&n)<0){int err=0;n=sizeof err;if(getsockopt(p->fd,SOL_SOCKET,SO_ERROR,&err,&n)<0||err)return -1;return 0;}p->state=p->tls?3:4;return 1;}
- if(p->state==3){preroll(p,now);rc=mbedtls_ssl_handshake(&p->ssl);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc||mbedtls_ssl_get_verify_result(&p->ssl))return -1;p->state=4;return 1;}
- if(p->state==4){size_t left=p->request_len-p->request_sent;rc=p->tls?mbedtls_ssl_write(&p->ssl,(unsigned char*)p->request+p->request_sent,left):tls_send(&p->fd,(unsigned char*)p->request+p->request_sent,left);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc<=0)return -1;p->request_sent+=(size_t)rc;if(p->request_sent==p->request_len)p->state=5;return 1;}
+ if(p->state==2){struct sockaddr_in a;socklen_t n=sizeof a;if(getpeername(p->fd,(struct sockaddr*)&a,&n)<0){int err=0;n=sizeof err;if(getsockopt(p->fd,SOL_SOCKET,SO_ERROR,&err,&n)<0||err)return -1;return 0;}p->state=p->tls?3:4;p->progress_at=now;return 1;}
+ if(p->state==3){preroll(p,now);rc=mbedtls_ssl_handshake(&p->ssl);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc||mbedtls_ssl_get_verify_result(&p->ssl))return -1;p->state=4;p->progress_at=now;return 1;}
+ if(p->state==4){size_t left=p->request_len-p->request_sent;rc=p->tls?mbedtls_ssl_write(&p->ssl,(unsigned char*)p->request+p->request_sent,left):tls_send(&p->fd,(unsigned char*)p->request+p->request_sent,left);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc<=0)return -1;p->request_sent+=(size_t)rc;if(p->request_sent==p->request_len){p->state=5;p->progress_at=now;}return 1;}
  if(p->state!=5||p->net_done||p->net_eof)return 0;
  if(p->wire_pos){memmove(p->wire,p->wire+p->wire_pos,p->wire_n-p->wire_pos);p->wire_n-=p->wire_pos;p->wire_pos=0;}
  size_t cap=sizeof p->wire-p->wire_n;if(!cap){p->idle_deadline=now+IDLE_MS;return 0;}/* the decoder is the bottleneck */
  rc=p->tls?mbedtls_ssl_read(&p->ssl,p->wire+p->wire_n,cap):tls_recv(&p->fd,p->wire+p->wire_n,cap);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc==MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)rc=0;if(rc<0)return -1;
- p->idle_deadline=now+IDLE_MS;if(rc)p->wire_n+=(size_t)rc;else p->net_eof=1;
+ p->progress_at=now;p->idle_deadline=now+IDLE_MS;if(rc)p->wire_n+=(size_t)rc;else p->net_eof=1;
  if(!p->header_done){int h=headers(p);if(h<0)return -1;if(!h)return p->net_eof?-1:1;}
  if(unframe(p)<0||net_complete(p)<0)return -1;return !p->net_eof&&!p->net_done;
+}
+/* HA serves a TTS stream again from its cache, so a stalled reply (TCP backing
+ * off after the Wi-Fi dropped frames) resumes sooner on a fresh connection that
+ * skips the body bytes already handed to the decoder. TLS keeps its parsed config. */
+static int reconnect(struct esp_playback *p,uint64_t now){
+ if(p->fd>=0)close(p->fd);p->fd=-1;if(p->tls&&(mbedtls_ssl_session_reset(&p->ssl)||mbedtls_ssl_set_hostname(&p->ssl,p->host)))return -1;
+ p->resume_skip=p->delivered;p->body_total=0;p->wire_n=p->wire_pos=p->request_sent=0;p->header_done=p->chunked=p->net_eof=0;p->expected=SIZE_MAX;
+ p->chunk_stage=CHUNK_SIZE;p->chunk_digits=0;p->chunk_left=0;p->trailer_cr=p->trailer_colon=0;p->trailer_bytes=p->trailer_line=0;
+ p->reconnects++;p->progress_at=now;return connect_ip(p,p->addr);
 }
 static int wav_take(struct esp_playback *p,size_t n){p->pay_pos+=n;p->wav_bytes+=n;return p->riff!=UINT32_MAX&&p->wav_bytes>(uint64_t)p->riff+8?-1:0;}
 /* Walk WAV chunks up to the data chunk, then whole chunks after it.
@@ -218,6 +232,7 @@ static int play_once(struct esp_playback *p,uint64_t now){int rc;
 int esp_playback_tick(struct esp_playback *p,uint64_t now){
  if(!p->state)return p->result?p->result:-1;if(now>p->deadline||(!p->net_done&&now>p->idle_deadline))goto fail;
  if(p->state==7){int remaining=0;if(now<p->drain_until)return 0;if(ioctl(p->bus_fd,FIONREAD,&remaining)==0&&remaining>0)return 0;p->result=1;esp_playback_close(p);return 1;}
+ if(p->state>=2&&p->state<=5&&!p->net_done&&!p->net_eof&&p->have_addr&&(p->header_done||p->reconnects)&&p->reconnects<RECONNECT_MAX&&now-p->progress_at>=STALL_MS&&reconnect(p,now)<0)goto fail;
  for(unsigned step=0;step<32;step++){int rc=net_once(p,now);if(rc<0)goto fail;if(!rc)break;}
  /* esphomed's loop wakes about every 20 ms (HZ=100): keep stepping until the
   * pacing lead is full, the bus would block or input runs out. Each step
