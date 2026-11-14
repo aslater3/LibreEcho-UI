@@ -71,6 +71,14 @@
 #define RING_PIXELS 12
 #define METER_DEFAULT_HOLD_MS 1500U
 #define METER_MAX_HOLD_MS 10000U
+/* Listening direction cue.  Twelve pixels at 30 degrees each; the measured
+   front pair is 10/11, so pixel 11 is 15 degrees clockwise of front, pixel 10
+   is 15 degrees anticlockwise, and pixel 0 is one step clockwise of the pair.
+   The base ring stays dim so the pointer is the bright part of the cue. */
+#define DIRECTION_DEFAULT_WIDTH_DEG 75U
+#define DIRECTION_BASE_PERCENT 30U
+#define RING_PIXEL_ZERO_DEG 45U
+#define RING_PIXEL_STEP_DEG 30U
 /* Unlit gauge pixels keep a faint trace of the colour so the ring reads as a
    dial with an empty section rather than as a few disconnected pixels. */
 #define METER_TRACK_PERCENT 6U
@@ -257,11 +265,17 @@ struct daemon_context {
     struct colour pattern_colour;
     unsigned int pattern_repeats;
     double pattern_started;
+    int pattern_has_azimuth;
+    unsigned int pattern_azimuth;
+    unsigned int pattern_width;
     int mute_pattern_active;
     struct colour mute_pattern_colour;
     int pattern_previous_kind;
     struct colour pattern_previous_colour;
     unsigned int pattern_previous_repeats;
+    int pattern_previous_has_azimuth;
+    unsigned int pattern_previous_azimuth;
+    unsigned int pattern_previous_width;
     char pattern_owner[32];
     char pattern_previous_owner[32];
     struct colour pattern_saved;
@@ -347,9 +361,10 @@ struct daemon_context {
 
 /* PATTERN_SOLID holds a steady colour until its owner stops it. The mute
    indicator needs a state you can read at a glance, which neither the pulse
-   nor the 1.5s meter can express. */
+   nor the 1.5s meter can express. PATTERN_DIRECTION is the listening cue:
+   a dim coloured ring with a brighter segment at pattern_azimuth. */
 enum pattern_kind { PATTERN_NONE = 0, PATTERN_PULSE, PATTERN_FLASH,
-                    PATTERN_SOLID };
+                    PATTERN_SOLID, PATTERN_DIRECTION };
 enum visualizer_mood {
     VISUALIZER_MOOD_CALM = 0,
     VISUALIZER_MOOD_BALANCED,
@@ -2780,7 +2795,8 @@ static const char *pattern_name(int kind)
 {
     return kind == PATTERN_PULSE ? "pulse" :
            kind == PATTERN_FLASH ? "flash" :
-           kind == PATTERN_SOLID ? "solid" : "none";
+           kind == PATTERN_SOLID ? "solid" :
+           kind == PATTERN_DIRECTION ? "direction" : "none";
 }
 
 static void copy_pattern_owner(char *destination, const char *source)
@@ -2818,9 +2834,13 @@ static void stop_pattern(struct daemon_context *ctx, const char *owner,
             ctx->pattern_kind = ctx->pattern_previous_kind;
             ctx->pattern_colour = ctx->pattern_previous_colour;
             ctx->pattern_repeats = ctx->pattern_previous_repeats;
+            ctx->pattern_has_azimuth = ctx->pattern_previous_has_azimuth;
+            ctx->pattern_azimuth = ctx->pattern_previous_azimuth;
+            ctx->pattern_width = ctx->pattern_previous_width;
             copy_pattern_owner(ctx->pattern_owner,
                                ctx->pattern_previous_owner);
             ctx->pattern_previous_kind = PATTERN_NONE;
+            ctx->pattern_previous_has_azimuth = 0;
             ctx->pattern_previous_owner[0] = '\0';
             ctx->pattern_started = now;
             return;
@@ -2837,6 +2857,8 @@ static void stop_pattern(struct daemon_context *ctx, const char *owner,
     ctx->pattern_active = 0;
     ctx->pattern_kind = PATTERN_NONE;
     ctx->pattern_previous_kind = PATTERN_NONE;
+    ctx->pattern_has_azimuth = 0;
+    ctx->pattern_previous_has_azimuth = 0;
     ctx->pattern_owner[0] = '\0';
     ctx->pattern_previous_owner[0] = '\0';
     ctx->state.current = ctx->pattern_saved;
@@ -2866,18 +2888,25 @@ static void start_pattern(struct daemon_context *ctx, int kind,
             ctx->pattern_previous_kind = ctx->pattern_kind;
             ctx->pattern_previous_colour = ctx->pattern_colour;
             ctx->pattern_previous_repeats = ctx->pattern_repeats;
+            ctx->pattern_previous_has_azimuth = ctx->pattern_has_azimuth;
+            ctx->pattern_previous_azimuth = ctx->pattern_azimuth;
+            ctx->pattern_previous_width = ctx->pattern_width;
             copy_pattern_owner(ctx->pattern_previous_owner, ctx->pattern_owner);
         }
     } else {
         ctx->pattern_saved = ctx->state.current;
         ctx->pattern_saved_animation = ctx->animation_active;
         ctx->pattern_previous_kind = PATTERN_NONE;
+        ctx->pattern_previous_has_azimuth = 0;
         ctx->pattern_previous_owner[0] = '\0';
     }
     ctx->pattern_active = 1;
     ctx->pattern_kind = kind;
     ctx->pattern_colour = *colour;
     ctx->pattern_repeats = repeats;
+    ctx->pattern_has_azimuth = 0;
+    ctx->pattern_azimuth = 0;
+    ctx->pattern_width = DIRECTION_DEFAULT_WIDTH_DEG;
     copy_pattern_owner(ctx->pattern_owner, owner);
     ctx->pattern_started = now;
     ctx->animation_active = 0;
@@ -2908,12 +2937,86 @@ static int dnd_pattern_held(const struct daemon_context *ctx, struct colour *col
 
 static void update_pattern(struct daemon_context *ctx, double now);
 
+/*
+ * The ring's front centre sits between pixels 10 and 11 (measured on hardware
+ * for the idle indicator, #110).  Mic azimuths are clockwise from front, so
+ * pixel i's centre is 45 + 30*i degrees, with pixel 11 at 15 degrees and
+ * pixel 10 at 345.  This assumes the LED chain runs clockwise as viewed from
+ * above; if a physical check shows the mirror image, negate the step.
+ */
+static unsigned int direction_pixel_angle(size_t pixel)
+{
+    return (RING_PIXEL_ZERO_DEG +
+            RING_PIXEL_STEP_DEG * (unsigned int)pixel) % 360U;
+}
+
+static unsigned int direction_distance(unsigned int a, unsigned int b)
+{
+    unsigned int distance = a > b ? a - b : b - a;
+
+    return distance > 180U ? 360U - distance : distance;
+}
+
+/* 0 at the edge of the segment, 100 on its axis. */
+static unsigned int direction_pointer_level(unsigned int distance,
+                                            unsigned int half_width)
+{
+    if (half_width == 0U || distance >= half_width)
+        return 0U;
+    return (half_width - distance) * 100U / half_width;
+}
+
+/*
+ * Alexa-style listening cue: a dim ring in the Listening theme colour with a
+ * brighter segment at the selected talker beam.  The segment is interpolated
+ * across neighbouring pixels so a 12-pixel ring still reads as a direction
+ * rather than a single hard-edged LED.
+ */
+static void apply_direction_pattern(struct daemon_context *ctx)
+{
+    struct led_rgb frame[RING_PIXELS];
+    const struct colour *colour = &ctx->pattern_colour;
+    unsigned int base_r = colour->r * DIRECTION_BASE_PERCENT / 100U;
+    unsigned int base_g = colour->g * DIRECTION_BASE_PERCENT / 100U;
+    unsigned int base_b = colour->b * DIRECTION_BASE_PERCENT / 100U;
+    unsigned int pointer_r =
+        colour->r + (255U - colour->r) * 45U / 100U;
+    unsigned int pointer_g =
+        colour->g + (255U - colour->g) * 45U / 100U;
+    unsigned int pointer_b =
+        colour->b + (255U - colour->b) * 45U / 100U;
+    unsigned int half_width = ctx->pattern_width / 2U;
+    size_t i;
+
+    if (half_width < 15U)
+        half_width = 15U;
+    if (half_width > 90U)
+        half_width = 90U;
+    for (i = 0; i < RING_PIXELS; i++) {
+        unsigned int level = 0U;
+
+        if (ctx->pattern_has_azimuth) {
+            unsigned int distance = direction_distance(
+                direction_pixel_angle(i), ctx->pattern_azimuth);
+            level = direction_pointer_level(distance, half_width);
+        }
+        frame[i].r = base_r + (pointer_r - base_r) * level / 100U;
+        frame[i].g = base_g + (pointer_g - base_g) * level / 100U;
+        frame[i].b = base_b + (pointer_b - base_b) * level / 100U;
+    }
+    output_logical_rgb(ctx, frame, colour->brightness);
+}
+
 static void update_pattern(struct daemon_context *ctx, double now)
 {
     double elapsed = now - ctx->pattern_started;
     struct colour output = ctx->pattern_colour;
     int on = 1;
 
+    if (ctx->pattern_kind == PATTERN_DIRECTION) {
+        apply_direction_pattern(ctx);
+        return;
+    }
     if (ctx->pattern_kind == PATTERN_PULSE) {
         double phase = elapsed * 0.6666666667;
         double wave;
@@ -2930,9 +3033,13 @@ static void update_pattern(struct daemon_context *ctx, double now)
                 ctx->pattern_kind = ctx->pattern_previous_kind;
                 ctx->pattern_colour = ctx->pattern_previous_colour;
                 ctx->pattern_repeats = ctx->pattern_previous_repeats;
+                ctx->pattern_has_azimuth = ctx->pattern_previous_has_azimuth;
+                ctx->pattern_azimuth = ctx->pattern_previous_azimuth;
+                ctx->pattern_width = ctx->pattern_previous_width;
                 copy_pattern_owner(ctx->pattern_owner,
                                    ctx->pattern_previous_owner);
                 ctx->pattern_previous_kind = PATTERN_NONE;
+                ctx->pattern_previous_has_azimuth = 0;
                 ctx->pattern_previous_owner[0] = '\0';
                 ctx->pattern_started = now;
                 update_pattern(ctx, now);
@@ -3514,10 +3621,16 @@ static int handle_request(struct daemon_context *ctx, int fd,
         }
         if (!strcmp(pattern, "pulse") || !strcmp(pattern, "flash") ||
             !strcmp(pattern, "full_ring_flash") ||
-            !strcmp(pattern, "solid")) {
+            !strcmp(pattern, "solid") ||
+            !strcmp(pattern, "direction")) {
             int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE :
-                       !strcmp(pattern, "solid") ? PATTERN_SOLID : PATTERN_FLASH;
+                       !strcmp(pattern, "solid") ? PATTERN_SOLID :
+                       !strcmp(pattern, "direction") ? PATTERN_DIRECTION :
+                       PATTERN_FLASH;
             int pattern_profile;
+            unsigned int azimuth = 0U;
+            unsigned int width = DIRECTION_DEFAULT_WIDTH_DEG;
+            int has_azimuth = 0;
 
             if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
                 get_arg_unsigned(&request, "g", &g, 255) != 0 ||
@@ -3526,6 +3639,11 @@ static int handle_request(struct daemon_context *ctx, int fd,
                 get_arg_unsigned(&request, "repeats", &repeats, 100) != 0)
                 return send_response(fd, request.id, 0, NULL,
                                      "pattern requires r, g, b, brightness and repeats");
+            if (kind == PATTERN_DIRECTION) {
+                has_azimuth = get_arg_unsigned(
+                    &request, "azimuth", &azimuth, 359) == 0;
+                (void)get_arg_unsigned(&request, "width", &width, 180);
+            }
             /*
              * An optional "profile" takes the brightness from that state
              * theme instead of the literal above. The wake indicator uses it
@@ -3535,25 +3653,37 @@ static int handle_request(struct daemon_context *ctx, int fd,
              * the settings page already offers, rather than through a knob
              * invented for this.
              *
-             * Only the brightness is taken. The colour stays the caller's, so
-             * the wake pulse remains red rather than becoming the theme's idle
-             * colour. A profile brightness of zero is honoured: someone who
-             * turns the indicator off means it.
+             * The direction cue also takes the theme colour: the whole
+             * listening ring is that theme, with a brighter segment. Other
+             * patterns keep the caller's colour, so the wake/privacy cues
+             * stay their own colour. A profile brightness of zero is
+             * honoured: someone who turns the indicator off means it.
              *
              * Unlike "animate", nothing here is written to state.current or
              * persisted -- a transient indicator must leave the saved ring
              * settings as it found them.
              */
             if (get_arg_profile_field(&request, "profile",
-                                      &pattern_profile) == 0)
+                                      &pattern_profile) == 0) {
                 brightness =
                     (unsigned int)ctx->state.profiles[pattern_profile].brightness;
+                if (kind == PATTERN_DIRECTION) {
+                    r = ctx->state.profiles[pattern_profile].r;
+                    g = ctx->state.profiles[pattern_profile].g;
+                    b = ctx->state.profiles[pattern_profile].b;
+                }
+            }
             colour.r = r;
             colour.g = g;
             colour.b = b;
             colour.brightness = brightness;
             idle_note_activity(ctx, now);
             start_pattern(ctx, kind, &colour, repeats, owner, now);
+            if (kind == PATTERN_DIRECTION) {
+                ctx->pattern_has_azimuth = has_azimuth;
+                ctx->pattern_azimuth = azimuth;
+                ctx->pattern_width = width;
+            }
             update_pattern(ctx, now);
             return send_response(fd, request.id, 1, "{\"pattern_active\":true}", NULL);
         }

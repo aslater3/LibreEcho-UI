@@ -83,6 +83,11 @@ static unsigned int max_channel(const struct daemon_context *ctx)
     return maximum;
 }
 
+static unsigned int pixel_energy(struct pixel p)
+{
+    return (unsigned int)p.r + (unsigned int)p.g + (unsigned int)p.b;
+}
+
 static int all_dark(const struct daemon_context *ctx)
 {
     size_t i;
@@ -1004,6 +1009,71 @@ int main(void)
         require_condition(s.idle_auto_off_minutes == 0,
                           "an invalid stored auto-off time is ignored");
     }
+
+    /* ---- 9b. Listening direction cue: the bright segment follows the
+       measured microphone azimuth, and the rest of the ring stays in the
+       Listening theme colour.  Pixel 11 is 15 degrees clockwise of front and
+       pixel 10 is 15 degrees anticlockwise, so a talker straight ahead lights
+       both equally. ------------------------------------------------------- */
+    require_condition(direction_pixel_angle(10) == 345U &&
+                      direction_pixel_angle(11) == 15U &&
+                      direction_pixel_angle(0) == 45U,
+                      "the ring pixel-to-azimuth mapping changed");
+    reset(&ctx);
+    fire(&ctx,
+         "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+         "{\"name\":\"direction\",\"azimuth\":0,"
+         "\"r\":72,\"g\":185,\"b\":255,\"brightness\":100,"
+         "\"repeats\":0,\"profile\":\"listening\","
+         "\"owner\":\"voice-listening\"}}");
+    require_condition(response_ok() && ctx.pattern_active,
+                      "a direction pattern must take the ring");
+    require_condition(ctx.pattern_kind == PATTERN_DIRECTION &&
+                      ctx.pattern_has_azimuth && ctx.pattern_azimuth == 0,
+                      "the direction pattern must retain its azimuth");
+    require_condition(pixel_energy(ctx.rendered_pixels[10]) ==
+                      pixel_energy(ctx.rendered_pixels[11]),
+                      "a front talker must light the two front-centre pixels equally");
+    require_condition(pixel_energy(ctx.rendered_pixels[10]) >
+                      pixel_energy(ctx.rendered_pixels[5]),
+                      "the front talker must be brighter than the rear pixels");
+    require_condition(pixel_energy(ctx.rendered_pixels[5]) > 0U,
+                      "the non-pointer ring must stay dimly lit, not dark");
+
+    fire(&ctx,
+         "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+         "{\"name\":\"direction\",\"azimuth\":90,"
+         "\"r\":72,\"g\":185,\"b\":255,\"brightness\":100,"
+         "\"repeats\":0,\"profile\":\"listening\","
+         "\"owner\":\"voice-listening\"}}");
+    require_condition(ctx.pattern_azimuth == 90,
+                      "a direction update must replace the azimuth");
+    require_condition(pixel_energy(ctx.rendered_pixels[1]) ==
+                      pixel_energy(ctx.rendered_pixels[2]),
+                      "a mute-side talker must light the two left pixels equally");
+    require_condition(pixel_energy(ctx.rendered_pixels[1]) >
+                      pixel_energy(ctx.rendered_pixels[7]),
+                      "the mute-side talker must be brighter than the far side");
+
+    /* A diffuse field has no azimuth: the cue is the solid listening ring. */
+    fire(&ctx,
+         "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+         "{\"name\":\"direction\","
+         "\"r\":72,\"g\":185,\"b\":255,\"brightness\":100,"
+         "\"repeats\":0,\"profile\":\"listening\","
+         "\"owner\":\"voice-listening\"}}");
+    require_condition(!ctx.pattern_has_azimuth,
+                      "a direction without an azimuth must not point");
+    require_condition(pixel_energy(ctx.rendered_pixels[0]) ==
+                      pixel_energy(ctx.rendered_pixels[6]),
+                      "a diffuse field must leave the ring uniform");
+
+    fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":"
+               "{\"name\":\"stop\",\"owner\":\"voice-listening\"}}");
+    require_condition(response_ok() && !ctx.pattern_active,
+                      "stopping the direction cue must release the ring");
+    require_condition(indicator_only(&ctx),
+                      "the ring must return to the idle base after listening");
 
     puts("LED daemon core: ok");
     return 0;

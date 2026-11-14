@@ -30,7 +30,7 @@ int main(int argc, char **argv)
     }
     le_wake_led_init(&led, argv[1]);
     if (le_wake_led_trigger(&led, started) != LE_ADAPTER_OK ||
-        !status_contains(argv[1], "\"pattern\":\"pulse\"") ||
+        !status_contains(argv[1], "\"pattern\":\"direction\"") ||
         !status_contains(argv[1], "\"pattern_owner\":\"wakeword\"")) {
         fprintf(stderr, "wake LED did not start\n");
         return 1;
@@ -47,6 +47,6 @@ int main(int argc, char **argv)
         fprintf(stderr, "wake LED did not expire at five seconds\n");
         return 1;
     }
-    puts("wake LED five-second pulse: ok");
+    puts("wake LED five-second listening cue: ok");
     return 0;
 }

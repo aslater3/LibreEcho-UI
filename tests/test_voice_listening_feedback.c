@@ -26,7 +26,19 @@ static int audio_calls;
 static int led_calls;
 static char audio_command[32];
 static char audio_args[128];
+static int ring_shows;
+static char ring_owner[64];
 static char led_args[2][256];
+
+/* The real helper is covered by test-listening-ring.  Here we only need to
+   know that the production listening path asks for the Alexa-style cue. */
+int le_listening_ring_show(const char *led_socket, const char *owner)
+{
+    (void)led_socket;
+    ++ring_shows;
+    snprintf(ring_owner, sizeof(ring_owner), "%s", owner ? owner : "");
+    return 0;
+}
 
 struct le_adapter *le_adapter_connect(const char *path, int timeout_ms)
 {
@@ -68,6 +80,8 @@ static void reset_calls(void)
     led_calls = 0;
     audio_command[0] = '\0';
     audio_args[0] = '\0';
+    ring_shows = 0;
+    ring_owner[0] = '\0';
     memset(led_args, 0, sizeof(led_args));
 }
 
@@ -76,26 +90,30 @@ int main(void)
     reset_calls();
     le_voice_listening_led_set(1);
     CHECK(audio_calls == 0);
-    CHECK(led_calls == 1);
-    CHECK(strstr(led_args[0], "\"name\":\"pulse\"") != NULL);
+    CHECK(led_calls == 0);
+    CHECK(ring_shows == 1);
+    CHECK(strcmp(ring_owner, "voice-listening") == 0);
 
     reset_calls();
     le_voice_listening_feedback_set(1);
     CHECK(audio_calls == 1);
-    CHECK(led_calls == 1);
-    CHECK(strstr(led_args[0], "\"name\":\"pulse\"") != NULL);
+    CHECK(led_calls == 0);
+    CHECK(ring_shows == 1);
+    CHECK(strcmp(ring_owner, "voice-listening") == 0);
 
     audio_available = 0;
     reset_calls();
     le_voice_listening_feedback_set(1);
     CHECK(audio_calls == 0);
-    CHECK(led_calls == 1);
-    CHECK(strstr(led_args[0], "\"name\":\"pulse\"") != NULL);
+    CHECK(led_calls == 0);
+    CHECK(ring_shows == 1);
+    CHECK(strcmp(ring_owner, "voice-listening") == 0);
     audio_available = 1;
 
     reset_calls();
     le_voice_listening_feedback_set(0);
     CHECK(audio_calls == 0);
+    CHECK(ring_shows == 0);
     CHECK(led_calls == 2);
     CHECK(strstr(led_args[0], "\"owner\":\"voice-listening\"") != NULL);
     CHECK(strstr(led_args[1], "\"owner\":\"wakeword\"") != NULL);
@@ -104,7 +122,9 @@ int main(void)
     reset_calls();
     le_voice_listening_feedback_set(1);
     CHECK(audio_calls == 0);
-    CHECK(led_calls == 1);
+    CHECK(led_calls == 0);
+    CHECK(ring_shows == 1);
+    CHECK(strcmp(ring_owner, "voice-listening") == 0);
     CHECK(unsetenv("LE_VOICE_WAKE_CHIRP") == 0);
 
     /* The finished-listening chime asks audiod for the owner's sound only;

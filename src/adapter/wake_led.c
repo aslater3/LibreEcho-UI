@@ -1,6 +1,7 @@
 #include "wake_led.h"
 
 #include "adapter.h"
+#include "listening_ring.h"
 
 #include <stddef.h>
 
@@ -51,18 +52,13 @@ int le_wake_led_trigger(struct le_wake_led *led, uint64_t now_ns)
      */
     (void)stop_pattern(led);
     /*
-     * "profile" takes the brightness from the Listening theme, so the wake
-     * indicator stays visible when the ring's master brightness is turned
-     * down to zero for idle, and its level is set by editing that theme.
-     * The literal brightness below remains the fallback for an LED daemon
-     * that does not understand the field.
+     * Use the same Alexa-style listening ring as the recognition window:
+     * the Listening theme colour, with a brighter segment pointing at the
+     * selected talker beam.  If micd has no confident direction the helper
+     * leaves the ring solid; if micd is unavailable it still shows the
+     * solid listening colour rather than the old recording-red pulse.
      */
-    result = send_pattern(
-        led,
-        "{\"name\":\"pulse\",\"r\":255,\"g\":0,\"b\":0,"
-        "\"brightness\":70,\"repeats\":0,"
-        "\"profile\":\"listening\",\"owner\":\""
-        WAKE_LED_OWNER "\"}");
+    result = le_listening_ring_show(led->socket_path, WAKE_LED_OWNER);
     if (result != LE_ADAPTER_OK) {
         led->stop_ns = 0;
         return result;

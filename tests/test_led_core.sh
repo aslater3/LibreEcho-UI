@@ -54,4 +54,8 @@ build_and_run test-wake-led-profile tests/test_wake_led_profile.c $LEDD_DEPS
 build_and_run test-led-output-pacing tests/test_led_output_pacing.c $LEDD_DEPS
 build_and_run test-sunrise-led tests/test_sunrise_led.c $LEDD_DEPS
 
+echo "== Listening cue =="
+build_and_run test-listening-ring tests/test_listening_ring.c \
+    src/adapter/listening_ring.c src/json.c
+
 echo "LED focused suite: ok"

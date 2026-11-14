@@ -66,6 +66,7 @@ AGENTD_SOURCES = src/adapter/agentd.c src/adapter/stop_intent.c src/adapter/time
 	src/adapter/voice_pipeline.c src/adapter/voice_stream.c src/adapter/voice_ns.c \
 	src/adapter/voice_whisper.c \
 	src/adapter/voice_history.c \
+	src/adapter/listening_ring.c \
 	src/adapter/voice_listening_led.c \
 	src/adapter/spoken_time.c \
 	src/adapter/adapter_client.c src/adapter/adapter_server.c \
@@ -1119,7 +1120,8 @@ $(BUILD)/test-smoke-alarm-detector: tests/test_smoke_alarm_detector.c src/adapte
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< src/adapter/smoke_alarm_detector.c -lm -o $@
 
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
-		src/adapter/adapter_client.c src/log.c
+		src/adapter/listening_ring.c src/adapter/adapter_client.c \
+		src/json.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc $^ -o $@
 
@@ -1199,26 +1201,28 @@ $(BUILD)/test-voice-pipeline: tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c \
 		src/adapter/voice_whisper.c \
-		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/adapter/voice_listening_led.c src/adapter/listening_ring.c \
+		src/adapter/adapter_client.c \
 		src/json.c $(BUILD)/libreecho-sttd $(BUILD)/mock-voice-source
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_voice_pipeline.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c \
 		src/adapter/voice_whisper.c \
-		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/adapter/voice_listening_led.c src/adapter/listening_ring.c \
+		src/adapter/adapter_client.c \
 		src/json.c src/log.c -lpthread -lm -o $@
 
 $(BUILD)/test-voice-pipeline-stop-window: tests/test_voice_pipeline_stop_window.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c src/adapter/voice_whisper.c \
-		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/adapter/voice_listening_led.c src/adapter/listening_ring.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/json.c $(BUILD)/libreecho-sttd
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc tests/test_voice_pipeline_stop_window.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c src/adapter/voice_whisper.c \
-		src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
+		src/adapter/voice_listening_led.c src/adapter/listening_ring.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/json.c src/log.c -lpthread -lm -o $@
 
 $(BUILD)/test-voice-whisper: tests/test_voice_whisper.c \
@@ -1261,11 +1265,16 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 	./$(BUILD)/test-voice-listening-feedback
 	python3 tests/test_voice_listening_callers.py
 
+$(BUILD)/test-listening-ring: tests/test_listening_ring.c \
+		src/adapter/listening_ring.c src/json.c
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
-		src/adapter/wake_led.c src/adapter/adapter_client.c \
+		src/adapter/wake_led.c src/adapter/listening_ring.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
@@ -1275,7 +1284,7 @@ $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
-		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
+		src/adapter/wake_led.c src/adapter/listening_ring.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
 		-ffunction-sections -fdata-sections -Wall -Wextra \
