@@ -1348,6 +1348,8 @@ $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
 $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
 	src/adapter/wake_engine.h
+$(BUILD)/wake_led.wake.arm.o: src/adapter/wake_led.h \
+	src/adapter/listening_ring.h
 $(BUILD)/wake_engine_onnx.arm.o: src/adapter/wake_engine.h
 
 $(BUILD)/log.wake.arm.o: src/log.c
@@ -1394,6 +1396,7 @@ WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/wake_arbiter.wake.arm.o \
 	$(BUILD)/peer_auth.wake.arm.o \
 	$(BUILD)/voice_clip_store.wake.arm.o \
+	$(BUILD)/listening_ring.wake.arm.o \
 	$(BUILD)/adapter_client.wake.arm.o \
 	$(BUILD)/adapter_server.wake.arm.o \
 	$(BUILD)/log.wake.arm.o \
