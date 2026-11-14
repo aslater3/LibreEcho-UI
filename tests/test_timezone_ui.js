@@ -70,6 +70,11 @@ assert(T.nameFor('GMT0BST,M3.5.0/1,M10.5.0', 'Europe/London') === 'Europe/London
 assert(T.nameFor('GMT0BST,M3.5.0/1,M10.5.0', 'America/Chicago') !== 'America/Chicago', 'a stale name is not shown');
 assert(T.posixFor(T.nameFor('CST6CDT,M3.2.0,M11.1.0', '')) === 'CST6CDT,M3.2.0,M11.1.0', 'zone from HA has a name');
 assert(T.nameFor('UTC', '') && T.same(T.posixFor(T.nameFor('UTC', '')), 'UTC'), 'the UTC default is listed');
+// Several names share one rule; HA only sends the POSIX string, so the canonical zone wins over link-like aliases.
+assert(T.nameFor('GMT0BST,M3.5.0/1,M10.5.0', '') === 'Europe/London', 'London, not Guernsey/Isle of Man/Jersey');
+assert(T.nameFor('GMT0BST,M3.5.0/1,M10.5.0', 'Europe/Guernsey') === 'Europe/Guernsey', 'a saved matching name still wins');
+assert(window.LE_TIMEZONES_CANONICAL.includes('Europe/London') && !window.LE_TIMEZONES_CANONICAL.includes('Europe/Guernsey'), 'canonical list');
+for (const [n] of window.LE_TIMEZONES) assert(T.posixFor(T.nameFor(T.posixFor(n), '')) === T.posixFor(n), `${n} round-trips by rule`);
 assert(T.nameFor('XYZ3', '') === '', 'a custom zone has no name');
 
 // Options: grouped, selected, and a custom zone stays visible and escaped.
@@ -95,6 +100,9 @@ assert(html.includes('London (GMT0BST,M3.5.0/1,M10.5.0)'), 'the zone in use is n
 html = timezonePanel({ timezone: 'CST6CDT,M3.2.0,M11.1.0', name: '', source: 'home_assistant' });
 assert(html.includes('<select id="timezone-name" disabled>'), 'the picker is locked while Home Assistant sets the zone');
 assert(html.includes('from Home Assistant'), 'the source is shown');
+html = timezonePanel({ timezone: 'GMT0BST,M3.5.0/1,M10.5.0', name: '', source: 'home_assistant' });
+assert(html.includes('London (GMT0BST,M3.5.0/1,M10.5.0)') && html.includes('<option value="Europe/London" selected>'), 'HA zone shown as London');
+assert(timezoneText('GMT0BST,M3.5.0/1,M10.5.0', '', 'home_assistant') === 'Europe/London (GMT0BST,M3.5.0/1,M10.5.0) · from Home Assistant', 'Software label for HA zone');
 assert(timezonePanel(null).includes('not available'), 'a missing endpoint is reported, not hidden');
 assert(timezoneText('UTC', '', 'manual').startsWith('UTC'), 'the factory default reads as UTC');
 
