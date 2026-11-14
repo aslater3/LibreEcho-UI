@@ -42,6 +42,7 @@
 /* micd beam snapshot for the Home Assistant listening cue; the same source
  * the wake and local voice cues use. */
 #define JOB_MIC_BEAMS 17
+#define MICD_SOCK "/run/libreecho/mic.sock"
 #define RING_SAMPLES 48000U
 #define MEDIA_KEY 1U
 #define MUTE_KEY 2U
@@ -272,7 +273,7 @@ static void direction_cue(int have_azimuth,int azimuth){char a[192];
  if(have_azimuth)snprintf(a,sizeof a,"{\"name\":\"direction\",\"azimuth\":%d,\"r\":72,\"g\":185,\"b\":255,\"brightness\":100,\"repeats\":0,\"profile\":\"listening\",\"owner\":\"esphome\"}",azimuth);
  else snprintf(a,sizeof a,"{\"name\":\"direction\",\"r\":72,\"g\":185,\"b\":255,\"brightness\":100,\"repeats\":0,\"profile\":\"listening\",\"owner\":\"esphome\"}");
  (void)job(S.led_path,"pattern",a,0,0);}
-static void listening_cue(void){if(job(LE_ADAPTER_MIC_SOCK,"beams","{}",JOB_MIC_BEAMS,0)<0)direction_cue(0,0);}
+static void listening_cue(void){if(job(MICD_SOCK,"beams","{}",JOB_MIC_BEAMS,0)<0)direction_cue(0,0);}
 static void states_send(struct client *c){unsigned char b[64];struct ep_writer w={b,sizeof b,0,0};float f=(float)S.volume/100.0f;uint32_t bits;memcpy(&bits,&f,4);
  ep_fixed32(&w,1,MEDIA_KEY);ep_uint(&w,2,S.playing?2:S.radio_state);ep_fixed32(&w,3,bits);ep_uint(&w,4,S.output_muted);if(S.last_audio_status)(void)send_writer(c,64,&w);
  w.length=0;ep_fixed32(&w,1,MUTE_KEY);ep_uint(&w,2,mic_muted());(void)send_writer(c,26,&w);
