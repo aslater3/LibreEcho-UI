@@ -24,7 +24,7 @@
  * data and down again after 8 idle periods (about 340 ms). Paced silence keeps
  * it running while the reply is fetched and between streamed sentences; like
  * the reply itself it ducks media. Only a FIFO bus ever gets silence. */
-#define IDLE_MS 20000U        /* no network progress */
+#define IDLE_MS 45000U        /* no network progress */
 #define TOTAL_MS 180000U      /* whole slot */
 /* The audio engine closes its output, powering the amplifier down, as soon as
  * a whole 2048-frame period is not queued past its ~64 ms ring (~110 ms ahead
@@ -37,7 +37,7 @@
 #define REBUFFER_MS 1500U     /* and after the stream ran dry: one pause, not a stutter, when TTS is slower than real time */
 #define PREROLL_MS 250U       /* silence queued before work that blocks the loop (CA parse, a TLS handshake step) */
 #define PREROLL_QUEUE 49152
-#define STALL_MS 3000U        /* no progress after the reply started: reconnect and skip what was received */
+#define STALL_MS 15000U        /* no progress after the reply started: reconnect and skip what was received */
 #define RECONNECT_MAX 6U
 #define WAV_HEADER_MAX (64U*1024U)
 #define MP3_SKIP_MAX (1024U*1024U)
@@ -53,7 +53,7 @@ void esp_playback_close(struct esp_playback *p){if(p->fd>=0)close(p->fd);if(p->b
 static int tls_send(void *ctx,const unsigned char *buf,size_t n){int fd=*(int*)ctx;ssize_t w=send(fd,buf,n,MSG_DONTWAIT|MSG_NOSIGNAL);if(w<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return MBEDTLS_ERR_SSL_WANT_WRITE;return w<0?MBEDTLS_ERR_SSL_INTERNAL_ERROR:(int)w;}
 static int tls_recv(void *ctx,unsigned char *buf,size_t n){int fd=*(int*)ctx;ssize_t w=recv(fd,buf,n,MSG_DONTWAIT);if(w<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return MBEDTLS_ERR_SSL_WANT_READ;return w<0?MBEDTLS_ERR_SSL_INTERNAL_ERROR:(int)w;}
 static int connect_ip(struct esp_playback *p,struct in_addr ip){struct sockaddr_in a;p->addr=ip;p->have_addr=1;memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons((uint16_t)p->port);a.sin_addr=ip;p->fd=socket(AF_INET,SOCK_STREAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);if(p->fd<0)return -1;if(connect(p->fd,(struct sockaddr*)&a,sizeof a)<0&&errno!=EINPROGRESS)return -1;p->state=2;return 0;}
-static int dns_start(struct esp_playback *p){struct sockaddr_in a;FILE *f;char line[512],server[64]="";size_t z=12;const char *s=p->host,*dot;
+static int dns_send_query(struct esp_playback *p,const char *name){struct sockaddr_in a;FILE *f;char line[512],server[64]="";size_t z=12;const char *s=name,*dot;
  f=fopen("/etc/resolv.conf","r");if(!f)return -1;while(fgets(line,sizeof line,f)){if(sscanf(line,"nameserver %63s",server)==1)break;}fclose(f);
  memset(&a,0,sizeof a);a.sin_family=AF_INET;a.sin_port=htons(53);if(inet_pton(AF_INET,server,&a.sin_addr)!=1)return -1;
  p->dns_id=(uint16_t)(p->deadline^(unsigned)getpid());memset(p->dns_query,0,12);p->dns_query[0]=(unsigned char)(p->dns_id>>8);p->dns_query[1]=(unsigned char)p->dns_id;p->dns_query[2]=1;p->dns_query[5]=1;
@@ -61,10 +61,20 @@ static int dns_start(struct esp_playback *p){struct sockaddr_in a;FILE *f;char l
  p->dns_query[z++]=0;p->dns_query[z++]=0;p->dns_query[z++]=1;p->dns_query[z++]=0;p->dns_query[z++]=1;p->dns_query_len=z;
  p->dns_fd=socket(AF_INET,SOCK_DGRAM|SOCK_NONBLOCK|SOCK_CLOEXEC,0);if(p->dns_fd<0||connect(p->dns_fd,(struct sockaddr*)&a,sizeof a)<0||send(p->dns_fd,p->dns_query,z,MSG_DONTWAIT)!=(ssize_t)z)return -1;p->state=1;return 0;
 }
-static int dns_name(const unsigned char *b,size_t n,size_t *pos){for(unsigned labels=0;labels<128;labels++){if(*pos>=n)return -1;unsigned z=b[(*pos)++];if(!z)return 0;if((z&192)==192){if(*pos>=n)return -1;(*pos)++;return 0;}if(z>63||z>n-*pos)return -1;*pos+=z;}return -1;}
-static int dns_tick(struct esp_playback *p){unsigned char b[1024];ssize_t n=recv(p->dns_fd,b,sizeof b,MSG_DONTWAIT);size_t z=12;struct in_addr ip;if(n<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return 0;if(n<12||be16(b)!=p->dns_id||(b[3]&15)||!(b[2]&128)||be16(b+4)!=1||be16(b+6)>32)return -1;
- if(dns_name(b,(size_t)n,&z)||z+4>(size_t)n)return -1;z+=4;for(unsigned i=0;i<be16(b+6);i++){if(dns_name(b,(size_t)n,&z)||z+10>(size_t)n)return -1;unsigned t=be16(b+z),cl=be16(b+z+2),len=be16(b+z+8);z+=10;if(z+len>(size_t)n)return -1;if(t==1&&cl==1&&len==4){memcpy(&ip,b+z,4);close(p->dns_fd);p->dns_fd=-1;return connect_ip(p,ip);}z+=len;}return -1;
+static int dns_start(struct esp_playback *p){p->dns_cnames=0;snprintf(p->dns_name,sizeof p->dns_name,"%s",p->host);return dns_send_query(p,p->dns_name);}
+/* RFC 1035 name with compression pointers; writes the decompressed name. */
+static int dns_read_name(const unsigned char *b,size_t n,size_t *pos,char *out,size_t cap){size_t p=*pos,next=*pos;unsigned depth=0;out[0]=0;
+ for(;;){if(p>=n)return -1;unsigned z=b[p];
+  if((z&0xC0)==0xC0){if(p+1>=n)return -1;if(next==p)next=p+2;if(++depth>32)return -1;p=((size_t)(z&0x3F)<<8)|b[p+1];continue;}
+  if(z==0){if(next==p)next=p+1;*pos=next;return 0;}
+  if(z>63||p+1+z>n)return -1;
+  size_t cur=strlen(out);if(cur){if(cur+1>=cap)return -1;out[cur++]='.';}
+  if(cur+z>=cap)return -1;memcpy(out+cur,b+p+1,z);out[cur+z]=0;
+  if(next==p)next=p+1+z;p+=1+z;
+ }
 }
+static int dns_name(const unsigned char *b,size_t n,size_t *pos){for(unsigned labels=0;labels<128;labels++){if(*pos>=n)return -1;unsigned z=b[(*pos)++];if(!z)return 0;if((z&192)==192){if(*pos>=n)return -1;(*pos)++;return 0;}if(z>63||z>n-*pos)return -1;*pos+=z;}return -1;}
+static int dns_tick(struct esp_playback *p){unsigned char b[1024];ssize_t n=recv(p->dns_fd,b,sizeof b,MSG_DONTWAIT);size_t z=12;struct in_addr ip;char cname[256],rname[256];int found=0;cname[0]=0;if(n<0&&(errno==EAGAIN||errno==EWOULDBLOCK))return 0;if(n<0){return -1;}if(n<12||be16(b)!=p->dns_id||(b[3]&15)||!(b[2]&128)||be16(b+4)!=1||be16(b+6)>32)return -1; if(dns_name(b,(size_t)n,&z)||z+4>(size_t)n)return -1;z+=4;for(unsigned i=0;i<be16(b+6);i++){if(dns_read_name(b,(size_t)n,&z,rname,sizeof rname)||z+10>(size_t)n)return -1;unsigned t=be16(b+z),cl=be16(b+z+2),len=be16(b+z+8);size_t rd=z+10;z=rd+len;if(z>(size_t)n)return -1;if(t==1&&cl==1&&len==4){memcpy(&ip,b+rd,4);found=1;break;}if(t==5&&cl==1&&len>=2){size_t zp=rd;if(dns_read_name(b,(size_t)n,&zp,cname,sizeof cname)&&zp<=z)cname[0]=0;}} if(found){close(p->dns_fd);p->dns_fd=-1;return connect_ip(p,ip);} if(cname[0]&&p->dns_cnames<8){p->dns_cnames++;snprintf(p->dns_name,sizeof p->dns_name,"%s",cname);close(p->dns_fd);p->dns_fd=-1;return dns_send_query(p,p->dns_name);} return -1;}
 static void preroll(struct esp_playback *,uint64_t);
 static int bus_open(struct esp_playback *p){struct stat st;if(p->bus_fd>=0)return 0;p->bus_fd=open(p->bus,O_WRONLY|O_NONBLOCK|O_CLOEXEC|O_NOFOLLOW);if(p->bus_fd<0)return -1;p->fifo=!fstat(p->bus_fd,&st)&&S_ISFIFO(st.st_mode);return 0;}
 int esp_playback_start(struct esp_playback *p,const char *url,const char *bus,const char *ca,uint64_t now){const char *s,*slash,*colon;size_t host_n;struct in_addr ip;char hostport[280];int warm=-1,clock;uint64_t origin,frames;
@@ -122,14 +132,18 @@ static int unframe(struct esp_playback *p){
 }
 /* The body is complete once its framing says so; a truncated one fails. */
 static int net_complete(struct esp_playback *p){int drained=p->wire_pos==p->wire_n;if(p->net_done)return 0;
+ /* The WAV RIFF header declares the whole file size: once that many bytes
+  * have been delivered the reply is complete even if the server leaves the
+  * HTTP stream open (HA serves TTS without a terminator/EOF). */
+ if(p->riff!=UINT32_MAX&&p->wav_bytes>=(uint64_t)p->riff+8){if(p->resume_skip)return -1;if(p->fd>=0)close(p->fd);p->fd=-1;p->net_done=1;return 0;}
  if((p->chunked&&p->chunk_stage==CHUNK_DONE)||(!p->chunked&&p->expected!=SIZE_MAX&&p->body_total==p->expected)||(p->net_eof&&drained&&!p->chunked&&p->expected==SIZE_MAX)){if(p->resume_skip)return -1;if(p->fd>=0)close(p->fd);p->fd=-1;p->net_done=1;return 0;}
  return p->net_eof&&drained?-1:0;
 }
 /* One network step: 1 progress, 0 nothing to do now, -1 failed. */
 static int net_once(struct esp_playback *p,uint64_t now){int rc;
- if(p->state==1){if(dns_tick(p)<0)return -1;return p->state!=1;}
- if(p->state==2){struct sockaddr_in a;socklen_t n=sizeof a;if(getpeername(p->fd,(struct sockaddr*)&a,&n)<0){int err=0;n=sizeof err;if(getsockopt(p->fd,SOL_SOCKET,SO_ERROR,&err,&n)<0||err)return -1;return 0;}p->state=p->tls?3:4;p->progress_at=now;return 1;}
- if(p->state==3){preroll(p,now);rc=mbedtls_ssl_handshake(&p->ssl);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc||mbedtls_ssl_get_verify_result(&p->ssl))return -1;p->state=4;p->progress_at=now;return 1;}
+ if(p->state==1){if(dns_tick(p)<0){if(++p->dns_tries<4){if(p->dns_fd>=0){close(p->dns_fd);p->dns_fd=-1;}if(dns_start(p)<0)return -1;p->progress_at=now;p->idle_deadline=now+IDLE_MS;return 1;}return -1;}return p->state!=1;}
+ if(p->state==2){struct sockaddr_in a;socklen_t n=sizeof a;if(getpeername(p->fd,(struct sockaddr*)&a,&n)<0){int err=0;n=sizeof err;if(getsockopt(p->fd,SOL_SOCKET,SO_ERROR,&err,&n)<0||err){return -1;}return 0;}p->state=p->tls?3:4;p->progress_at=now;return 1;}
+ if(p->state==3){preroll(p,now);rc=mbedtls_ssl_handshake(&p->ssl);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc||mbedtls_ssl_get_verify_result(&p->ssl)){return -1;}p->state=4;p->progress_at=now;return 1;}
  if(p->state==4){size_t left=p->request_len-p->request_sent;rc=p->tls?mbedtls_ssl_write(&p->ssl,(unsigned char*)p->request+p->request_sent,left):tls_send(&p->fd,(unsigned char*)p->request+p->request_sent,left);if(rc==MBEDTLS_ERR_SSL_WANT_READ||rc==MBEDTLS_ERR_SSL_WANT_WRITE)return 0;if(rc<=0)return -1;p->request_sent+=(size_t)rc;if(p->request_sent==p->request_len){p->state=5;p->progress_at=now;}return 1;}
  if(p->state!=5||p->net_done||p->net_eof)return 0;
  if(p->wire_pos){memmove(p->wire,p->wire+p->wire_pos,p->wire_n-p->wire_pos);p->wire_n-=p->wire_pos;p->wire_pos=0;}

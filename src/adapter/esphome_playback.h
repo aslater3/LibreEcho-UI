@@ -18,7 +18,7 @@
 #define ESP_PLAY_PAYLOAD (2U*1024U*1024U)
 /* Single streaming playback slot. tick does bounded nonblocking work. */
 struct esp_playback {
- int state,fd,bus_fd,fifo,warm_off,tls,header_done,result,dns_fd,chunked,net_eof,net_done,format,clock;
+ int state,fd,bus_fd,fifo,warm_off,tls,header_done,result,dns_fd,chunked,net_eof,net_done,format,clock;unsigned dns_tries,dns_cnames;char dns_name[256];
  /* 0 playing, 1 first prebuffer, 2 rebuffering after the stream ran dry. */
  int buffering;
  unsigned port;char host[254],path[1024],bus[256],request[1536];size_t request_len,request_sent;

@@ -73,7 +73,7 @@ static void http_boundaries(const unsigned char *b,size_t n){
  resp_reset();resp_text(h);resp_chunked(b,n,n);allow_all(1);fetch(bus);assert(run(4000)==-1);end_fetch();
  resp_reset();resp_text(eof);resp_add(b,n);allow_all(1);fetch(bus);assert(run(4000)==1);end_fetch();
  /* Without its end the slot fails once the network has been idle too long. */
- resp_reset();resp_text(eof);resp_add(b,n);allow_all(0);fetch(bus);uint64_t idle=now_ms;assert(run(4000)==-1);assert(now_ms-idle>IDLE_MS);end_fetch();
+ resp_reset();resp_text(eof);resp_add(b,n);allow_all(0);fetch(bus);uint64_t idle=now_ms;assert(run(5000)==-1);assert(now_ms-idle>IDLE_MS);end_fetch();
  /* A finite body completes at its last byte, without waiting for EOF. */
  bus_reset();resp_reset();resp_text(finite);resp_add(b,n);allow_all(0);fetch(bus);assert(run(4000)==1);end_fetch();
  resp_reset();resp_text(finite);resp_add(b,n-1);allow_all(1);fetch(bus);assert(run(4000)==-1);end_fetch();
@@ -147,9 +147,9 @@ static int stalled_then_replayed(const unsigned char *first,size_t first_n,const
  char url[64];int server=listener(url,sizeof url),rc=0;bus_reset();resp_reset();esp_playback_init(&p);assert(esp_playback_start(&p,url,bus,NULL,now_ms)==0);
  for(unsigned i=0;i<5;i++)assert(tick()==0);int one=take_request(server);
  const char *h="HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";send_all(one,h,strlen(h));char size[32];int z=snprintf(size,sizeof size,"%zx\r\n",first_n);send_all(one,size,(size_t)z);send_all(one,first,first_n);send_all(one,"\r\n",2);
- /* Before 3 s without data nothing happens; then a second connection arrives. */
- for(unsigned i=0;i<280;i++)assert(tick()==0);assert(p.reconnects==0&&p.delivered==first_n);
- for(unsigned i=0;i<40&&!p.reconnects;i++)assert(tick()==0);assert(p.reconnects==1);for(unsigned i=0;i<5;i++)assert(tick()==0);
+ /* Before STALL_MS without data nothing happens; then a second connection arrives. */
+ for(unsigned i=0;i<1400;i++)assert(tick()==0);assert(p.reconnects==0&&p.delivered==first_n);
+ for(unsigned i=0;i<200&&!p.reconnects;i++)assert(tick()==0);assert(p.reconnects==1);for(unsigned i=0;i<5;i++)assert(tick()==0);
  peer=take_request(server);close(server);resp_text(h);resp_chunked(replay,replay_n,7000);resp_text("0\r\n\r\n");allow_all(1);rc=run(4000);*reconnects=p.reconnects;close(one);return rc;}
 static void stall_reconnect(void){static unsigned char b[44+48000*4],other[44+48000*4];size_t n=tone(b,48000*2,1300,1);unsigned again=0;assert(tone(other,48000*2,1400,1)==n);
  assert(stalled_then_replayed(b,n/3,b,n,&again)==1&&again==1);assert(p.input_frames==48000*2&&p.audio_frames==48000*2&&bus_size()==p.audio_frames*4);end_fetch();
@@ -165,6 +165,39 @@ static void preroll_fifo(void){bus_fifo();esp_playback_init(&p);int z=snprintf(p
  preroll(&p,now_ms);int queued=0,again=0;assert(!ioctl(reader,FIONREAD,&queued)&&queued>=48000*4*240/1000&&queued<=PREROLL_QUEUE+(int)SILENCE_FRAMES*4&&p.frames*1000/48000>=240);
  preroll(&p,now_ms);assert(!ioctl(reader,FIONREAD,&again)&&again==queued);listen_bus();assert(heard_n==(size_t)queued&&first_sound()==heard_n);
  esp_playback_close(&p);bus_fifo_close();puts("TLS pre-roll queues ~250 ms of silence, bounded: OK");
+}
+/* The resolver follows CNAME chains (the HA host answers with one) and
+ * decompresses name pointers; an A record connects directly. */
+static void dns_chase(void){
+ int f[2];assert(socketpair(AF_UNIX,SOCK_STREAM,0,f)==0);
+ unsigned char r[128];size_t z;memset(r,0,sizeof r);
+ r[0]=0x12;r[1]=0x34;r[2]=0x81;r[3]=0x80;r[5]=1;r[7]=1;
+ const unsigned char q[]={1,'a',4,'t','e','s','t',0,0,1,0,1};
+ memcpy(r+12,q,sizeof q);z=12+sizeof q;
+ r[z++]=0xC0;r[z++]=0x0C;r[z++]=0;r[z++]=5;r[z++]=0;r[z++]=1;
+ r[z++]=0;r[z++]=0;r[z++]=0;r[z++]=60;r[z++]=0;r[z++]=8;
+ r[z++]=1;r[z++]='b';r[z++]=4;memcpy(r+z,"test",4);z+=4;r[z++]=0;
+ assert(send(f[1],r,z,0)==(ssize_t)z);
+ esp_playback_init(&p);p.dns_fd=f[0];p.dns_id=0x1234;snprintf(p.host,sizeof p.host,"a.test");
+ (void)dns_tick(&p);assert(p.dns_cnames==1&&!strcmp(p.dns_name,"b.test"));
+ esp_playback_close(&p);close(f[1]);
+ assert(socketpair(AF_UNIX,SOCK_STREAM,0,f)==0);
+ z=12;memcpy(r+12,q,sizeof q);z=12+sizeof q;
+ r[z++]=0xC0;r[z++]=0x0C;r[z++]=0;r[z++]=1;r[z++]=0;r[z++]=1;
+ r[z++]=0;r[z++]=0;r[z++]=0;r[z++]=60;r[z++]=0;r[z++]=4;r[z++]=127;r[z++]=0;r[z++]=0;r[z++]=1;
+ assert(send(f[1],r,z,0)==(ssize_t)z);
+ esp_playback_init(&p);p.dns_fd=f[0];p.dns_id=0x1234;p.port=9;snprintf(p.host,sizeof p.host,"a.test");
+ (void)dns_tick(&p);assert(p.have_addr&&p.addr.s_addr==htonl(0x7f000001));
+ esp_playback_close(&p);close(f[1]);
+ puts("DNS: CNAME chase with compressed names, direct A record connect: OK");
+}
+/* A fully delivered finite RIFF completes even when the server leaves the
+ * stream open (HA serves TTS without a terminator or EOF). */
+static void riff_completion(void){
+ unsigned char b[52];wav_header(b,sizeof b);
+ bus_reset();resp_reset();resp_text("HTTP/1.1 200 OK\r\n\r\n");resp_add(b,sizeof b);allow_all(0);fetch(bus);assert(run(200)==1);assert(p.net_done&&p.audio_frames>0&&bus_size()==p.audio_frames*4);end_fetch();
+ resp_reset();resp_text("HTTP/1.1 200 OK\r\n\r\n");resp_add(b,sizeof b-1);allow_all(0);fetch(bus);assert(run(5000)==-1);end_fetch();
+ puts("A fully delivered finite RIFF completes with the stream left open: OK");
 }
 static void ffmpeg_wav(const char *path){
  static unsigned char b[1U<<20];FILE *f=fopen(path,"rb");assert(f);size_t n=fread(b,1,sizeof b,f);assert(!ferror(f)&&feof(f));assert(fclose(f)==0);assert(n>=44);
@@ -191,6 +224,7 @@ int main(int argc,char **argv){
  /* Run the untouched external capture first so RED identifies the real bug. */
  if(argc==2)ffmpeg_wav(argv[1]);else assert(argc==1);
  wav_boundaries();unsigned char b[52];wav_header(b,sizeof b);put32(b+4,UINT32_MAX);put32(b+40,UINT32_MAX);http_boundaries(b,sizeof b);
+ dns_chase();riff_completion();
  streams_before_eof();long_and_slow();warm_fifo();warm_before_reply();preroll_fifo();stall_reconnect();
  assert(unlink(bus)==0);return 0;
 }
