@@ -1549,8 +1549,7 @@ static void handle_gateway_probe_event(struct daemon_ctx *ctx, short revents,
     }
 }
 
-static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
-                      unsigned long id, int bind_association);
+static void maybe_adopt_dhcp(struct daemon_ctx *ctx, long long now_ms);
 
 static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
 {
@@ -1581,14 +1580,7 @@ static void check_network_health(struct daemon_ctx *ctx, long long now_ms)
             ctx->no_ip_since_ms != 0 &&
             now_ms - ctx->no_ip_since_ms >= NETWORK_ADOPT_GRACE_MS &&
             now_ms >= ctx->adopt_dhcp_next_ms) {
-            if (start_dhcp(ctx, 0, -1, 0, 0) == 0) {
-                le_log_info("networkd: associated without %s; adopting DHCP",
-                            ctx->state.ip[0] ? "a default route" : "IPv4");
-            } else {
-                le_log_warn("networkd: DHCP adoption could not start: %s",
-                            strerror(errno));
-                ctx->adopt_dhcp_next_ms = now_ms + NETWORK_ADOPT_RETRY_MS;
-            }
+            maybe_adopt_dhcp(ctx, now_ms);
         }
         if (ctx->gateway_probe.active)
             le_gateway_probe_close(&ctx->gateway_probe);
@@ -1757,6 +1749,21 @@ static int start_dhcp(struct daemon_ctx *ctx, int release, int client_fd,
     ctx->dhcp.id = id;
     ctx->dhcp.deadline = monotonic_ms() + DHCP_TIMEOUT_MS;
     return 0;
+}
+
+/* Adopt an associated interface that nobody is leasing: start DHCP without
+ * touching the association, log the outcome, and back off to a later retry
+ * when the child cannot even start. */
+static void maybe_adopt_dhcp(struct daemon_ctx *ctx, long long now_ms)
+{
+    if (start_dhcp(ctx, 0, -1, 0, 0) == 0) {
+        le_log_info("networkd: associated without %s; adopting DHCP",
+                    ctx->state.ip[0] ? "a default route" : "IPv4");
+    } else {
+        le_log_warn("networkd: DHCP adoption could not start: %s",
+                    strerror(errno));
+        ctx->adopt_dhcp_next_ms = now_ms + NETWORK_ADOPT_RETRY_MS;
+    }
 }
 
 static void reap_children(struct daemon_ctx *ctx)
