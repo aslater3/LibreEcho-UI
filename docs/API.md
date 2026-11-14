@@ -3187,7 +3187,9 @@ The `home-assistant` toggle also selects the active voice pipeline. Enabling it
 persists `home-assistant` mode, records the previous pipeline so a later disable
 restores it, and clears local-only processing in the same transition (microphone
 audio leaves the device). Disabling it persists and restores the saved pipeline,
-or `local` when none was recorded.
+or `local` when none was recorded. Home Assistant mode stops the local
+assistant and speech-to-text daemons but keeps the text-to-speech daemon
+running, because reminders and the `announce` device action speak through it.
 
 Because the pipeline transition restarts daemons, the response is asynchronous
 on the Linux backend:
