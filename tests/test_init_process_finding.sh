@@ -1,6 +1,9 @@
 #!/bin/sh
 # Process finding in init/libreecho-mdnsd.init and init/libreecho-esphomed.init.
 #
+# A daemon whose file was replaced while it ran (update or hot-staged build)
+# shows "<path> (deleted)" as its executable; esphomed stop must still find it.
+#
 # UI#501: `mdnsd stop` returned 0 while a supervisor whose argv[0] differed
 # from $DAEMON (started through a symlink, or otherwise not spelled exactly as
 # the wrapper expects) kept running. The wrapper must find the supervisor by
@@ -107,6 +110,26 @@ DAEMON="$WORK/libreecho-esphomed" PIDFILE="$WORK/esphomed.pid" \
     timeout 60 sh init/libreecho-esphomed.init stop >"$WORK/esphomed.out" 2>&1 || rc=$?
 check "esphomed stop exit status" "$rc" 0
 check "esphomed stop left no daemon running" "$(alive "$esp" && echo yes || echo no)" no
+check "esphomed stop left the unrelated bystander alone" "$(alive "$bystander" && echo yes || echo no)" yes
+kill -9 "$bystander" 2>/dev/null || true
+bystander=
+
+# ------------------------------------------------- replaced while running
+echo "esphomed stop finds a daemon whose file was replaced while it ran"
+esp=$(start_stub "$WORK/libreecho-esphomed" esphomed-replaced-stub)
+stubs="$stubs $esp"
+sleep 0.3
+"$CC" -w -o "$WORK/libreecho-esphomed.new" "$WORK/stub.c"
+mv -f "$WORK/libreecho-esphomed.new" "$WORK/libreecho-esphomed"
+check "precondition: the running executable reads as deleted" \
+    "$(readlink "/proc/$esp/exe")" "$WORK/libreecho-esphomed (deleted)"
+sleep 300 & bystander=$!
+rc=0
+DAEMON="$WORK/libreecho-esphomed" PIDFILE="$WORK/esphomed.pid" \
+    LOGFILE="$WORK/esphomed.log" STATUS_FILE="$WORK/esphomed-status.json" \
+    timeout 60 sh init/libreecho-esphomed.init stop >"$WORK/esphomed.out" 2>&1 || rc=$?
+check "esphomed stop exit status" "$rc" 0
+check "esphomed stop left no replaced daemon running" "$(alive "$esp" && echo yes || echo no)" no
 check "esphomed stop left the unrelated bystander alone" "$(alive "$bystander" && echo yes || echo no)" yes
 kill -9 "$bystander" 2>/dev/null || true
 bystander=
