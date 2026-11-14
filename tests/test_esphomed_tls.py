@@ -19,9 +19,9 @@ class TLSFixture(Fixture):
   server=ThreadingHTTPServer(('127.0.0.1',0),HTTP);ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER);ctx.load_cert_chain(self.certdir/(name+'.crt'),self.certdir/(name+'.key'));server.socket=ctx.wrap_socket(server.socket,server_side=True)
   thread=threading.Thread(target=server.serve_forever);thread.start();self.addCleanup(server.server_close);self.addCleanup(thread.join,2);self.addCleanup(server.shutdown);return f'https://127.0.0.1:{server.server_port}/tts.wav'
  def test_https_validated_ca_hostname_wav(self):
-  url=self.https('trusted');self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,url)));self.wait_completion();self.assertEqual(self.busbytes,struct.pack('<h',1000)*2000)
+  url=self.https('trusted');self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,url)));self.wait_completion();self.assertEqual(self.sound(),struct.pack('<h',1000)*2000)
  def test_https_untrusted_is_negative_completion(self):
-  url=self.https('untrusted');self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,url)));self.wait_completion(False);self.assertEqual(self.busbytes,b'')
+  url=self.https('untrusted');self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,url)));self.wait_completion(False);self.assertEqual(self.sound(),b'','no reply audio from a rejected server')
  def test_https_trusted_wrong_hostname_is_negative_completion(self):
-  url=self.https('wronghost');self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,url)));self.wait_completion(False);self.assertEqual(self.busbytes,b'')
+  url=self.https('wronghost');self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,url)));self.wait_completion(False);self.assertEqual(self.sound(),b'','no reply audio from a rejected server')
 if __name__=='__main__':unittest.main(defaultTest='TLSFixture')

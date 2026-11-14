@@ -30,6 +30,7 @@ class NativeLifecycle(unittest.TestCase):
     connect = fixture.Fixture.connect
     hello = fixture.Fixture.hello
     http_audio = fixture.Fixture.http_audio
+    sound = fixture.Fixture.sound
     wait_completion = fixture.Fixture.wait_completion
 
     def owner(self):
@@ -79,11 +80,11 @@ class NativeLifecycle(unittest.TestCase):
 
     def drain_audio(self, expected):
         end = time.monotonic() + 3
-        while len(self.busbytes) < len(expected) and time.monotonic() < end:
+        while len(self.sound()) < len(expected) and time.monotonic() < end:
             with contextlib.suppress(BlockingIOError):
                 self.busbytes += os.read(self.busfd, 65536)
             time.sleep(.005)
-        self.assertEqual(self.busbytes, expected, 'must drain actual decoded PCM, not emulate completion')
+        self.assertEqual(self.sound(), expected, 'must drain actual decoded PCM, not emulate completion')
         return self.messages_for(.2)
 
     def start_voice(self):
@@ -146,7 +147,7 @@ class NativeLifecycle(unittest.TestCase):
                          f'unrelated client prematurely completed owner announcement while FIFO unread: {messages}')
         self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'])
         self.wait_completion()
-        self.assertEqual(self.busbytes, pcm)
+        self.assertEqual(self.sound(), pcm)
         self.assertFalse(any(kind == 120 for kind, _ in self.messages_for(.1)), 'completion must occur once')
 
     def test_unrelated_client_does_not_replace_real_cancellation(self):
@@ -210,7 +211,7 @@ class NativeLifecycle(unittest.TestCase):
         main, main_pcm = self.wav_url(1800, 1200)
         self.s.sendall(fixture.frame(119, fixture.text(1, main)+fixture.text(3, pre)+fixture.num(4, 1)))
         self.wait_completion()
-        self.assertEqual(self.busbytes, pre_pcm+main_pcm)
+        self.assertEqual(self.sound(), pre_pcm+main_pcm)
         kind, body = fixture.receive(self.s)
         self.assertEqual(kind, 90)
         self.assertIn(fixture.num(3, 1), body)
@@ -231,7 +232,7 @@ class NativeLifecycle(unittest.TestCase):
         body = b'\x0d'+struct.pack('<I', 1)+fixture.num(6, 1)+fixture.text(7, url)+fixture.num(8, 1)+fixture.num(9, 1)
         self.s.sendall(fixture.frame(65, body))
         self.wait_completion()
-        self.assertEqual(self.busbytes, pcm)
+        self.assertEqual(self.sound(), pcm)
         self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress'])
 
 

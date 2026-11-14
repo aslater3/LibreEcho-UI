@@ -94,6 +94,10 @@ class Daemon(unittest.TestCase):
   else:self.fail(self.proc.communicate(timeout=1))
  def connect(self):
   s=socket.create_connection(('127.0.0.1',self.port),1);s.settimeout(3);self.clients.append(s);return s
+ def sound(self):
+  # A FIFO bus also gets paced silence that keeps the engine's output powered
+  # (fetch, stalls); the reply is every stereo frame that is not all zero.
+  b=bytes(self.busbytes[:len(self.busbytes)//4*4]);return b''.join(b[i:i+4] for i in range(0,len(b),4) if b[i:i+4]!=b'\0\0\0\0')
  def tearDown(self):
   for s in self.clients:s.close()
   self.proc.terminate();out,err=self.proc.communicate(timeout=3)
@@ -137,7 +141,7 @@ class Fixture(Daemon):
     except TimeoutError:continue
     if t==120:break
    else:self.fail('no drained completion')
-   self.assertEqual(b,num(1,1));self.assertGreater(len(self.busbytes),16000);self.assertEqual(self.busbytes[:40],struct.pack('<h',1200)*20)
+   self.assertEqual(b,num(1,1));self.assertGreater(len(self.sound()),16000);self.assertEqual(self.sound()[:40],struct.pack('<h',1200)*20)
    status=json.loads((self.p/'status.json').read_text());self.assertFalse(status['in_progress']);self.assertEqual(status['last_result'],'success')
   finally:server.shutdown();thread.join(2);server.server_close()
  def wait_call(self,kind,cmd,after=0):
@@ -201,7 +205,7 @@ class Fixture(Daemon):
   with wave.open(wav,'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000);w.writeframes(struct.pack('<h',2200)*1000)
   url=self.http_audio(wav.getvalue());self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));time.sleep(.1);self.s.sendall(frame(119,text(1,url)))
   time.sleep(.3);self.s.sendall(frame(7));self.assertEqual(receive(self.s),(8,b''));self.assertTrue(json.loads((self.p/'status.json').read_text())['in_progress'])
-  self.wait_completion();self.assertEqual(self.busbytes,struct.pack('<h',2200)*2000)
+  self.wait_completion();self.assertEqual(self.sound(),struct.pack('<h',2200)*2000)
  def test_intent_metadata_retained_through_early_tts_drain(self):
   wav=io.BytesIO()
   with wave.open(wav,'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000);w.writeframes(struct.pack('<h',1400)*1000)
@@ -217,7 +221,7 @@ class Fixture(Daemon):
    wav=io.BytesIO()
    with wave.open(wav,'wb') as w:w.setnchannels(1);w.setsampwidth(2);w.setframerate(48000);w.writeframes(struct.pack('<h',sample)*count)
    urls.append(self.http_audio(wav.getvalue()))
-  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,urls[1])+text(3,urls[0])));self.wait_completion();self.assertEqual(self.busbytes,struct.pack('<h',900)*2000+struct.pack('<h',1800)*2400)
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4)));self.s.sendall(frame(119,text(1,urls[1])+text(3,urls[0])));self.wait_completion();self.assertEqual(self.sound(),struct.pack('<h',900)*2000+struct.pack('<h',1800)*2400)
  def time_zone_exchange(self,source,*zones):
   """Subscribe states, answer the device's GetTimeRequest (36) like HA does (GetTimeResponse 37), return the stored config."""
   cfg=json.loads(self.config.read_text())
@@ -304,7 +308,7 @@ class Fixture(Daemon):
     self.wfile.write(b'0\r\n\r\n')
    def log_message(self,*args):pass
   server=ThreadingHTTPServer(('127.0.0.1',0),HTTP);thread=threading.Thread(target=server.serve_forever);thread.start();self.addCleanup(server.server_close);self.addCleanup(thread.join,2);self.addCleanup(server.shutdown)
-  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4))+frame(119,text(1,f'http://127.0.0.1:{server.server_port}/chunked.wav')));self.wait_completion();self.assertEqual(self.busbytes,struct.pack('<h',1700)*2000)
+  self.hello();self.s.sendall(frame(89,num(1,1)+num(2,4))+frame(119,text(1,f'http://127.0.0.1:{server.server_port}/chunked.wav')));self.wait_completion();self.assertEqual(self.sound(),struct.pack('<h',1700)*2000)
 # The web API persists HA ownership as integrations bit 1 plus
 # voice_pipeline_mode; it never writes voice_assistant_mode. These fixtures use
 # exactly that saved shape so the daemon is tested against the real contract.
@@ -392,10 +396,10 @@ class CancelRequest(Daemon):
   self.s.settimeout(3);time.sleep(1.4);a.wake(30000);t,b=receive(self.s);self.assertEqual(t,90);self.assertIn(num(1,1),b,'after the guard a wake starts a fresh request')
  def test_action_button_cancels_while_replying(self):
   self.start(True);url=self.wav_url();self.s.sendall(frame(92,num(1,8)+text(2,text(1,'url')+text(2,url))));end=time.monotonic()+2
-  while time.monotonic()<end and not self.busbytes:
+  while time.monotonic()<end and not self.sound():
    with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
    time.sleep(.01)
-  self.assertTrue(self.busbytes,'the reply was playing');self.control();self.cancelled()
+  self.assertTrue(self.sound(),'the reply was playing');self.control();self.cancelled()
   with contextlib.suppress(BlockingIOError):os.read(self.busfd,1<<20)
   self.busbytes=bytearray();self.s.sendall(frame(92,num(1,2)));time.sleep(.3)
   with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
