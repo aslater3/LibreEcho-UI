@@ -123,7 +123,7 @@ static void secrets(void) {
 static void transitions(void) {
     const char *modes[]={"local","custom"};size_t i;
     for(i=0;i<2;i++){
-        setup(modes[i]);assert(put("{\"mode\":\"home-assistant\"}")==202);
+        setup(modes[i]);unlink(LE_TEST_ROOT "/actions");assert(put("{\"mode\":\"home-assistant\"}")==202);
         /* The inner integration handler has already set its requested bit.
          * Reject a duplicate enable without clearing the accepted HA intent. */
         {struct api_request q={0};snprintf(q.method,sizeof(q.method),"PUT");snprintf(q.path,sizeof(q.path),"/api/v1/integrations/home-assistant");q.body="{\"enabled\":true}";response.status=200;ctx.integrations|=1u;after_integration_change(&ctx,&q,&response);assert(response.status==409);assert(ctx.integrations&1u);}
@@ -131,7 +131,7 @@ static void transitions(void) {
         assert(!strcmp(voice_pipeline_restart_state(),"ready"));
         assert(!strcmp(ctx.voice_pipeline_previous_mode,modes[i]));
         {char actions[4096];assert(config_read(LE_TEST_ROOT "/actions",actions,sizeof(actions))>0);
-         assert(strstr(actions,"agentd stop")&&strstr(actions,"sttd stop")&&strstr(actions,"ttsd stop")&&strstr(actions,"esphomed start"));}
+         assert(strstr(actions,"agentd stop")&&strstr(actions,"sttd stop")&&strstr(actions,"ttsd stop")&&strstr(actions,"esphomed start")&&strstr(actions,"ttsd start")&&!strstr(actions,"sttd start")&&!strstr(actions,"agentd start"));}
         assert(ctx.button_action_brightness==37&&!strcmp(ctx.mac_wifi,"02:11:22:33:44:55"));
         {struct api_request q={0};snprintf(q.method,sizeof(q.method),"PUT");snprintf(q.path,sizeof(q.path),"/api/v1/integrations/home-assistant");q.body="{\"enabled\":false}";response.status=200;ctx.integrations&=~1u;after_integration_change(&ctx,&q,&response);assert(response.status==202);}
         finish();assert(!strcmp(ctx.voice_pipeline_mode,modes[i]));

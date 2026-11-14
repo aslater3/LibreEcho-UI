@@ -363,9 +363,11 @@ int main(int argc, char **argv)
         /* Status can wait behind an in-flight provider response. */
         {"agentd", PROBE_PIDFILE, "/var/run/libreecho-agentd.pid",
          "/etc/init.d/libreecho-agentd.init", 1, NULL, OWNER_LOCAL},
-        /* In-process synthesis can occupy the status path for one utterance. */
+        /* In-process synthesis can occupy the status path for one utterance.
+           Home Assistant mode keeps ttsd up too: reminders and the esphomed
+           announce action speak through it. */
         {"ttsd", PROBE_PIDFILE, "/var/run/libreecho-ttsd.pid",
-         "/etc/init.d/libreecho-ttsd.init", 1, NULL, OWNER_LOCAL},
+         "/etc/init.d/libreecho-ttsd.init", 1, NULL, OWNER_ANY},
         /* Streaming recognition owns the request loop until the turn ends. */
         {"sttd", PROBE_PIDFILE, "/var/run/libreecho-sttd.pid",
          "/etc/init.d/libreecho-sttd.init", 1, NULL, OWNER_LOCAL},

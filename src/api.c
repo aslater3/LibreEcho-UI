@@ -589,24 +589,32 @@ static const char *voice_pipeline_restart_error(void)
 static int voice_pipeline_restart(const char *mode)
 {
     int failed = 0, satellite_stop_failed = 0;
+    const int ha = !strcmp(mode, "home-assistant");
 
     if (access(LE_INIT_AGENTD,X_OK)==0 && run_init_command(LE_INIT_AGENTD, "stop"))
         failed = 1;
     if (access(LE_INIT_STTD,X_OK)==0 && run_init_command(LE_INIT_STTD, "stop"))
         failed = 1;
-    if (access(LE_INIT_TTSD,X_OK)==0 && run_init_command(LE_INIT_TTSD, "stop"))
+    /* Restarted in every mode: its engine follows the saved mode (a Custom
+       Wyoming client versus the local model), and in Home Assistant mode it
+       still speaks reminders and the announce action. In that mode a ttsd
+       that will not stop or start never blocks the satellite. */
+    if (access(LE_INIT_TTSD,X_OK)==0 && run_init_command(LE_INIT_TTSD, "stop") && !ha)
         failed = 1;
     if (access(LE_INIT_ESPHOMED, X_OK) == 0 &&
         run_init_command(LE_INIT_ESPHOMED, "stop"))
         failed = satellite_stop_failed = 1;
 
-    if (!strcmp(mode, "home-assistant")) {
+    if (ha) {
         unsigned tick;
         if (access(LE_INIT_ESPHOMED, X_OK) < 0)
             return LE_NOT_SUPPORTED;
         if(failed)return LE_IO;
         if (run_init_command(LE_INIT_ESPHOMED, "start"))
             return LE_IO;
+        /* Best effort: the tts feature may be absent or disabled by policy. */
+        if (access(LE_INIT_TTSD, X_OK) == 0)
+            (void)run_init_command(LE_INIT_TTSD, "start");
         for(tick=0;tick<50;tick++){
             if(esphome_satellite_ready()){
                 (void)refresh_home_assistant_discovery();return LE_OK;
