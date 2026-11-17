@@ -89,12 +89,21 @@ with tempfile.TemporaryDirectory(prefix="test-esphome-http-", dir=SCRATCH) as di
                 assert json.loads(config.read_text())["integrations"] & 1 == 0
             # Ordinary unrelated HTTP saves must retain all three HA wake states,
             # without replacing the independent Local/Custom selection.
-            for selected in (None, "", "alexa_v0.1"):
+            # The owner option esphome_server_wake (absent, true, false) must survive the same saves.
+            for index, selected in enumerate((None, "", "alexa_v0.1")):
+                server_wake = (None, True, False)[index]
                 stored = json.loads(config.read_text())
                 if selected is None:
                     stored.pop("esphome_active_wake_word", None)
                 else:
                     stored["esphome_active_wake_word"] = selected
+                if server_wake is None:
+                    stored.pop("esphome_server_wake", None)
+                else:
+                    stored["esphome_server_wake"] = server_wake
+                stored.pop("esphome_bluetooth_proxy", None)
+                if server_wake is not None:
+                    stored["esphome_bluetooth_proxy"] = server_wake
                 config.write_text(json.dumps(stored))
                 for enabled in (True, False):
                     assert request("/integrations/mqtt", {"enabled": enabled})[0] == 200
@@ -102,6 +111,12 @@ with tempfile.TemporaryDirectory(prefix="test-esphome-http-", dir=SCRATCH) as di
                     assert ("esphome_active_wake_word" in loaded) == (selected is not None)
                     if selected is not None:
                         assert loaded["esphome_active_wake_word"] == selected
+                    assert ("esphome_server_wake" in loaded) == (server_wake is not None)
+                    if server_wake is not None:
+                        assert loaded["esphome_server_wake"] is server_wake
+                    assert ("esphome_bluetooth_proxy" in loaded) == (server_wake is not None)
+                    if server_wake is not None:
+                        assert loaded["esphome_bluetooth_proxy"] is server_wake
                     assert loaded["wake_word"] == "HeyJarvis" and loaded["wake_sensitivity"] == 55
             for path in ("/config", "/config/export", "/voice-pipeline", "/diagnostics/export", "/logs"):
                 status, result = request(path, body={} if path == "/diagnostics/export" else None,

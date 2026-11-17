@@ -23,6 +23,7 @@
  * it touches the /data contract.
  */
 #include <errno.h>
+#include <math.h>
 #include <fcntl.h>
 #include <signal.h>
 #include <stdint.h>
@@ -35,19 +36,18 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "mic_array_render.h"
+
 #define CHANNELS 9
 #define PERIOD 640                  /* 40 ms at 16 kHz, matching micd */
 #define RATE 16000
 /*
- * micd beamforms logical mics 0 and 3 with relative_delay_samples {0:4, 3:0}:
- * it holds mic 0 back so a wavefront that reached it first lines up with mic 3.
- * Injected audio must carry that same delay or delay-and-sum turns into a comb
- * filter with its first null at rate/(2*4) = 2 kHz -- a 13.6 dB hole straight
- * through the consonant band, which makes every injected utterance score worse
- * than the same audio would in the room.
+ * Injected audio is placed on the array as a talker directly in front of the
+ * device (azimuth 0, the volume-down side), with each microphone's measured
+ * propagation delay.  Identical lanes would look to micd's beamformer like a
+ * source straight overhead, which its in-plane beams are not designed for.
  */
-#define ARRAY_DELAY 4
-#define HISTORY 64
+#define INJECT_AZIMUTH_DEG 0.0
 
 static volatile sig_atomic_t running = 1;
 
@@ -143,8 +143,7 @@ int main(int argc, char **argv)
     unsigned char passthrough[PERIOD * CHANNELS * 3];
     unsigned char frame[PERIOD * CHANNELS * 3];
     int16_t mono[PERIOD];
-    int16_t history[HISTORY];
-    int history_pos = 0;
+    static struct le_array_render render;
     FILE *injected = NULL;
     int capture_fd = -1;
     pid_t capture;
@@ -170,7 +169,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--control-dir") && i + 1 < argc)
             control_dir = argv[++i];
     }
-    memset(history, 0, sizeof(history));
+    le_array_render_init(&render, INJECT_AZIMUTH_DEG);
     snprintf(pending, sizeof(pending), "%s/pending.raw", control_dir);
     snprintf(active, sizeof(active), "%s/active.raw", control_dir);
     (void)mkdir(control_dir, 0755);
@@ -214,16 +213,19 @@ int main(int argc, char **argv)
                 for (s = got; s < PERIOD; ++s)
                     mono[s] = 0;
                 for (s = 0; s < PERIOD; ++s) {
-                    int16_t sample = mono[s];
-                    int16_t lagged;
                     int c;
 
-                    history[history_pos] = sample;
-                    lagged = history[(history_pos + HISTORY - ARRAY_DELAY) % HISTORY];
-                    history_pos = (history_pos + 1) % HISTORY;
-                    for (c = 0; c < CHANNELS; ++c)
+                    le_array_render_push(&render, (float)mono[s]);
+                    for (c = 0; c < CHANNELS; ++c) {
+                        float v = c < LE_ARRAY_RENDER_MICS
+                            ? le_array_render_lane(&render, (unsigned int)c)
+                            : 0.0f;
+                        long q = lrintf(v);
+                        if (q > INT16_MAX) q = INT16_MAX;
+                        if (q < INT16_MIN) q = INT16_MIN;
                         put24(frame + (s * CHANNELS + (size_t)c) * 3,
-                              c == 3 ? lagged : sample);
+                              (int16_t)q);
+                    }
                 }
                 if (write_all(STDOUT_FILENO, frame, sizeof(frame)) < 0)
                     break;

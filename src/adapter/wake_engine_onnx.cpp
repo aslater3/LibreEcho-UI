@@ -63,7 +63,8 @@ Ort::SessionOptions session_options(unsigned int threads)
 
 class WakeEngine {
 public:
-    WakeEngine(const char *directory, unsigned int threads)
+    WakeEngine(const char *directory, unsigned int threads,
+               const char *second_classifier)
         : env_(ORT_LOGGING_LEVEL_WARNING, "libreecho-wake"),
           mel_(env_, model_path(directory, "melspectrogram.onnx").c_str(),
                session_options(threads)),
@@ -79,16 +80,33 @@ public:
         feature_history_.fill(0.0f);
         accumulated_.fill(0);
         overlap_.fill(0);
+        if (second_classifier) {
+            try {
+                second_classifier_.reset(new Ort::Session(
+                    env_, second_classifier, session_options(threads)));
+            } catch (const std::exception &error) {
+                std::fprintf(stderr,
+                             "wake: second word not loaded: %s\n",
+                             error.what());
+            }
+        }
         prime_and_warm();
     }
 
+    std::size_t WordCount() const
+    {
+        return second_classifier_ ? 2 : 1;
+    }
+
     int Feed(const int16_t *samples, std::size_t count,
-             float *score, int *new_score)
+             float *scores, std::size_t score_slots, int *new_score)
     {
         std::size_t offset = 0;
 
-        if (!samples || !score || !new_score)
+        if (!samples || !scores || !new_score || score_slots == 0)
             return -1;
+        for (std::size_t i = 0; i < score_slots; ++i)
+            scores[i] = 0.0f;
         *new_score = 0;
         while (offset < count) {
             const std::size_t available =
@@ -101,7 +119,8 @@ public:
             accumulated_count_ += copying;
             offset += copying;
             if (accumulated_count_ == kBlockSamples) {
-                *score = ProcessBlock(accumulated_.data(), true);
+                ProcessBlock(accumulated_.data(), true, scores,
+                             score_slots);
                 accumulated_count_ = 0;
                 *new_score = 1;
             }
@@ -115,7 +134,8 @@ public:
     }
 
 private:
-    float ProcessBlock(const int16_t *block, bool suppress_startup)
+    void ProcessBlock(const int16_t *block, bool suppress_startup,
+                      float *scores, std::size_t score_slots)
     {
         const auto started = std::chrono::steady_clock::now();
         std::array<float, kOverlapSamples + kBlockSamples> audio{};
@@ -124,7 +144,7 @@ private:
             1, static_cast<int64_t>(input_samples)};
         std::vector<float> mel_output;
         std::size_t mel_output_frames;
-        float score = 0.0f;
+        std::array<float, 2> word_scores{0.0f, 0.0f};
 
         for (std::size_t i = 0; i < overlap_count_; ++i)
             audio[i] = static_cast<float>(overlap_[i]);
@@ -171,34 +191,41 @@ private:
             embedding_values[0].GetTensorData<float>());
 
         if (feature_count_ >= kFeatureFrames) {
-            std::array<int64_t, 3> classifier_shape{
-                1, static_cast<int64_t>(kFeatureFrames),
-                static_cast<int64_t>(kFeatureBins)};
-            auto classifier_input = Ort::Value::CreateTensor<float>(
-                memory_, feature_history_.data(),
-                feature_history_.size(), classifier_shape.data(),
-                classifier_shape.size());
-            const char *classifier_input_names[] = {
-                "onnx::Flatten_0"};
-            const char *classifier_output_names[] = {"13"};
-            auto classifier_values = classifier_.Run(
-                Ort::RunOptions{nullptr}, classifier_input_names,
-                &classifier_input, 1, classifier_output_names, 1);
-            score =
-                classifier_values[0].GetTensorData<float>()[0];
+            word_scores[0] = RunClassifier(classifier_);
+            if (second_classifier_)
+                word_scores[1] = RunClassifier(*second_classifier_);
         }
 
         std::copy(block + kBlockSamples - kOverlapSamples,
                   block + kBlockSamples, overlap_.begin());
         overlap_count_ = kOverlapSamples;
         if (suppress_startup && prediction_count_++ < 5)
-            score = 0.0f;
+            word_scores.fill(0.0f);
         const auto elapsed = std::chrono::duration_cast<
             std::chrono::microseconds>(
             std::chrono::steady_clock::now() - started);
         last_inference_us_ =
             static_cast<unsigned int>(elapsed.count());
-        return std::max(0.0f, std::min(1.0f, score));
+        for (std::size_t i = 0; i < score_slots && i < word_scores.size(); ++i)
+            scores[i] = std::max(0.0f, std::min(1.0f, word_scores[i]));
+    }
+
+    float RunClassifier(Ort::Session &classifier)
+    {
+        std::array<int64_t, 3> classifier_shape{
+            1, static_cast<int64_t>(kFeatureFrames),
+            static_cast<int64_t>(kFeatureBins)};
+        auto classifier_input = Ort::Value::CreateTensor<float>(
+            memory_, feature_history_.data(),
+            feature_history_.size(), classifier_shape.data(),
+            classifier_shape.size());
+        const char *classifier_input_names[] = {
+            "onnx::Flatten_0"};
+        const char *classifier_output_names[] = {"13"};
+        auto classifier_values = classifier.Run(
+            Ort::RunOptions{nullptr}, classifier_input_names,
+            &classifier_input, 1, classifier_output_names, 1);
+        return classifier_values[0].GetTensorData<float>()[0];
     }
 
     void AppendMel(const float *frames, std::size_t count)
@@ -237,6 +264,7 @@ private:
     void prime_and_warm()
     {
         std::array<int16_t, kBlockSamples> silence{};
+        std::array<float, 2> warm_scores{};
 
         /*
          * Warm every graph and establish neutral feature history once at
@@ -244,7 +272,7 @@ private:
          * the Python implementation's random four-second initialization.
          */
         for (std::size_t i = 0; i < kFeatureFrames; ++i)
-            (void)ProcessBlock(silence.data(), false);
+            ProcessBlock(silence.data(), false, warm_scores.data(), warm_scores.size());
         mel_history_.fill(1.0f);
         accumulated_.fill(0);
         overlap_.fill(0);
@@ -258,6 +286,7 @@ private:
     Ort::Session mel_;
     Ort::Session embedding_;
     Ort::Session classifier_;
+    std::unique_ptr<Ort::Session> second_classifier_;
     Ort::MemoryInfo memory_;
     std::array<int16_t, kBlockSamples> accumulated_{};
     std::array<int16_t, kOverlapSamples> overlap_{};
@@ -277,17 +306,50 @@ struct le_wake_engine {
 };
 
 extern "C" struct le_wake_engine *
-le_wake_engine_create(const char *model_directory, unsigned int threads)
+le_wake_engine_create_words(const char *model_directory,
+                            unsigned int threads,
+                            const char *second_classifier)
 {
     try {
         std::unique_ptr<le_wake_engine> engine(new le_wake_engine);
         engine->implementation.reset(
-            new WakeEngine(model_directory, threads));
+            new WakeEngine(model_directory, threads, second_classifier));
         return engine.release();
     } catch (const std::exception &error) {
         std::fprintf(stderr, "wake engine initialization failed: %s\n",
                      error.what());
         return nullptr;
+    }
+}
+
+extern "C" struct le_wake_engine *
+le_wake_engine_create(const char *model_directory, unsigned int threads)
+{
+    return le_wake_engine_create_words(model_directory, threads, nullptr);
+}
+
+extern "C" size_t le_wake_engine_word_count(const struct le_wake_engine *engine)
+{
+    return engine && engine->implementation
+        ? engine->implementation->WordCount() : 0;
+}
+
+extern "C" int le_wake_engine_feed_words(struct le_wake_engine *engine,
+                                         const int16_t *samples,
+                                         size_t count,
+                                         float *scores,
+                                         size_t score_slots,
+                                         int *new_score)
+{
+    if (!engine || !engine->implementation)
+        return -1;
+    try {
+        return engine->implementation->Feed(
+            samples, count, scores, score_slots, new_score);
+    } catch (const std::exception &error) {
+        std::fprintf(stderr, "wake engine inference failed: %s\n",
+                     error.what());
+        return -1;
     }
 }
 
@@ -297,16 +359,8 @@ extern "C" int le_wake_engine_feed(struct le_wake_engine *engine,
                                    float *score,
                                    int *new_score)
 {
-    if (!engine || !engine->implementation)
-        return -1;
-    try {
-        return engine->implementation->Feed(
-            samples, count, score, new_score);
-    } catch (const std::exception &error) {
-        std::fprintf(stderr, "wake engine inference failed: %s\n",
-                     error.what());
-        return -1;
-    }
+    return le_wake_engine_feed_words(
+        engine, samples, count, score, 1, new_score);
 }
 
 extern "C" unsigned int le_wake_engine_last_inference_us(

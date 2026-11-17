@@ -56,7 +56,7 @@ make -s BUILD=$B SPEEX_PREFIX=/tmp/speex \
   $B/mock-llm-curl
 
 # Harness-only helpers: the fake codec tools micd execs, and the curl stand-in.
-gcc -O2 -Wall -Wextra -Wpedantic -std=c99 /harness/src/fake-tinycap.c -o $B/fake-tinycap
+gcc -O2 -Wall -Wextra -Wpedantic -std=c99 -Isrc -Isrc/adapter /harness/src/fake-tinycap.c src/adapter/mic_array_render.c -lm -o $B/fake-tinycap
 gcc -O2 -Wall -Wextra -Wpedantic -std=c99 /harness/src/fake-tinymix.c -o $B/fake-tinymix
 gcc -O2 -Wall -Wextra -Wpedantic -std=c99 /harness/src/harness-curl.c -o $B/harness-curl
 

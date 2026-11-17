@@ -12,9 +12,9 @@
  * Compile with:
  *   cc -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra -Wpedantic -Werror \
  *      -Isrc -Isrc/adapter tests/test_voice_pipeline_outcomes.c \
- *      src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
+ *      src/adapter/voice_pipeline.c src/adapter/voice_stream.c src/adapter/voice_ns.c \
  *      src/adapter/voice_listening_led.c src/adapter/adapter_client.c \
- *      src/adapter/adapter_server.c src/json.c src/log.c -lpthread \
+ *      src/adapter/adapter_server.c src/json.c src/log.c -lpthread -lm \
  *      -o build/test-voice-pipeline-outcomes
  */
 

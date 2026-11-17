@@ -23,6 +23,8 @@ static char integration_ack_path[128], integration_master_path[128];
 #define LE_MASTER_VOLUME_PATH integration_master_path
 #define LE_VOLUME_LEVELING_PATH "/tmp/libreecho-airplay-metadata-volume-leveling"
 #define LE_AVL_DISABLED_PATH "/tmp/libreecho-airplay-metadata-avl.disabled"
+#define LE_REPLY_VOLUME_PATH "/tmp/libreecho-airplay-metadata-reply-volume"
+#define LE_REPLY_VOLUME_RUNTIME_PATH "/tmp/libreecho-airplay-metadata-reply.volume"
 #include <sys/syscall.h>
 #include <stdarg.h>
 static int integration_ioctl(int fd, unsigned long request, ...);

@@ -20,6 +20,11 @@
 #define LE_FEATURE_RECORD_MAX 8192U
 #define LE_FEATURE_PATH_MAX 256
 #define LE_FEATURE_HASH_CACHE_COUNT 32
+/* Slots persisted generation digests may never take from runtime entries
+   (/proc executables, failed observations). Without the reserve a cache full
+   of digests leaves one slot that the running daemons' executables evict
+   from each other, and each is re-hashed in full on every pass. */
+#define LE_FEATURE_HASH_RUNTIME_RESERVE 8
 #define LE_FEATURE_HASH_CHUNK 16384
 #define LE_FEATURE_HASH_MAX (512ULL * 1024ULL * 1024ULL)
 #define LE_FEATURE_MANIFEST_CHUNK 16384
@@ -677,6 +682,12 @@ static int persistable_path(const char *path)
 static void cache_hash(const char *path, const struct stat *st, le_hash_result result,
                        const char *hash);
 
+static int persisted_identity_live(const char *path, const struct stat *recorded)
+{
+    struct stat live;
+    return !lstat(path, &live) && S_ISREG(live.st_mode) && same_stat(&live, recorded);
+}
+
 static void persist_load(void)
 {
     char data[LE_FEATURE_HASH_CACHE_FILE_MAX + 1], *line, *next;
@@ -744,6 +755,10 @@ static void persist_load(void)
             (unsigned long long)cached.st_ino != ino ||
             (unsigned long long)cached.st_size != size)
             continue;
+        /* A record for a deleted or replaced file (a retired generation) can
+           never be used again; loading it would only take a slot. */
+        if (!persisted_identity_live(entry_path, &cached))
+            continue;
         cache_hash(entry_path, &cached, LE_HASH_OK, hash);
     }
 }
@@ -762,7 +777,8 @@ static void persist_store(void)
         return;
     for (i = 0; ok && i < LE_FEATURE_HASH_CACHE_COUNT; ++i) {
         const le_hash_cache_entry *e = &hash_cache[i];
-        if (!e->valid || e->result != LE_HASH_OK || !persistable_path(e->path))
+        if (!e->valid || e->result != LE_HASH_OK || !persistable_path(e->path) ||
+            !persisted_identity_live(e->path, &e->st))
             continue;
         n = snprintf(line, sizeof(line), "v1 %llu %llu %llu %lld %ld %lld %ld %s %s\n",
                      (unsigned long long)e->st.st_dev, (unsigned long long)e->st.st_ino,
@@ -784,26 +800,42 @@ static void persist_store(void)
         (void)unlink(tmp);
 }
 
+static int cache_entry_persisted(const le_hash_cache_entry *e)
+{
+    return e->valid && e->result == LE_HASH_OK && persistable_path(e->path);
+}
+
 static void cache_hash(const char *path, const struct stat *st, le_hash_result result,
                        const char *hash)
 {
     static size_t next;
-    size_t i, slot = LE_FEATURE_HASH_CACHE_COUNT;
+    size_t i, slot = LE_FEATURE_HASH_CACHE_COUNT, persisted = 0;
+    int incoming_persisted, evict_persisted;
     le_hash_cache_entry *entry;
-    /* Reuse this path's slot, else a free slot, else round-robin preferring
-       entries that are not persisted generation digests, so churn from
-       /proc executables or failed observations cannot evict them. */
+    /* Reuse this path's slot, else a free slot, else evict round-robin. A
+       victim normally comes from the runtime entries (/proc executables,
+       failed observations), so their churn cannot evict generation digests;
+       but digests are capped at COUNT - RESERVE slots, so they cannot starve
+       the runtime entries either. */
     for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT && slot == LE_FEATURE_HASH_CACHE_COUNT; ++i)
         if (hash_cache[i].valid && !strcmp(hash_cache[i].path, path))
             slot = i;
     for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT && slot == LE_FEATURE_HASH_CACHE_COUNT; ++i)
         if (!hash_cache[i].valid)
             slot = i;
-    for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT && slot == LE_FEATURE_HASH_CACHE_COUNT; ++i) {
-        size_t candidate = (next + i) % LE_FEATURE_HASH_CACHE_COUNT;
-        if (hash_cache[candidate].result != LE_HASH_OK ||
-            !persistable_path(hash_cache[candidate].path))
-            slot = candidate;
+    if (slot == LE_FEATURE_HASH_CACHE_COUNT) {
+        for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT; ++i)
+            if (cache_entry_persisted(&hash_cache[i]))
+                ++persisted;
+        incoming_persisted = result == LE_HASH_OK && persistable_path(path);
+        evict_persisted = incoming_persisted
+            ? persisted >= LE_FEATURE_HASH_CACHE_COUNT - LE_FEATURE_HASH_RUNTIME_RESERVE
+            : persisted > LE_FEATURE_HASH_CACHE_COUNT - LE_FEATURE_HASH_RUNTIME_RESERVE;
+        for (i = 0; i < LE_FEATURE_HASH_CACHE_COUNT && slot == LE_FEATURE_HASH_CACHE_COUNT; ++i) {
+            size_t candidate = (next + i) % LE_FEATURE_HASH_CACHE_COUNT;
+            if (cache_entry_persisted(&hash_cache[candidate]) == evict_persisted)
+                slot = candidate;
+        }
     }
     if (slot == LE_FEATURE_HASH_CACHE_COUNT)
         slot = next % LE_FEATURE_HASH_CACHE_COUNT;
@@ -817,6 +849,7 @@ static void cache_hash(const char *path, const struct stat *st, le_hash_result r
     if (hash)
         snprintf(entry->hash, sizeof(entry->hash), "%s", hash);
 }
+
 
 static void hash_job_close(void)
 {
@@ -1427,6 +1460,21 @@ int le_feature_provenance_test_cached(const char *path, const struct stat *st)
 int le_feature_provenance_test_cache_slots(void)
 {
     return LE_FEATURE_HASH_CACHE_COUNT;
+}
+
+int le_feature_provenance_test_runtime_reserve(void)
+{
+    return LE_FEATURE_HASH_RUNTIME_RESERVE;
+}
+
+void le_feature_provenance_test_persist_load(void)
+{
+    persist_load();
+}
+
+void le_feature_provenance_test_persist_store(void)
+{
+    persist_store();
 }
 #endif
 

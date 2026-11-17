@@ -348,6 +348,13 @@ int main(void)
         release_pipe[1] = -1;
         millisleep(800);
 
+        /* The ESPHome last-turn sensors poll this generation and clear when it moves (#398). */
+        CHECK(call(socket_path, "voice_history_generation", NULL,
+                   response, sizeof(response)) == 0);
+        CHECK(strstr(response, cases[m].clear
+                     ? "\"history_generation\":2"
+                     : "\"history_generation\":1") != NULL);
+
         CHECK(call(socket_path, "voice_history", NULL,
                    response, sizeof(response)) == 0);
         if (cases[m].clear) {

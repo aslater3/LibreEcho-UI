@@ -138,6 +138,25 @@ call("pattern", {"name": "stop", "owner": "mute"})
 time.sleep(0.6)
 call("pattern", {"name": "stop", "owner": "bluetooth"})
 assert call("status")["pattern_active"] is False
+# #492: the DND ring must survive a manual colour or brightness change while
+# DND is on, and must still be removed when DND is turned off afterwards.
+dnd = {"name": "solid", "r": 190, "g": 35, "b": 35, "brightness": 100,
+       "repeats": 0, "owner": "dnd"}
+call("pattern", dnd)
+assert call("status")["pattern_owner"] == "dnd"
+call("set_colour", {"r": 10, "g": 20, "b": 30})
+held = call("status")
+assert held["pattern_active"] and held["pattern_owner"] == "dnd" \
+    and held["pattern"] == "solid", held
+call("set_brightness", {"brightness": 40})
+held = call("status")
+assert held["pattern_active"] and held["pattern_owner"] == "dnd", held
+call("pattern", {"name": "stop", "owner": "dnd"})
+assert call("status")["pattern_active"] is False
+# Without DND a manual change still clears any other pattern for good.
+call("pattern", {"name": "pulse", "owner": "bluetooth"})
+call("set_colour", {"r": 1, "g": 2, "b": 3})
+assert call("status")["pattern_active"] is False
 PY
 
 echo "LED owner-scoped override and restore: ok"

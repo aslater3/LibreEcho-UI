@@ -4,16 +4,19 @@
 
 #include "wake_engine.h"
 #include "wake_health.h"
+#include "wake_model.h"
 #include <time.h>
 
 #include <pthread.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define WAKE_BLOCK_SAMPLES 1280U
 #define WAKE_QUEUE_BLOCKS 8U
 #define WAKE_MODEL_DIRECTORY_BYTES 1024U
+#define WAKE_MAX_WORDS 2U
 #define WAKE_RELOAD_SECONDS 5
 /*
  * The bar a neighbouring frame must reach to corroborate a peak.
@@ -37,6 +40,7 @@
  */
 #define WAKE_SUPPORT_THRESHOLD 0.20f
 #define WAKE_LOCKOUT_SAMPLES 28000ULL
+#define WAKE_HISTORY_BLOCKS 16U
 
 struct wake_block {
     int16_t samples[WAKE_BLOCK_SAMPLES];
@@ -44,6 +48,11 @@ struct wake_block {
 };
 
 struct wake_decoder {
+    /* Recent PCM for near-miss clips, owned by the inference thread. */
+    int16_t history[WAKE_HISTORY_BLOCKS][WAKE_BLOCK_SAMPLES];
+    unsigned int history_next;
+    unsigned int history_fill;
+    uint64_t near_miss_lockout_until_sample;
     float scores[3];
     /*
      * The observation each score was computed from, carried alongside it so a
@@ -55,9 +64,21 @@ struct wake_decoder {
     uint64_t lockout_until_sample;
 };
 
+/* One wake word: its owner-visible name, and its own decoder state over the
+ * scores of its classifier. */
+struct wake_word {
+    /* The stock model is alexa_v0.1; a model folder reports its own name. */
+    char name[LE_WAKE_MODEL_NAME_MAX];
+    struct wake_decoder decoder;
+};
+
 struct wake_worker_impl {
     struct le_wake_engine *engine;
     char model_directory[WAKE_MODEL_DIRECTORY_BYTES];
+    /* Optional second classifier file, run on the first word's features. */
+    char second_classifier[WAKE_MODEL_DIRECTORY_BYTES];
+    int has_second;
+    struct wake_word words[WAKE_MAX_WORDS];
     unsigned int threads;
     pthread_t thread;
     pthread_mutex_t mutex;
@@ -78,12 +99,47 @@ struct wake_worker_impl {
     size_t accumulated;
     struct le_wake_observation accumulated_observation;
 
-    struct wake_decoder decoder;
     struct le_wake_worker_metrics metrics;
     float accept_threshold;
     le_wake_event_callback callback;
     void *callback_opaque;
+    float near_miss_floor;
+    le_wake_near_miss_callback near_miss_callback;
+    void *near_miss_opaque;
+    int16_t snapshot[LE_WAKE_HISTORY_SAMPLES];
 };
+
+/* The history ring and the snapshot must agree on capacity. */
+typedef char wake_history_capacity_check
+    [(WAKE_HISTORY_BLOCKS * WAKE_BLOCK_SAMPLES == LE_WAKE_HISTORY_SAMPLES) ? 1 : -1];
+
+static void push_history(struct wake_decoder *decoder,
+                         const struct wake_block *block)
+{
+    memcpy(decoder->history[decoder->history_next], block->samples,
+           sizeof(block->samples));
+    decoder->history_next = (decoder->history_next + 1U) % WAKE_HISTORY_BLOCKS;
+    if (decoder->history_fill < WAKE_HISTORY_BLOCKS)
+        ++decoder->history_fill;
+}
+
+/* Copy the retained history oldest-first into the worker's snapshot buffer. */
+static size_t history_snapshot(struct wake_worker_impl *worker)
+{
+    /* The PCM history is shared by every word; it lives in the first one. */
+    struct wake_decoder *decoder = &worker->words[0].decoder;
+    unsigned int blocks = decoder->history_fill;
+    unsigned int start = (decoder->history_next + WAKE_HISTORY_BLOCKS - blocks) %
+                         WAKE_HISTORY_BLOCKS;
+    unsigned int i;
+
+    for (i = 0; i < blocks; ++i) {
+        memcpy(worker->snapshot + (size_t)i * WAKE_BLOCK_SAMPLES,
+               decoder->history[(start + i) % WAKE_HISTORY_BLOCKS],
+               sizeof(int16_t) * WAKE_BLOCK_SAMPLES);
+    }
+    return (size_t)blocks * WAKE_BLOCK_SAMPLES;
+}
 
 static uint64_t wake_now_ns(void)
 {
@@ -119,12 +175,16 @@ static void merge_observation(
         destination->playback_active = 1;
 }
 
-static void decode_score(struct wake_worker_impl *worker,
-                         const struct wake_block *block,
-                         float score)
+static void decode_word(struct wake_worker_impl *worker,
+                        struct wake_word *word,
+                        const struct wake_block *block,
+                        float score,
+                        float accept_threshold)
 {
-    struct wake_decoder *decoder = &worker->decoder;
-    float accept_threshold;
+    struct wake_decoder *decoder = &word->decoder;
+    float near_floor;
+    le_wake_near_miss_callback near_callback;
+    void *near_opaque;
     unsigned int support = 0;
     unsigned int peak;
     unsigned int i;
@@ -137,7 +197,6 @@ static void decode_score(struct wake_worker_impl *worker,
     decoder->observations[2] = block->observation;
     if (decoder->score_count < 3)
         ++decoder->score_count;
-    ++worker->metrics.scores;
     if (score > worker->metrics.max_score)
         worker->metrics.max_score = score;
     for (i = 3 - decoder->score_count; i < 3; ++i) {
@@ -145,7 +204,9 @@ static void decode_score(struct wake_worker_impl *worker,
             ++support;
     }
     pthread_mutex_lock(&worker->mutex);
-    accept_threshold = worker->accept_threshold;
+    near_floor = worker->near_miss_floor;
+    near_callback = worker->near_miss_callback;
+    near_opaque = worker->near_miss_opaque;
     pthread_mutex_unlock(&worker->mutex);
 
     /*
@@ -177,6 +238,32 @@ static void decode_score(struct wake_worker_impl *worker,
         if (decoder->scores[i] > decoder->scores[peak])
             peak = i;
     }
+    /*
+     * Near miss: speech was present and the peak reached the floor but not
+     * the accept threshold. It is reported beside the decision below, never
+     * instead of it, and has its own lockout so one utterance yields one clip.
+     */
+    if (near_callback && near_floor > 0.0f && near_floor < accept_threshold &&
+        decoder->scores[peak] >= near_floor &&
+        decoder->scores[peak] < accept_threshold &&
+        decoder->observations[peak].vad_active &&
+        decoder->observations[peak].detection_sample >=
+            decoder->near_miss_lockout_until_sample) {
+        struct le_wake_near_miss miss;
+        size_t count;
+
+        decoder->near_miss_lockout_until_sample =
+            decoder->observations[peak].detection_sample + WAKE_LOCKOUT_SAMPLES;
+        ++worker->metrics.near_misses;
+        miss.detection_sample = decoder->observations[peak].detection_sample;
+        miss.score = decoder->scores[peak];
+        miss.accept_threshold = accept_threshold;
+        miss.vad_score = decoder->observations[peak].vad_score;
+        miss.playback_active = decoder->observations[peak].playback_active;
+        count = history_snapshot(worker);
+        near_callback(&miss, worker->snapshot, count, near_opaque);
+    }
+
     if (decoder->observations[peak].detection_sample <
             decoder->lockout_until_sample ||
         !decoder->observations[peak].vad_active ||
@@ -188,25 +275,44 @@ static void decode_score(struct wake_worker_impl *worker,
         decoder->observations[peak].detection_sample +
         WAKE_LOCKOUT_SAMPLES;
     if (worker->callback) {
-        const struct le_wake_event event = {
+        struct le_wake_event event = {
             decoder->observations[peak].detection_sample,
             decoder->scores[peak],
             decoder->observations[peak].vad_score,
             decoder->observations[peak].playback_active,
-            "alexa_v0.1"
+            ""
         };
 
+        /* The event names the word that fired, at most 23 characters. */
+        snprintf(event.model_name, sizeof(event.model_name), "%.*s", (int)(sizeof(event.model_name) - 1), word->name);
         worker->callback(&event, worker->callback_opaque);
     }
+}
+
+static void decode_score(struct wake_worker_impl *worker,
+                         const struct wake_block *block,
+                         const float *scores)
+{
+    float accept_threshold;
+    unsigned int i;
+
+    ++worker->metrics.scores;
+    pthread_mutex_lock(&worker->mutex);
+    accept_threshold = worker->accept_threshold;
+    pthread_mutex_unlock(&worker->mutex);
+    for (i = 0; i < (worker->has_second ? WAKE_MAX_WORDS : 1U); ++i)
+        decode_word(worker, &worker->words[i], block, scores[i],
+                    accept_threshold);
 }
 
 static void *wake_thread(void *opaque)
 {
     struct wake_worker_impl *worker = opaque;
+    unsigned int i;
 
     for (;;) {
         struct wake_block block;
-        float score = 0.0f;
+        float scores[WAKE_MAX_WORDS] = {0.0f, 0.0f};
         int new_score = 0;
         unsigned int inference_us;
 
@@ -221,8 +327,9 @@ static void *wake_thread(void *opaque)
              * the same inference thread. Retain the old engine until load
              * succeeds, including on a cancelled/late initialization. */
             pthread_mutex_unlock(&worker->mutex);
-            replacement = le_wake_engine_create(
-                worker->model_directory, worker->threads);
+            replacement = le_wake_engine_create_words(
+                worker->model_directory, worker->threads,
+                worker->has_second ? worker->second_classifier : NULL);
             pthread_mutex_lock(&worker->mutex);
             retired = replacement;
             worker->reload_result = -1;
@@ -233,7 +340,9 @@ static void *wake_thread(void *opaque)
                 worker->accumulated = 0;
                 memset(&worker->accumulated_observation, 0,
                        sizeof(worker->accumulated_observation));
-                memset(&worker->decoder, 0, sizeof(worker->decoder));
+                for (i = 0; i < WAKE_MAX_WORDS; ++i)
+                    memset(&worker->words[i].decoder, 0,
+                           sizeof(worker->words[i].decoder));
                 worker->inference_failed = 0;
                 worker->last_inference_ns = 0;
                 worker->reload_result = 0;
@@ -256,9 +365,9 @@ static void *wake_thread(void *opaque)
         --worker->queued;
         pthread_mutex_unlock(&worker->mutex);
 
-        if (le_wake_engine_feed(
+        if (le_wake_engine_feed_words(
                 worker->engine, block.samples, WAKE_BLOCK_SAMPLES,
-                &score, &new_score) < 0 || !new_score) {
+                scores, WAKE_MAX_WORDS, &new_score) < 0 || !new_score) {
             worker->metrics.failed = 1;
             pthread_mutex_lock(&worker->mutex);
             worker->inference_failed = 1;
@@ -275,7 +384,8 @@ static void *wake_thread(void *opaque)
             le_wake_engine_last_inference_us(worker->engine);
         if (inference_us > worker->metrics.max_inference_us)
             worker->metrics.max_inference_us = inference_us;
-        decode_score(worker, &block, score);
+        push_history(&worker->words[0].decoder, &block);
+        decode_score(worker, &block, scores);
     }
     return NULL;
 }
@@ -287,6 +397,20 @@ int le_wake_worker_start(struct le_wake_worker *worker,
                          le_wake_event_callback callback,
                          void *callback_opaque)
 {
+    return le_wake_worker_start_words(
+        worker, model_directory, threads, accept_threshold, NULL, NULL,
+        callback, callback_opaque);
+}
+
+int le_wake_worker_start_words(struct le_wake_worker *worker,
+                               const char *model_directory,
+                               unsigned int threads,
+                               float accept_threshold,
+                               const char *second_classifier,
+                               const char *second_name,
+                               le_wake_event_callback callback,
+                               void *callback_opaque)
+{
     struct wake_worker_impl *impl;
     pthread_condattr_t condition_attributes;
 
@@ -296,10 +420,30 @@ int le_wake_worker_start(struct le_wake_worker *worker,
         accept_threshold <= 0.0f ||
         accept_threshold >= 1.0f)
         return -1;
+    if (second_classifier &&
+        (!second_name || !le_wake_model_name_valid(second_name) ||
+         strnlen(second_classifier, WAKE_MODEL_DIRECTORY_BYTES) >=
+             WAKE_MODEL_DIRECTORY_BYTES))
+        return -1;
     impl = calloc(1, sizeof(*impl));
     if (!impl)
         return -1;
     memcpy(impl->model_directory, model_directory, strlen(model_directory) + 1);
+    {
+        char phrase[LE_WAKE_MODEL_NAME_MAX];
+
+        if (le_wake_model_label(model_directory, phrase, sizeof(phrase),
+                                impl->words[0].name, sizeof(impl->words[0].name)) < 0)
+            snprintf(impl->words[0].name, sizeof(impl->words[0].name), "%s",
+                     LE_WAKE_MODEL_STOCK_NAME);
+    }
+    if (second_classifier) {
+        memcpy(impl->second_classifier, second_classifier,
+               strlen(second_classifier) + 1);
+        snprintf(impl->words[1].name, sizeof(impl->words[1].name), "%s",
+                 second_name);
+        impl->has_second = 1;
+    }
     impl->threads = threads;
     impl->accept_threshold = accept_threshold;
     impl->callback = callback;
@@ -317,7 +461,9 @@ int le_wake_worker_start(struct le_wake_worker *worker,
         goto fail_mutex;
     }
     pthread_condattr_destroy(&condition_attributes);
-    impl->engine = le_wake_engine_create(model_directory, threads);
+    impl->engine = le_wake_engine_create_words(
+        model_directory, threads,
+        impl->has_second ? impl->second_classifier : NULL);
     if (!impl->engine)
         goto fail_condition;
     if (pthread_create(&impl->thread, NULL, wake_thread, impl) != 0)
@@ -389,6 +535,25 @@ int le_wake_worker_submit(
         }
     }
     return dropped;
+}
+
+int le_wake_worker_set_near_miss(
+    struct le_wake_worker *worker, float floor,
+    le_wake_near_miss_callback callback, void *callback_opaque)
+{
+    struct wake_worker_impl *impl;
+
+    if (!worker || !worker->implementation ||
+        !(floor >= 0.0f && floor < 1.0f) ||
+        (floor > 0.0f && !callback))
+        return -1;
+    impl = worker->implementation;
+    pthread_mutex_lock(&impl->mutex);
+    impl->near_miss_floor = floor;
+    impl->near_miss_callback = floor > 0.0f ? callback : NULL;
+    impl->near_miss_opaque = callback_opaque;
+    pthread_mutex_unlock(&impl->mutex);
+    return 0;
 }
 
 int le_wake_worker_set_threshold(

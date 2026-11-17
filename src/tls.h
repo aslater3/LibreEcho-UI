@@ -22,6 +22,9 @@
 
 struct le_tls;
 
+/* Empty file beside the certificate: present when the owner installed their own. */
+#define LE_TLS_CUSTOM_MARKER "https-custom-certificate"
+
 /* Wrap an already-connected socket as a TLS client. hostname is used for SNI.
    Returns NULL on failure; the caller still owns fd and must close it. */
 struct le_tls *le_tls_client_open(int fd, const char *hostname);
@@ -81,5 +84,27 @@ int le_tls_cert_info(const char *cert_path, char *not_after, size_t na_size,
 
 int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
                               const char *common_name);
+
+/*
+ * Owner-supplied certificates. Both checks parse PEM input held in memory and
+ * return LE_OK / LE_INVALID, or LE_NOT_SUPPORTED when the build has no TLS.
+ *
+ * le_tls_check_certificate_pair: the first certificate must match the private
+ * key, the key must be unencrypted, and the certificate must not have expired.
+ *
+ * le_tls_check_ca_bundle: every certificate in the bundle must carry the CA
+ * flag. Returns the number of certificates (> 0) on success.
+ */
+int le_tls_check_certificate_pair(const char *cert_pem, size_t cert_len,
+                                  const char *key_pem, size_t key_len);
+int le_tls_check_ca_bundle(const char *pem, size_t len);
+
+/* 1 when this build has a TLS implementation, 0 for the stub. */
+int le_tls_available(void);
+
+/* Write a file atomically (temp file, fsync, rename). Private files are 0600;
+   public_readable makes it 0644. */
+int le_tls_install_file(const char *path, const char *data, size_t len,
+                        int public_readable);
 
 #endif

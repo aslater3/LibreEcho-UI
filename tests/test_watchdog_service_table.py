@@ -34,7 +34,7 @@ PIDFILE_WHILE_BUSY = {"agentd", "ttsd", "sttd"}
 
 # Voice ownership. The API stops one set and starts the other on a mode
 # switch; an owner missing here makes the watchdog undo that switch.
-VOICE_OWNER = {"agentd": "OWNER_LOCAL", "ttsd": "OWNER_LOCAL",
+VOICE_OWNER = {"agentd": "OWNER_LOCAL", "ttsd": "OWNER_ANY",
                "sttd": "OWNER_LOCAL", "esphomed": "OWNER_HA"}
 
 # Daemons with no init script of their own, or deliberately not supervised.

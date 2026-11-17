@@ -7,17 +7,53 @@
 #define LE_SECTION_NOVELTY     150U
 #define LE_BUILD_MIN           130U
 #define LE_EVENT_STRENGTH_MIN  110U
-#define LE_QUIET_GAP_FRAMES    8U
+/* A quiet gap counts as structure after this long (was 8 frames at the
+   original ~11.7 fps producer rate). */
+#define LE_QUIET_GAP_SECONDS   0.68
+/* EMA time constant: a quarter step per ~85 ms frame at 11.7 fps. */
+#define LE_EMA_SECONDS         0.256
+#define LE_STALE_DWELLS        1.2
+
+/* Mood follows the music over this time constant. */
+#define LE_MOOD_SECONDS        4.0
+/* The opening scene is short: its palette was chosen before any music. */
+#define LE_FIRST_DWELL_SECONDS 3.0
+/* A mood is left only when the score passes its edge by this much. */
+#define LE_MOOD_HYSTERESIS     6.0
+/* Shortest scene a change of mood may cut short. */
+#define LE_MOOD_DWELL_SECONDS  4.0
+#define LE_MOOD_PALETTES       3U
+/* Below this loudness a frame is silence and leaves the mood alone. */
+#define LE_MOOD_MIN_LOUDNESS   48U
+
+/* Lower heat edge of balanced, energetic and intense. */
+static const double le_mood_edges[LE_MOOD_COUNT - 1] = {20.0, 45.0, 70.0};
 
 static const struct {
     struct led_rgb primary;
     struct led_rgb secondary;
     int accent;                 /* enum led_accent */
-} le_palette_families[] = {
-    {{ 40U, 120U, 220U}, { 20U, 200U, 190U}, LE_ACCENT_WARM_WHITE},
-    {{255U, 120U,  30U}, {255U,  70U,  90U}, LE_ACCENT_COOL_WHITE},
-    {{120U,  70U, 230U}, {210U,  60U, 180U}, LE_ACCENT_WARM_WHITE},
-    {{255U,  80U,  10U}, {150U,  30U,  20U}, LE_ACCENT_COOL_WHITE}
+} le_palette_families[LE_MOOD_COUNT][LE_MOOD_PALETTES] = {
+    {   /* calm: blues and teals */
+        {{ 20U, 110U, 255U}, {  0U, 210U, 190U}, LE_ACCENT_WARM_WHITE},
+        {{  0U, 170U, 255U}, { 90U, 110U, 255U}, LE_ACCENT_WARM_WHITE},
+        {{  0U, 200U, 150U}, { 30U, 120U, 255U}, LE_ACCENT_WARM_WHITE}
+    },
+    {   /* balanced: violet, green, amber */
+        {{130U,  60U, 255U}, {  0U, 200U, 220U}, LE_ACCENT_WARM_WHITE},
+        {{ 60U, 220U,  90U}, {  0U, 170U, 255U}, LE_ACCENT_WARM_WHITE},
+        {{255U, 170U,  30U}, {150U,  70U, 255U}, LE_ACCENT_COOL_WHITE}
+    },
+    {   /* energetic: neon pink, yellow, cyan */
+        {{255U,  20U, 140U}, {  0U, 190U, 255U}, LE_ACCENT_WARM_WHITE},
+        {{255U, 200U,   0U}, {255U,  30U, 120U}, LE_ACCENT_COOL_WHITE},
+        {{160U,  40U, 255U}, {255U,  60U,  60U}, LE_ACCENT_COOL_WHITE}
+    },
+    {   /* intense: reds and oranges */
+        {{255U,  20U,   0U}, {255U, 120U,   0U}, LE_ACCENT_COOL_WHITE},
+        {{255U,  60U,   0U}, {255U, 190U,  20U}, LE_ACCENT_COOL_WHITE},
+        {{255U,   0U,  30U}, {255U,  90U,   0U}, LE_ACCENT_COOL_WHITE}
+    }
 };
 
 static unsigned int le_rng_next(unsigned int *state)
@@ -43,6 +79,17 @@ const char *le_music_grammar_name(enum le_music_grammar grammar)
     }
 }
 
+const char *le_music_mood_name(enum le_music_mood mood)
+{
+    switch (mood) {
+    case LE_MOOD_CALM: return "calm";
+    case LE_MOOD_BALANCED: return "balanced";
+    case LE_MOOD_ENERGETIC: return "energetic";
+    case LE_MOOD_INTENSE: return "intense";
+    default: return "none";
+    }
+}
+
 const char *le_music_effect_name(enum le_music_effect effect)
 {
     switch (effect) {
@@ -64,25 +111,47 @@ void le_music_director_config_defaults(struct le_music_director_config *cfg)
     cfg->effect_duration_seconds = 1.5;
 }
 
-static struct le_music_palette le_palette_for(struct le_music_director *d,
-                                              unsigned int warmth)
+/*
+ * Mood score of one frame: loudness plus the spectral tilt towards the upper
+ * bands.  The caller averages it over seconds; the fast loudness is used
+ * because the engine's slow one takes seconds to rise when a session starts.  Loud, bright, dense material (distorted guitars, driving
+ * electronic music) scores high; quiet or bass-weighted material scores low.
+ */
+static double le_frame_heat(const struct le_music_features *f)
+{
+    return ((double)f->loudness_fast - 110.0) +
+           1.5 * ((double)f->brightness_axis - (double)f->warmth);
+}
+
+static enum le_music_mood le_mood_for(const struct le_music_director *d)
+{
+    unsigned int mood = (unsigned int)d->mood;
+
+    while (mood + 1U < (unsigned int)LE_MOOD_COUNT &&
+           d->heat >= le_mood_edges[mood] + LE_MOOD_HYSTERESIS)
+        mood++;
+    while (mood > 0U && d->heat < le_mood_edges[mood - 1U] - LE_MOOD_HYSTERESIS)
+        mood--;
+    return (enum le_music_mood)mood;
+}
+
+/* The next palette: the current mood's family, never the one showing. */
+static struct le_music_palette le_palette_for(struct le_music_director *d)
 {
     struct le_music_palette palette;
-    unsigned int family;
+    enum le_music_mood mood = le_mood_for(d);
+    unsigned int index = le_rng_next(&d->rng) % LE_MOOD_PALETTES;
     struct led_rgb accent;
 
-    if (warmth < 100U)
-        family = (le_rng_next(&d->rng) & 1U) ? 0U : 2U;
-    else if (warmth <= 150U)
-        family = 2U;
-    else
-        family = (le_rng_next(&d->rng) & 1U) ? 1U : 3U;
-
-    palette.primary = le_palette_families[family].primary;
-    palette.secondary = le_palette_families[family].secondary;
-    accent = le_palette_families[family].primary;
-    (void)led_output_accent((enum led_accent)le_palette_families[family].accent,
-                            &accent);
+    if (mood == d->mood && index == d->palette_index)
+        index = (index + 1U) % LE_MOOD_PALETTES;
+    d->mood = mood;
+    d->palette_index = index;
+    palette.primary = le_palette_families[mood][index].primary;
+    palette.secondary = le_palette_families[mood][index].secondary;
+    accent = palette.primary;
+    (void)led_output_accent(
+        (enum led_accent)le_palette_families[mood][index].accent, &accent);
     palette.accent = accent;
     return palette;
 }
@@ -106,39 +175,38 @@ void le_music_director_reset(struct le_music_director *director,
     director->grammar = (enum le_music_grammar)
         (le_rng_next(&director->rng) % (unsigned int)LE_GRAMMAR_COUNT);
     director->pending_grammar = director->grammar;
-    director->palette = le_palette_for(director, 128U);
+    director->mood = LE_MOOD_BALANCED;
+    director->heat = le_mood_edges[0] + LE_MOOD_HYSTERESIS;
+    director->heat_seconds = 0.0;
+    director->palette_index = LE_MOOD_PALETTES;
+    director->palette = le_palette_for(director);
     director->pending_palette = director->palette;
     director->effect = LE_EFFECT_NONE;
 }
 
-static enum le_music_grammar le_pick_grammar(struct le_music_director *d,
-                                             int low_confidence)
+static enum le_music_grammar le_pick_grammar(struct le_music_director *d)
 {
-    static const enum le_music_grammar free_run[3] = {
-        LE_GRAMMAR_RIBBON, LE_GRAMMAR_TWIN_ARCS, LE_GRAMMAR_EMBER
-    };
     enum le_music_grammar chosen;
     unsigned int attempt;
 
+    /* Every grammar moves on its own clock and reacts to hits, so none
+       needs a beat lock. */
     for (attempt = 0U; attempt < 8U; attempt++) {
-        if (low_confidence)
-            chosen = free_run[le_rng_next(&d->rng) % 3U];
-        else
-            chosen = (enum le_music_grammar)
-                (le_rng_next(&d->rng) % (unsigned int)LE_GRAMMAR_COUNT);
+        chosen = (enum le_music_grammar)
+            (le_rng_next(&d->rng) % (unsigned int)LE_GRAMMAR_COUNT);
         if (chosen != d->grammar)
             return chosen;
     }
-    return LE_GRAMMAR_RIBBON;
+    return d->grammar == LE_GRAMMAR_RIBBON ? LE_GRAMMAR_TWIN_ARCS
+                                           : LE_GRAMMAR_RIBBON;
 }
 
 static void le_begin_change(struct le_music_director *d,
                             const struct le_music_features *f, double now)
 {
-    int low_confidence = d->confidence_ema < LE_LOW_CONFIDENCE;
-
-    d->pending_grammar = le_pick_grammar(d, low_confidence);
-    d->pending_palette = le_palette_for(d, f->warmth);
+    d->pending_grammar = le_pick_grammar(d);
+    (void)f;
+    d->pending_palette = le_palette_for(d);
     d->crossfading = 1;
     d->change_started = now;
 }
@@ -173,7 +241,8 @@ static void le_consider_effect(struct le_music_director *d,
                     f->build >= LE_BUILD_MIN ||
                     (events & LE_MUSIC_EVENT_BUILD) ||
                     (events & LE_MUSIC_EVENT_FILL) ||
-                    d->quiet_frames >= LE_QUIET_GAP_FRAMES;
+                    (d->quiet &&
+                     (now - d->quiet_since) >= LE_QUIET_GAP_SECONDS);
 
     if (!le_effect_ready(d, now))
         return;
@@ -219,12 +288,35 @@ void le_music_director_update(struct le_music_director *d,
         d->confidence_ema = f->beat_confidence;
         d->build_ema = f->build;
         d->have_history = 1;
+        d->heat_seconds = 0.0;
+        d->first_update = now;
         d->scene_started = now;
         d->have_scene_time = 1;
     } else {
-        d->confidence_ema = (d->confidence_ema * 3U + f->beat_confidence) / 4U;
-        d->build_ema = (d->build_ema * 3U + f->build) / 4U;
+        /* Same wall-time response at any producer frame rate. */
+        double dt = now - d->last_update;
+        double a;
+        if (dt < 0.0)
+            dt = 0.0;
+        /* Silence says nothing about the mood, and the first seconds of
+           music are a plain running mean so a quiet lead-in does not hold
+           the colours back. */
+        if (dt > 0.0 && f->loudness_fast >= LE_MOOD_MIN_LOUDNESS) {
+            double tau = d->heat_seconds < LE_MOOD_SECONDS
+                             ? d->heat_seconds : LE_MOOD_SECONDS;
+
+            d->heat += (le_frame_heat(f) - d->heat) * (dt / (dt + tau));
+            d->heat_seconds += dt;
+        }
+        a = dt / (dt + LE_EMA_SECONDS);
+        d->confidence_ema = (unsigned int)
+            ((double)d->confidence_ema +
+             ((double)f->beat_confidence - (double)d->confidence_ema) * a + 0.5);
+        d->build_ema = (unsigned int)
+            ((double)d->build_ema +
+             ((double)f->build - (double)d->build_ema) * a + 0.5);
     }
+    d->last_update = now;
 
     /* Expire a running transition. */
     if (d->effect != LE_EFFECT_NONE &&
@@ -235,10 +327,12 @@ void le_music_director_update(struct le_music_director *d,
     le_consider_effect(d, f, now);
 
     if (f->loudness_fast < 40U || f->energy < 50U) {
-        if (d->quiet_frames < 10000U)
-            d->quiet_frames++;
+        if (!d->quiet) {
+            d->quiet = 1;
+            d->quiet_since = now;
+        }
     } else {
-        d->quiet_frames = 0U;
+        d->quiet = 0;
     }
 
     /* Scene changes: dwell-gated, primarily structural. */
@@ -249,13 +343,24 @@ void le_music_director_update(struct le_music_director *d,
                          f->novelty >= LE_SECTION_NOVELTY;
         int dwell_ok = d->have_scene_time &&
                        (now - d->scene_started) >= d->cfg.scene_dwell_seconds;
+        /* Refresh soon after the dwell even without structural evidence:
+           two dwells held one look for ~21 s on real music. */
         int stale = d->have_scene_time &&
                     (now - d->scene_started) >=
-                        d->cfg.scene_dwell_seconds * 2.0;
-        int low_conf_orbit = d->grammar == LE_GRAMMAR_ORBIT &&
-                             d->confidence_ema < LE_LOW_CONFIDENCE;
+                        d->cfg.scene_dwell_seconds * LE_STALE_DWELLS;
 
-        if ((dwell_ok && structural) || stale || low_conf_orbit)
+        /* The opening palette predates the music: move on once the mood
+           has had time to settle. */
+        int opening = d->scene_started == d->first_update &&
+                      d->heat_seconds >= LE_FIRST_DWELL_SECONDS;
+
+        /* A change of mood (quiet verse into a loud chorus) recolours the
+           ring without waiting for the dwell. */
+        int mood_shift = d->have_scene_time &&
+                         (now - d->scene_started) >= LE_MOOD_DWELL_SECONDS &&
+                         le_mood_for(d) != d->mood;
+
+        if ((dwell_ok && structural) || stale || opening || mood_shift)
             le_begin_change(d, f, now);
     } else if ((now - d->change_started) >= d->cfg.scene_crossfade_seconds) {
         d->grammar = d->pending_grammar;

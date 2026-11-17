@@ -8,6 +8,12 @@
 #define LE_MASTER_VOLUME_PATH LE_MASTER_VOLUME_DIR "/master.volume"
 #define LE_SOUND_DIR "/tmp/libreecho-audiod-review-sounds"
 #define LE_VOLUME_LEVELING_PATH "/tmp/libreecho-audiod-review-volume-leveling"
+#define LE_REPLY_VOLUME_PATH "/tmp/libreecho-audiod-review-reply-volume"
+#define LE_REPLY_VOLUME_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/reply.volume"
+#define LE_TONE_PATH "/tmp/libreecho-audiod-review-tone"
+#define LE_BOOST_PATH "/tmp/libreecho-audiod-review-speaker-boost"
+#define LE_TONE_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/tone.conf"
+#define LE_BOOST_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/boost.conf"
 #define LE_AVL_DISABLED_DIR "/tmp/libreecho-audiod-review-run"
 #define LE_AVL_DISABLED_PATH LE_AVL_DISABLED_DIR "/avl.disabled"
 #include <sys/syscall.h>
@@ -20,6 +26,7 @@ static int review_ioctl(int fd, unsigned long request, ...);
 #undef ioctl
 
 #include <stdio.h>
+#include <dirent.h>
 
 static void require_condition(int condition, const char *message)
 {
@@ -757,6 +764,309 @@ static void test_pending_restore_beats_stale_config(void)
     unlink(LE_AIRPLAY_RESTORE_PATH);
 }
 
+static int read_small(const char *path, char *text, size_t size)
+{
+    int fd = open(path, O_RDONLY);
+    ssize_t n;
+    if (fd < 0) return -1;
+    n = read(fd, text, size - 1);
+    close(fd);
+    if (n < 0) return -1;
+    text[n] = '\0';
+    return (int)n;
+}
+
+/* Separate reply volume (#409): persisted owner level drives reply.volume. */
+static void test_reply_volume(void)
+{
+    struct audio_hw audio;
+    struct stat st;
+    char response[1024], text[16];
+    int level = -1;
+
+    unlink(LE_REPLY_VOLUME_PATH); unlink(LE_REPLY_VOLUME_RUNTIME_PATH);
+    require_condition(reply_volume_load(&level) < 0, "missing choice means replies follow the master");
+    require_condition(reply_volume_publish(0, 0) == 0 && access(LE_REPLY_VOLUME_RUNTIME_PATH, F_OK) != 0,
+                      "following publishes no reply.volume");
+    memset(&audio, 0, sizeof(audio)); audio.volume = 40; audio.notification_volume = 40;
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"reply_volume\":40,\"reply_volume_custom\":false") != NULL,
+                      "status reports the master as the reply level while following");
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"volume\":72}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.reply_volume_custom == 1 &&
+                      audio.reply_volume == 72, "reply level set");
+    require_condition(read_small(LE_REPLY_VOLUME_RUNTIME_PATH, text, sizeof(text)) == 3 && !strcmp(text, "72\n"),
+                      "reply.volume published for the engine");
+    require_condition(stat(LE_REPLY_VOLUME_PATH, &st) == 0 && (st.st_mode & 0777) == 0600, "reply level persisted 0600");
+    require_condition(reply_volume_load(&level) == 0 && level == 72, "persisted level survives a restart");
+    require_condition(audio.volume == 40, "the master volume is untouched");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"reply_volume\":72,\"reply_volume_custom\":true") != NULL &&
+                      strstr(response, "\"notification_volume\":72") != NULL && strstr(response, "\"volume\":40") != NULL,
+                      "status reports the separate level");
+
+    /* A reboot clears /run; the poll re-publishes, and fixes stale content. */
+    unlink(LE_REPLY_VOLUME_RUNTIME_PATH);
+    audio.last_reply_check_ms = 0;
+    reply_volume_reconcile(&audio, 1000);
+    require_condition(read_small(LE_REPLY_VOLUME_RUNTIME_PATH, text, sizeof(text)) == 3 && !strcmp(text, "72\n"),
+                      "missing reply.volume re-published");
+    { int fd = open(LE_REPLY_VOLUME_RUNTIME_PATH, O_WRONLY | O_TRUNC); require_condition(fd >= 0 && write(fd, "9\n", 2) == 2, "stale write"); close(fd); }
+    reply_volume_reconcile(&audio, 1000 + VOLUME_GUARD_POLL_MS);
+    require_condition(read_small(LE_REPLY_VOLUME_RUNTIME_PATH, text, sizeof(text)) == 3 && !strcmp(text, "72\n"),
+                      "stale reply.volume corrected");
+
+    {
+        static const char *const bad[] = {
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"volume\":101}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"volume\":-1}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"custom\":true}}"
+        };
+        size_t k;
+        for (k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+            mock_audiod_ipc(&audio, bad[k], response, sizeof(response));
+            require_condition(strstr(response, "\"ok\":false") != NULL && audio.reply_volume == 72 &&
+                              audio.reply_volume_custom == 1, "invalid reply level rejected without change");
+        }
+    }
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_reply_volume\",\"args\":{\"custom\":false}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.reply_volume_custom == 0,
+                      "replies return to the master");
+    require_condition(access(LE_REPLY_VOLUME_RUNTIME_PATH, F_OK) != 0 && access(LE_REPLY_VOLUME_PATH, F_OK) != 0,
+                      "following removes reply.volume and the persisted choice");
+    { int fd = open(LE_REPLY_VOLUME_RUNTIME_PATH, O_WRONLY | O_CREAT, 0640); require_condition(fd >= 0 && write(fd, "50\n", 3) == 3, "stray write"); close(fd); }
+    reply_volume_reconcile(&audio, 1000 + 2 * VOLUME_GUARD_POLL_MS);
+    require_condition(access(LE_REPLY_VOLUME_RUNTIME_PATH, F_OK) != 0, "a stray reply.volume is removed while following");
+
+    /* Persisted content is validated strictly at startup. */
+    {
+        static const char *const bad[] = { "abc\n", "101\n", "-1\n", "7x\n", "\n", " 5\n" };
+        size_t k;
+        for (k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+            int fd = open(LE_REPLY_VOLUME_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            require_condition(fd >= 0 && write(fd, bad[k], strlen(bad[k])) == (ssize_t)strlen(bad[k]), "bad write");
+            close(fd);
+            require_condition(reply_volume_load(&level) < 0, "malformed persisted reply level means follow");
+        }
+    }
+    unlink(LE_REPLY_VOLUME_PATH); unlink(LE_REPLY_VOLUME_RUNTIME_PATH);
+}
+
+
+/* Exact file content, or a failure naming what differed. */
+static void require_file(const char *path, const char *expected, int mode, const char *message)
+{
+    char text[512];
+    struct stat st;
+    int fd = open(path, O_RDONLY | O_NOFOLLOW);
+    ssize_t n;
+    require_condition(fd >= 0, message);
+    n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    require_condition(n >= 0, message);
+    text[n] = '\0';
+    if (strcmp(text, expected)) {
+        fprintf(stderr, "%s: got [%s] expected [%s]\n", path, text, expected);
+        require_condition(0, message);
+    }
+    require_condition(stat(path, &st) == 0 && (int)(st.st_mode & 0777) == mode, message);
+}
+
+/* No temp file is left beside an atomically written file. */
+static void require_no_temp(const char *dir, const char *prefix, const char *message)
+{
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    size_t len = strlen(prefix);
+    require_condition(d != NULL, message);
+    while ((e = readdir(d)) != NULL)
+        require_condition(!(strncmp(e->d_name, prefix, len) == 0 && strstr(e->d_name, ".tmp.")), message);
+    closedir(d);
+}
+
+static void write_file(const char *path, const char *text)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    require_condition(fd >= 0 && write(fd, text, strlen(text)) == (ssize_t)strlen(text), "fixture write");
+    close(fd);
+}
+
+/* Four-band owner equaliser and speaker boost: persisted by audiod and
+ * published as tone.conf / boost.conf only while not flat / 0 dB. */
+static void test_owner_eq(void)
+{
+    struct audio_hw audio;
+    char response[2048], preset[LE_EQ_PRESET_MAX];
+    int halves[LE_EQ_BANDS];
+    static const char vocal_conf[] =
+        "schema=2\nbass_db=-2.00\nlow_mid_db=1.00\nhigh_mid_db=4.00\ntreble_db=1.00\n";
+
+    unlink(LE_TONE_PATH); unlink(LE_BOOST_PATH);
+    unlink(LE_TONE_RUNTIME_PATH); unlink(LE_BOOST_RUNTIME_PATH);
+    owner_tone_load(halves, preset);
+    require_condition(le_eq_is_flat(halves) && !strcmp(preset, "flat"), "missing tone means flat");
+    require_condition(owner_boost_load() == 0, "missing boost means 0 dB");
+    require_condition(owner_tone_publish(halves) == 0 && access(LE_TONE_RUNTIME_PATH, F_OK) != 0,
+                      "flat publishes no tone.conf");
+    require_condition(owner_boost_publish(0) == 0 && access(LE_BOOST_RUNTIME_PATH, F_OK) != 0,
+                      "0 dB publishes no boost.conf");
+
+    memset(&audio, 0, sizeof(audio)); audio.volume = 40;
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"eq\":{\"preset\":\"flat\",\"bass\":0,\"low_mid\":0,\"high_mid\":0,\"treble\":0},\"boost_db\":0") != NULL,
+                      "status reports flat and no boost");
+
+    /* A preset: exact runtime text (schema 2, two decimals), 0640, persisted 0600, atomic. */
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":-2,\"low_mid\":1,\"high_mid\":4,\"treble\":1,\"preset\":\"vocal\"}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL, "set_tone vocal");
+    require_file(LE_TONE_RUNTIME_PATH, vocal_conf, 0640, "tone.conf published for the engine");
+    require_file(LE_TONE_PATH, "preset=vocal\nschema=2\nbass_db=-2.00\nlow_mid_db=1.00\nhigh_mid_db=4.00\ntreble_db=1.00\n",
+                 0600, "tone persisted 0600 with the preset");
+    require_no_temp(LE_MASTER_VOLUME_DIR, "tone.conf", "no temp file left beside tone.conf");
+    require_no_temp("/tmp", "libreecho-audiod-review-tone", "no temp file left beside the persisted tone");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"eq\":{\"preset\":\"vocal\",\"bass\":-2,\"low_mid\":1,\"high_mid\":4,\"treble\":1}") != NULL,
+                      "status reports the preset and bands");
+    require_condition(audio.volume == 40, "the master volume is untouched");
+
+    /* Half steps and a preset name that no longer matches its values. */
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":-0.5,\"low_mid\":6,\"high_mid\":-6.0,\"treble\":5.5,\"preset\":\"vocal\"}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && !strcmp(audio.eq_preset, "custom"),
+                      "mismatched preset name becomes custom");
+    require_file(LE_TONE_RUNTIME_PATH, "schema=2\nbass_db=-0.50\nlow_mid_db=6.00\nhigh_mid_db=-6.00\ntreble_db=5.50\n",
+                 0640, "half steps and range ends published exactly");
+    /* Restored at the next start. */
+    owner_tone_load(halves, preset);
+    require_condition(halves[0] == -1 && halves[1] == 12 && halves[2] == -12 && halves[3] == 11 &&
+                      !strcmp(preset, "custom"), "persisted tone survives a restart");
+
+    /* Invalid requests change nothing, in memory or on disk. */
+    {
+        static const char *const bad[] = {
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":6.5,\"low_mid\":0,\"high_mid\":0,\"treble\":0}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":1.25,\"low_mid\":0,\"high_mid\":0,\"treble\":0}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":1,\"low_mid\":0,\"high_mid\":0}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":\"1\",\"low_mid\":0,\"high_mid\":0,\"treble\":0}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":1e0,\"low_mid\":0,\"high_mid\":0,\"treble\":0}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":1,\"low_mid\":0,\"high_mid\":0,\"treble\":0,\"preset\":\"rock\"}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{\"boost_db\":4}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{\"boost_db\":3.5}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{\"boost_db\":-3}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{}}"
+        };
+        size_t k;
+        for (k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+            mock_audiod_ipc(&audio, bad[k], response, sizeof(response));
+            require_condition(strstr(response, "\"ok\":false") != NULL && audio.eq_halves[0] == -1 &&
+                              audio.eq_halves[3] == 11 && !strcmp(audio.eq_preset, "custom") && audio.boost_db == 0,
+                              "invalid tone/boost rejected without change");
+            require_file(LE_TONE_RUNTIME_PATH, "schema=2\nbass_db=-0.50\nlow_mid_db=6.00\nhigh_mid_db=-6.00\ntreble_db=5.50\n",
+                         0640, "rejected request leaves tone.conf");
+            require_condition(access(LE_BOOST_RUNTIME_PATH, F_OK) != 0 && access(LE_BOOST_PATH, F_OK) != 0,
+                              "rejected request leaves no boost");
+        }
+    }
+
+    /* /run cleared, or a stray edit: the poll re-publishes the exact text. */
+    unlink(LE_TONE_RUNTIME_PATH);
+    audio.last_owner_eq_check_ms = 0;
+    owner_eq_reconcile(&audio, 1000);
+    require_file(LE_TONE_RUNTIME_PATH, "schema=2\nbass_db=-0.50\nlow_mid_db=6.00\nhigh_mid_db=-6.00\ntreble_db=5.50\n",
+                 0640, "missing tone.conf re-published");
+    write_file(LE_TONE_RUNTIME_PATH, "schema=1\nbass_db=0\ntreble_db=0\n");
+    owner_eq_reconcile(&audio, 1000 + VOLUME_GUARD_POLL_MS);
+    require_file(LE_TONE_RUNTIME_PATH, "schema=2\nbass_db=-0.50\nlow_mid_db=6.00\nhigh_mid_db=-6.00\ntreble_db=5.50\n",
+                 0640, "stale tone.conf corrected");
+
+    /* Boost: published, persisted, back to 0 removes both. */
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{\"boost_db\":3}}", response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.boost_db == 3, "boost 3 dB set");
+    require_file(LE_BOOST_RUNTIME_PATH, "schema=1\nboost_db=3\n", 0640, "boost.conf published");
+    require_file(LE_BOOST_PATH, "3\n", 0600, "boost persisted 0600");
+    require_no_temp(LE_MASTER_VOLUME_DIR, "boost.conf", "no temp file left beside boost.conf");
+    require_condition(owner_boost_load() == 3, "persisted boost survives a restart");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"boost_db\":3}") != NULL, "status reports the boost");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{\"boost_db\":6}}", response, sizeof(response));
+    require_file(LE_BOOST_RUNTIME_PATH, "schema=1\nboost_db=6\n", 0640, "boost 6 dB published");
+    unlink(LE_BOOST_RUNTIME_PATH);
+    owner_eq_reconcile(&audio, 1000 + 2 * VOLUME_GUARD_POLL_MS);
+    require_file(LE_BOOST_RUNTIME_PATH, "schema=1\nboost_db=6\n", 0640, "missing boost.conf re-published");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{\"boost_db\":0}}", response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.boost_db == 0, "boost off");
+    require_condition(access(LE_BOOST_RUNTIME_PATH, F_OK) != 0 && access(LE_BOOST_PATH, F_OK) != 0,
+                      "0 dB removes boost.conf and the persisted choice");
+    write_file(LE_BOOST_RUNTIME_PATH, "schema=1\nboost_db=6\n");
+    owner_eq_reconcile(&audio, 1000 + 3 * VOLUME_GUARD_POLL_MS);
+    require_condition(access(LE_BOOST_RUNTIME_PATH, F_OK) != 0, "a stray boost.conf is removed at 0 dB");
+
+    /* Start: the persisted choice is published before anything else. */
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":-2,\"low_mid\":1,\"high_mid\":4,\"treble\":1,\"preset\":\"vocal\"}}",
+                    response, sizeof(response));
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_boost\",\"args\":{\"boost_db\":3}}", response, sizeof(response));
+    unlink(LE_TONE_RUNTIME_PATH); unlink(LE_BOOST_RUNTIME_PATH);
+    audio_init(&audio, 97);
+    require_condition(!strcmp(audio.eq_preset, "vocal") && audio.eq_halves[2] == 8 && audio.boost_db == 3,
+                      "start restores the persisted equaliser and boost");
+    require_file(LE_TONE_RUNTIME_PATH, vocal_conf, 0640, "start publishes tone.conf");
+    require_file(LE_BOOST_RUNTIME_PATH, "schema=1\nboost_db=3\n", 0640, "start publishes boost.conf");
+    audio_destroy(&audio);
+
+    /* Flat removes tone.conf and the persisted choice. */
+    memset(&audio, 0, sizeof(audio));
+    owner_tone_load(audio.eq_halves, audio.eq_preset);
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_tone\",\"args\":{\"bass\":0,\"low_mid\":0,\"high_mid\":0,\"treble\":0,\"preset\":\"custom\"}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && !strcmp(audio.eq_preset, "flat"), "all zero is flat");
+    require_condition(access(LE_TONE_RUNTIME_PATH, F_OK) != 0 && access(LE_TONE_PATH, F_OK) != 0,
+                      "flat removes tone.conf and the persisted choice");
+    write_file(LE_TONE_RUNTIME_PATH, vocal_conf);
+    owner_eq_reconcile(&audio, 1000 + 4 * VOLUME_GUARD_POLL_MS);
+    require_condition(access(LE_TONE_RUNTIME_PATH, F_OK) != 0, "a stray tone.conf is removed while flat");
+
+    /* Persisted content is validated strictly: anything off means flat / 0 dB. */
+    {
+        static const char *const bad_tone[] = {
+            "schema=2\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",            /* no preset */
+            "preset=custom\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",       /* no schema */
+            "preset=custom\nschema=1\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",
+            "preset=rock\nschema=2\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",
+            "preset=custom\nschema=2\nbass_db=7.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",
+            "preset=custom\nschema=2\nbass_db=1.25\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",
+            "preset=custom\nschema=2\nbass_db=\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",
+            "preset=custom\nschema=2\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\n",
+            "preset=custom\nschema=2\nbass_db=1.00\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\n",
+            "preset=custom\nschema=2\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00\nextra=1\n",
+            "preset=custom\nschema=2\nbass_db=1.00\nlow_mid_db=0.00\nhigh_mid_db=0.00\ntreble_db=0.00",
+            ""
+        };
+        static const char *const bad_boost[] = { "4\n", "3.0\n", "33\n", " 3\n", "\n", "3\n\n" };
+        size_t k;
+        for (k = 0; k < sizeof(bad_tone) / sizeof(bad_tone[0]); ++k) {
+            write_file(LE_TONE_PATH, bad_tone[k]);
+            owner_tone_load(halves, preset);
+            require_condition(le_eq_is_flat(halves) && !strcmp(preset, "flat"), "malformed persisted tone means flat");
+        }
+        for (k = 0; k < sizeof(bad_boost) / sizeof(bad_boost[0]); ++k) {
+            write_file(LE_BOOST_PATH, bad_boost[k]);
+            require_condition(owner_boost_load() == 0, "malformed persisted boost means 0 dB");
+        }
+        write_file(LE_TONE_PATH, "treble_db=1\nschema=2\nhigh_mid_db=-1.5\npreset=warm\nlow_mid_db=0\nbass_db=2.50\n");
+        owner_tone_load(halves, preset);
+        require_condition(halves[0] == 5 && halves[1] == 0 && halves[2] == -3 && halves[3] == 2 &&
+                          !strcmp(preset, "custom"), "any key order; preset canonicalised");
+    }
+    unlink(LE_TONE_PATH); unlink(LE_BOOST_PATH);
+    unlink(LE_TONE_RUNTIME_PATH); unlink(LE_BOOST_RUNTIME_PATH);
+}
+
 /* Music volume leveling: persisted owner choice drives the engine's RAM flag. */
 static void test_volume_leveling(void)
 {
@@ -920,6 +1230,8 @@ int main(void)
     test_logical_restart_input();
     test_logical_master_status();
     test_volume_leveling();
+    test_reply_volume();
+    test_owner_eq();
     test_airplay_restore();
     test_airplay_restart_recovery();
     test_pending_restore_beats_stale_config();

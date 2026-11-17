@@ -32,7 +32,7 @@ else:
 flags=[os.environ.get('CC','cc'),'-std=c99','-D_POSIX_C_SOURCE=200809L','-O1','-g','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-I'+str(M/'include')]
 if a.sanitize:flags+=['-fsanitize=address,undefined','-fno-omit-frame-pointer']
 libs=[str(M/'lib'/('lib'+name+'.a')) for name in ['mbedtls','mbedx509','mbedcrypto']]+['-lm']
-common=['src/adapter/esphome_proto.c','src/adapter/esphome_frame.c','src/adapter/esphome_noise.c','src/adapter/esphome_playback.c','src/adapter/radio_resample.c','src/adapter/mdns_client.c','src/adapter/mdns_lease.c','src/config_store.c','src/json.c']
+common=['src/adapter/esphome_proto.c','src/adapter/esphome_ble_proxy.c','src/adapter/esphome_frame.c','src/adapter/esphome_noise.c','src/adapter/esphome_playback.c','src/adapter/radio_resample.c','src/adapter/mdns_client.c','src/adapter/mdns_lease.c','src/adapter/voice_ns.c','src/config_store.c','src/json.c']
 def run(argv,env=None):
  print('+',' '.join(map(str,argv)),flush=True);subprocess.run(list(map(str,argv)),cwd=ROOT,env=env,check=True,timeout=90)
 with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as directory:
@@ -59,6 +59,14 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  run([sys.executable,'tests/test_esphome_ffmpeg_wav.py','--http-fixture',d/'http'],env)
  run([sys.executable,'tests/test_esphomed.py'],env)
  run([sys.executable,'tests/test_esphomed_native_lifecycle.py'],env)
+ run([sys.executable,'tests/test_esphomed_light.py'],env)
+ run([sys.executable,'tests/test_esphomed_buttons.py'],env)
+ run([sys.executable,'tests/test_esphomed_activity.py'],env)
+ run([sys.executable,'tests/test_esphomed_text_sensors.py'],env)
+ run([sys.executable,'tests/test_esphomed_room_level.py'],env)
+ run([sys.executable,'tests/test_esphomed_led_light.py'],env)
+ run([sys.executable,'tests/test_esphomed_settings.py'],env)
+ run([sys.executable,'tests/test_esphomed_services.py'],env)
  timerd=d/'libreecho-timerd';run(flags+['-Isrc','src/adapter/timerd.c','src/adapter/timer_schedule.c','src/adapter/adapter_client.c','src/adapter/adapter_server.c','src/json.c','src/log.c']+libs+['-o',timerd])
  run([sys.executable,'tests/test_esphomed_final_spec.py'],dict(env,TIMERD_BIN=str(timerd),ESPHOMED_PRIVATE_NAMESPACE='1'))
  run([a.crypto_python,'tests/test_esphomed_noise.py','NoiseFixture.test_noise_provision_persist_reconnect_wrong_key_and_plain_refusal','NoiseFixture.test_noise_replay_is_rejected','KeyedDaemon'],env)
@@ -66,8 +74,13 @@ with tempfile.TemporaryDirectory(prefix='esphomed-suite-',dir=scratch) as direct
  run([sys.executable,'tests/test_esphomed_watchdog.py'],env);run([sys.executable,'tests/test_esphomed_init.py'],env)
  run([sys.executable,'tests/test_esphome_health.py'],env)
  if not a.host_only:
-  run([a.aio_python,'tests/test_esphomed_aio.py','PinnedFixture.test_pinned_plain_real_login_entities_ping_disconnect','PinnedFixture.test_pinned_noise_provision_reconnect_wrong_key'],env)
+  run([a.aio_python,'tests/test_esphomed_aio.py','PinnedFixture.test_pinned_plain_real_login_entities_ping_disconnect','PinnedFixture.test_pinned_noise_provision_reconnect_wrong_key','PinnedFixture.test_pinned_client_time_zone_reaches_config_when_followed','PinnedServerWake.test_pinned_server_wake_streams_and_stops','PinnedBluetoothProxy.test_pinned_enabled_bluetooth_proxy_reports_flags'],env)
   run([a.aio_python,'tests/test_esphomed_media_state.py'],env)
+  run([a.aio_python,'tests/test_esphomed_light_aio.py'],env)
+  run([a.aio_python,'tests/test_esphomed_text_sensors_aio.py'],env)
+  run([a.aio_python,'tests/test_esphomed_led_light_aio.py'],env)
+  run([a.aio_python,'tests/test_esphomed_buttons_aio.py'],env)
+  run([a.aio_python,'tests/test_esphomed_services_aio.py'],env)
   # Compare approved pinned serialization without overwriting checked-in evidence.
   run([a.aio_python,'tests/test_esphomed_generate_goldens.py','--check'],env)
  else:print('NOT RUN: pinned aioesphomeapi interoperability and pinned golden regeneration (--host-only)',flush=True)

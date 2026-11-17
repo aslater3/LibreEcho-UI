@@ -68,7 +68,7 @@ jobs:
           prefix="$RUNNER_TEMP/mbedtls"
           git clone \
             --depth 1 \
-            --branch mbedtls-3.6.4 \
+            --branch mbedtls-3.6.7 \
             --recurse-submodules \
             --shallow-submodules \
             https://github.com/Mbed-TLS/mbedtls.git \
@@ -132,7 +132,7 @@ jobs:
           prefix="$RUNNER_TEMP/mbedtls"
           git clone \
             --depth 1 \
-            --branch mbedtls-3.6.4 \
+            --branch mbedtls-3.6.7 \
             --recurse-submodules \
             --shallow-submodules \
             https://github.com/Mbed-TLS/mbedtls.git \

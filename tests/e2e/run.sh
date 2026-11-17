@@ -101,7 +101,7 @@ export LIBREECHO_E2E_AUTH_URL="$AUTH_URL" LIBREECHO_E2E_AUTH_USER LIBREECHO_E2E_
 #
 # LIBREECHO_E2E_SUITES narrows the list (the WebKit job runs baby-monitor on its
 # own) and LIBREECHO_E2E_BROWSER selects the engine inside baby-monitor.cjs.
-SUITES=${LIBREECHO_E2E_SUITES:-"smoke features-radio baby-monitor feature-batch"}
+SUITES=${LIBREECHO_E2E_SUITES:-"smoke features-radio baby-monitor equaliser feature-batch"}
 for suite in $SUITES; do
   if ! LIBREECHO_E2E_URL="$URL" node "tests/e2e/$suite.cjs"; then
     echo "--- libreecho-web E2E server log ($suite) ---" >&2

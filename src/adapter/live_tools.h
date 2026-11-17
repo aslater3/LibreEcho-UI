@@ -29,6 +29,13 @@ struct le_live_tool_environment {
     char audio_socket[128];
     char media_status_path[160];
     char time_status_path[160];
+    /*
+     * Home Assistant REST origin (http://host[:port]) and the file holding its
+     * long-lived token.  An empty URL leaves every ha.* tool disabled, which is
+     * the default: nothing reaches Home Assistant until the owner sets one.
+     */
+    char ha_url[160];
+    char ha_token_path[160];
     /* Upper bound for any single sibling-daemon call. */
     int timeout_ms;
 };
