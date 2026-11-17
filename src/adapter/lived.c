@@ -21,6 +21,7 @@
 
 #include "adapter.h"
 #include "live_audio_out.h"
+#include "live_ha.h"
 #include "live_ring.h"
 #include "live_session.h"
 #include "live_tools.h"
@@ -89,6 +90,9 @@ struct lived_state {
     char control_socket[LE_ADAPTER_PATH_MAX];
     char audio_bus[LE_ADAPTER_PATH_MAX];
     char mock_scenario[64];
+    /* Home Assistant for the ha.* tools; empty URL keeps them disabled. */
+    char ha_url[LE_LIVE_HA_URL_MAX];
+    char ha_token_path[160];
     unsigned int speaker_rate;
     int enabled;
 
@@ -733,7 +737,8 @@ static void usage(const char *program)
             "[--wake-preroll-ms N] [--barge-in-rms N] [--barge-in-factor N] "
             "[--model NAME] [--voice NAME] [--credentials PATH] "
             "[--transport realtime|mock] [--live-url URL] [--live-ca PATH] "
-            "[--mock-scenario NAME] [--enable]\n",
+            "[--mock-scenario NAME] [--ha-url URL] [--ha-token-file PATH] "
+            "[--enable]\n",
             program);
 }
 
@@ -832,6 +837,21 @@ int main(int argc, char **argv)
             state.config.url = NEXT();
         } else if (!strcmp(option, "--live-ca") && value) {
             state.config.ca_path = NEXT();
+        } else if (!strcmp(option, "--ha-url") && value) {
+            /* Refuse rather than truncate: a shortened address would point the
+               token at a different host. */
+            if (strlen(value) >= sizeof(state.ha_url)) {
+                usage(argv[0]);
+                return 2;
+            }
+            snprintf(state.ha_url, sizeof(state.ha_url), "%s", NEXT());
+        } else if (!strcmp(option, "--ha-token-file") && value) {
+            if (strlen(value) >= sizeof(state.ha_token_path)) {
+                usage(argv[0]);
+                return 2;
+            }
+            snprintf(state.ha_token_path, sizeof(state.ha_token_path), "%s",
+                     NEXT());
         } else if (!strcmp(option, "--mock-scenario") && value) {
             state.config.mock_scenario = NEXT();
         } else {
@@ -848,6 +868,10 @@ int main(int argc, char **argv)
     le_live_ring_reset(&state.ring);
     le_live_audio_out_init(&state.output, state.audio_bus, state.speaker_rate);
     le_live_tools_init(&state.tools);
+    snprintf(state.tools.ha_url, sizeof(state.tools.ha_url), "%s", state.ha_url);
+    if (state.ha_token_path[0])
+        snprintf(state.tools.ha_token_path, sizeof(state.tools.ha_token_path),
+                 "%s", state.ha_token_path);
     le_live_session_init(&state.session, &state.ring, &state.config,
                          &lived_session_ops, &state);
     /*

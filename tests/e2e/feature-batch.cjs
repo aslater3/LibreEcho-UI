@@ -177,7 +177,7 @@ async function caseLedSave(browser) {
   if (check(await page.isEnabled('#save-led-idle'), 'editing idle behaviour enables its Save button (real browser click)')) {
     await page.click('#save-led-idle');
     await page.waitForResponse(r => r.url().includes('/api/v1/led/idle') && r.request().method() === 'PUT', { timeout: 5000 });
-    checkEqual(lastBody(requests, '/led/idle', 'PUT'), JSON.stringify({ mode: 'always' }), 'saving idle behaviour PUTs the mode');
+    checkEqual(lastBody(requests, '/led/idle', 'PUT'), JSON.stringify({ mode: 'always', auto_off_minutes: 0 }), 'saving idle behaviour PUTs the mode and auto-off time');
     const led = await (await context.request.get(serverGet('/api/v1/led'))).json();
     checkEqual(led.data.idle_mode, 'always', 'the device reflects the saved idle mode');
   }

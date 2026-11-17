@@ -10,6 +10,7 @@
 #include "version.h"
 #include "factory_reset.h"
 #include "service_env.h"
+#include "owner_eq.h"
 
 #include <arpa/inet.h>
 #include <errno.h>
@@ -512,6 +513,16 @@ static int adapter_command_timeout(const char *socket_path, const char *command,
     if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
         !strcmp(command, "add") && !strcmp(response, "no free timer slots"))
         return LE_BUSY;
+    /* Alarms: a full schedule and an unset clock are both "not now" (409),
+       and an instant already past is the caller's mistake (400). */
+    if (rc == LE_ADAPTER_ERR_REJECTED && command && response &&
+        !strcmp(command, "add_alarm")) {
+        if (!strcmp(response, "no free timer slots") ||
+            !strcmp(response, "clock not synchronised yet"))
+            return LE_BUSY;
+        if (!strcmp(response, "time out of range"))
+            return LE_INVALID;
+    }
     /*
      * The recovery secret commands carry a semantic refusal from networkd --
      * "recovery password is unavailable in this mode" while the captive AP
@@ -1260,6 +1271,50 @@ static int network(struct le_backend *b, struct le_network_state *o)
     return LE_OK;
 }
 
+static void read_microphone_mix(struct le_audio_state *o);
+
+/* The owner equaliser and boost from audiod's status.  An older audiod
+ * reports neither: the sound is then stock (flat, 0 dB), which is also what
+ * any value that does not parse exactly falls back to. */
+static void read_owner_eq(const char *response, struct le_audio_state *o)
+{
+    const char *start = strstr(response, "\"eq\":{"), *end, *p, *q;
+    int halves[LE_EQ_BANDS], band, v;
+    char preset[LE_EQ_PRESET_MAX];
+    size_t len;
+    const char *canonical;
+
+    memset(o->eq_halves, 0, sizeof(o->eq_halves));
+    snprintf(o->eq_preset, sizeof(o->eq_preset), "flat");
+    o->boost_db = 0;
+    if (json_get_int(response, "boost_db", &v) > 0 && le_boost_valid(v))
+        o->boost_db = v;
+    if (!start)
+        return;
+    start += 5;
+    end = strchr(start, '}');
+    if (!end)
+        return;
+    len = (size_t)(end - start) + 1;
+    for (band = 0; band < LE_EQ_BANDS; band++)
+        if (le_eq_find_number(start, len, le_eq_band_name(band), &halves[band]) != 1)
+            return;
+    p = strstr(start, "\"preset\":\"");
+    if (!p || p > end)
+        return;
+    p += 10;
+    q = strchr(p, '"');
+    if (!q || q > end || (size_t)(q - p) >= sizeof(preset))
+        return;
+    memcpy(preset, p, (size_t)(q - p));
+    preset[q - p] = '\0';
+    canonical = le_eq_canonical_preset(preset, halves);
+    if (!canonical)
+        return;
+    memcpy(o->eq_halves, halves, sizeof(o->eq_halves));
+    snprintf(o->eq_preset, sizeof(o->eq_preset), "%s", canonical);
+}
+
 static int audio(struct le_backend *b, struct le_audio_state *o)
 {
     char response[LE_ADAPTER_MSG_MAX];
@@ -1276,8 +1331,16 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
     if (json_get_bool(response, "muted", &v) > 0) { o->muted = v; found = 1; }
     /* Older audiod builds do not report it; leveling is then off (default). */
     o->volume_leveling = 0;
+    /* Older audiod builds have no reply level; replies then follow the master. */
+    o->reply_volume = o->volume; o->reply_volume_custom = 0;
+    if (json_get_bool(response, "reply_volume_custom", &v) > 0 && v &&
+        json_get_int(response, "reply_volume", &v) > 0 && v >= 0 && v <= 100) {
+        o->reply_volume = v; o->reply_volume_custom = 1;
+    }
+    read_owner_eq(response, o);
     if (json_get_bool(response, "volume_leveling", &v) > 0) o->volume_leveling = v;
     else if (json_get_bool(response, "microphone_muted", &v) > 0) { o->muted = v; found = 1; }
+    read_microphone_mix(o);
     if (json_get_bool(response, "startup_sound", &v) > 0) { o->startup_sound = v; found = 1; }
     if (json_get_bool(response, "amplifier_on", &v) > 0) { o->amplifier_on = v; found = 1; }
     if (json_get_bool(response, "output_available", &v) > 0) { o->output_available = v; found = 1; }
@@ -1320,10 +1383,18 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
 static int volume(struct le_backend *b, int value)
 {
     char args[64];
+    int rc;
     (void)b;
     if (value < 0 || value > 100) return LE_INVALID;
     snprintf(args, sizeof(args), "{\"volume\":%d}", value);
-    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume", args);
+    rc = adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume", args);
+    if (rc != LE_OK)
+        return rc;
+    /* A volume change from the web UI is activity for the LED idle auto-off
+       (#323). Best effort: ledd being busy or absent never fails the change. */
+    (void)adapter_json_command_timeout(LE_ADAPTER_LED_SOCK, "activity",
+                                       "{\"source\":\"volume\"}", 200);
+    return LE_OK;
 }
 
 static int gain(struct le_backend *b, int value)
@@ -1349,6 +1420,57 @@ static int volume_leveling(struct le_backend *b, int enabled)
     (void)b;
     snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_volume_leveling", args);
+}
+
+static int reply_volume(struct le_backend *b, int custom, int value)
+{
+    char args[32];
+    (void)b;
+    if (custom && (value < 0 || value > 100)) return LE_INVALID;
+    if (custom) snprintf(args, sizeof(args), "{\"volume\":%d}", value);
+    else snprintf(args, sizeof(args), "{\"custom\":false}");
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_reply_volume", args);
+}
+
+/* The live mixing mode is micd's; an unreachable micd reports the default. */
+static void read_microphone_mix(struct le_audio_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char mode[sizeof(o->microphone_mix)];
+    int lane;
+
+    strcpy(o->microphone_mix, "beamformer");
+    o->microphone_lane = -1;
+    if (adapter_command(LE_ADAPTER_MIC_SOCK, "status", NULL,
+                        response, sizeof(response)) != LE_OK)
+        return;
+    if (json_get_string(response, "microphone_mix", mode, sizeof(mode)) > 0)
+        strcpy(o->microphone_mix, mode);
+    if (json_get_int(response, "microphone_lane", &lane) > 0 &&
+        lane >= -1 && lane <= 6)
+        o->microphone_lane = lane;
+}
+
+static int microphone_mix(struct le_backend *b, const char *mode)
+{
+    char args[48];
+    (void)b;
+    if (!mode || (strcmp(mode, "beamformer") && strcmp(mode, "average") &&
+                  strcmp(mode, "single")))
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
+    return adapter_json_command(LE_ADAPTER_MIC_SOCK, "set_mix", args);
+}
+
+/* -1 is automatic; 0-6 pick one array microphone for the single mode. */
+static int microphone_lane(struct le_backend *b, int lane)
+{
+    char args[32];
+    (void)b;
+    if (lane < -1 || lane > 6)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"lane\":%d}", lane);
+    return adapter_json_command(LE_ADAPTER_MIC_SOCK, "set_lane", args);
 }
 
 static int tone(struct le_backend *b)
@@ -1561,6 +1683,16 @@ static int led(struct le_backend *b, struct le_led_state *o)
             o->idle_mode = 2;
         else
             o->idle_mode = 0;
+    }
+    if (json_object(response, "idle_auto_off", object, sizeof(object))) {
+        int minutes = 0, asleep = 0;
+
+        if (json_get_int(object, "minutes", &minutes) > 0 &&
+            (minutes == 0 || minutes == 5 || minutes == 10 ||
+             minutes == 30 || minutes == 60))
+            o->idle_auto_off_minutes = minutes;
+        if (json_get_bool(object, "asleep", &asleep) > 0)
+            o->idle_asleep = asleep;
     }
     if (json_object(response, "sleep_light", object, sizeof(object))) {
         if (json_get_string(object, "mode", o->sleep_light.mode,
@@ -2365,9 +2497,32 @@ static int timer_entry_parse(const char *entry, struct le_timer_entry *item)
     if (json_get_string_top_level(entry, "label", item->label,
                                   sizeof(item->label)) != 1)
         return 0;
+    /* The repeat fields arrived with weekly alarms. Absent means a countdown
+       or a one-off alarm; present values must be in range. */
+    {
+        long long days = 0, hour = -1, minute = -1;
+        int has_days, has_hour, has_minute;
+
+        has_days = json_get_int64_top_level(entry, "repeat_days", &days);
+        has_hour = json_get_int64_top_level(entry, "hour", &hour);
+        has_minute = json_get_int64_top_level(entry, "minute", &minute);
+        if ((has_days != 1 && has_days != 0) || (has_hour != 1 && has_hour != 0) ||
+            (has_minute != 1 && has_minute != 0))
+            return 0;
+        if (has_days == 1 && (days < 0 || days > 0x7fLL))
+            return 0;
+        if (has_hour == 1 && (hour < -1 || hour > 23))
+            return 0;
+        if (has_minute == 1 && (minute < -1 || minute > 59))
+            return 0;
+        item->repeat_days = has_days == 1 ? (unsigned)days : 0U;
+        item->hour = has_hour == 1 ? (int)hour : -1;
+        item->minute = has_minute == 1 ? (int)minute : -1;
+    }
     if (!timer_valid_utf8(item->label, strlen(item->label)))
         return 0;
-    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm")) ||
+    if ((strcmp(item->kind, "countdown") && strcmp(item->kind, "alarm") &&
+         strcmp(item->kind, "reminder")) ||
         (strcmp(item->state, "pending") && strcmp(item->state, "ringing")))
         return 0;
     item->id = (unsigned)id;
@@ -2490,6 +2645,152 @@ static int timer_add(struct le_backend *b, int seconds, const char *label,
     return LE_OK;
 }
 
+/* An alarm is a wall-clock instant; the daemon refuses it while the clock is
+   not credible, and that refusal arrives as an ordinary adapter error. */
+static int timer_add_alarm(struct le_backend *b, long long epoch,
+                           const char *label, unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    if (epoch < 1 || epoch > INT_MAX)
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args), "{\"epoch\":%lld,\"label\":\"%s\"}",
+             epoch, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add_alarm", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
+        *id = (unsigned)value;
+    return LE_OK;
+}
+
+/* A weekly alarm. The daemon computes the next occurrence on the device's
+   local clock, so DST and the timezone are handled in one place. */
+static int timer_add_repeat(struct le_backend *b, int hour, int minute,
+                            unsigned days, const char *label, unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 ||
+        !(days & 0x7fU) || (days & ~0x7fU))
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args),
+             "{\"hour\":%d,\"minute\":%d,\"days\":%u,\"label\":\"%s\"}",
+             hour, minute, days, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add_repeat", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
+        *id = (unsigned)value;
+    return LE_OK;
+}
+
+/* A spoken reminder at hour:minute. Zero days is a one-off. The daemon owns
+   the next-occurrence rule and the speaking; this only places the record. */
+static int timer_add_reminder(struct le_backend *b, int hour, int minute,
+                              unsigned days, const char *label, unsigned *id)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[256];
+    char escaped[128];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    if (hour < 0 || hour > 23 || minute < 0 || minute > 59 || (days & ~0x7fU))
+        return LE_INVALID;
+    json_escape(escaped, sizeof(escaped), label ? label : "");
+    snprintf(args, sizeof(args),
+             "{\"hour\":%d,\"minute\":%d,\"days\":%u,\"label\":\"%s\"}",
+             hour, minute, days, escaped);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "add_reminder", args, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "id", &value) != 1 || value <= 0 ||
+        value > UINT_MAX)
+        return LE_IO;
+    if (id)
+        *id = (unsigned)value;
+    return LE_OK;
+}
+
+/* Snooze every ringing alarm. The count tells the caller whether anything
+   was ringing, so a press with nothing to snooze can do something else. */
+static int timer_snooze(struct le_backend *b, int *snoozed)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "snooze", "{}", response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "snoozed", &value) != 1 ||
+        value < 0 || value > INT_MAX)
+        return LE_IO;
+    if (snoozed)
+        *snoozed = (int)value;
+    return LE_OK;
+}
+
+/* Sunrise lead time (UI #447). timerd owns the setting and validates it. */
+static int timer_sunrise_get(struct le_backend *b, int *minutes)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    long long value = 0;
+    int rc;
+    (void)b;
+
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "sunrise_get", "{}", response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_int64_top_level(response, "lead_minutes", &value) != 1 ||
+        value < 0 || value > INT_MAX)
+        return LE_IO;
+    if (minutes)
+        *minutes = (int)value;
+    return LE_OK;
+}
+
+static int timer_sunrise_set(struct le_backend *b, int minutes)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    char args[48];
+    int rc;
+    (void)b;
+
+    if (minutes != 0 && (minutes < 5 || minutes > 30))
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"lead_minutes\":%d}", minutes);
+    rc = adapter_command(LE_ADAPTER_TIMER_SOCK, "sunrise_set", args, response,
+                         sizeof(response));
+    return rc;
+}
+
 static int timer_cancel(struct le_backend *b, unsigned id)
 {
     char response[LE_ADAPTER_MSG_MAX];
@@ -2605,6 +2906,87 @@ static int airplay_set(struct le_backend *b, int enabled)
     snprintf(args, sizeof(args), "{\"enabled\":%s}",
              enabled ? "true" : "false");
     return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_enabled", args);
+}
+
+/* The Sendspin player's own control socket (status and pairing token). */
+#define LE_SENDSPIN_SOCK "/run/libreecho/sendspin.sock"
+
+static int sendspin(struct le_backend *b, struct le_sendspin_state *o)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+    memset(o, 0, sizeof(*o));
+    rc = adapter_command(LE_ADAPTER_AIRPLAY_SOCK, "status", NULL,
+                         response, sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    (void)json_get_bool(response, "sendspin_available", &o->installed);
+    (void)json_get_bool(response, "sendspin_enabled", &o->enabled);
+    (void)json_get_bool(response, "sendspin_running", &o->running);
+    /* The owner's setting is kept by the supervisor, so it reads even while stopped. */
+    (void)json_get_bool(response, "sendspin_unpaired_access", &o->unpaired_access);
+    if (!o->running ||
+        adapter_command(LE_SENDSPIN_SOCK, "status", NULL, response,
+                        sizeof(response)) != LE_OK)
+        return LE_OK;
+    {
+        char trust[16] = "";
+        (void)json_get_bool(response, "listening", &o->listening);
+        (void)json_get_bool(response, "discoverable", &o->discoverable);
+        (void)json_get_bool(response, "connected", &o->connected);
+        (void)json_get_bool(response, "streaming", &o->streaming);
+        (void)json_get_bool(response, "time_synced", &o->time_synced);
+        (void)json_get_bool(response, "muted", &o->muted);
+        (void)json_get_int(response, "volume", &o->volume);
+        (void)json_get_string(response, "trust", trust, sizeof(trust));
+        (void)json_get_string(response, "server", o->server, sizeof(o->server));
+        o->paired = o->connected && !strcmp(trust, "paired");
+    }
+    return LE_OK;
+}
+
+static int sendspin_set(struct le_backend *b, int enabled)
+{
+    char args[32];
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_sendspin_enabled", args);
+}
+
+static int sendspin_pairing_token(struct le_backend *b, char *out, size_t size)
+{
+    char response[LE_ADAPTER_MSG_MAX];
+    int rc;
+    (void)b;
+    rc = adapter_command(LE_SENDSPIN_SOCK, "pairing_token", NULL, response,
+                         sizeof(response));
+    if (rc != LE_OK)
+        return rc;
+    if (json_get_string(response, "token", out, size) < 1 || strncmp(out, "SP:", 3)) {
+        memset(out, 0, size);
+        return LE_IO;
+    }
+    memset(response, 0, sizeof(response));
+    return LE_OK;
+}
+
+static int sendspin_reset_pairing(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "reset_sendspin_pairing", "{}");
+}
+
+static int sendspin_set_unpaired(struct le_backend *b, int enabled)
+{
+    char args[32];
+    (void)b;
+    if (enabled != 0 && enabled != 1)
+        return LE_INVALID;
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    return adapter_json_command(LE_ADAPTER_AIRPLAY_SOCK, "set_sendspin_unpaired", args);
 }
 
 static int playback(struct le_backend *b, struct le_playback_state *o)
@@ -3042,15 +3424,22 @@ static int noise_start_ex(struct le_backend *b, const struct le_noise_request *r
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "noise_start", args);
 }
 
-static int led_idle_mode(struct le_backend *b, const char *mode)
+static int led_idle_mode(struct le_backend *b, const char *mode, int auto_off)
 {
-    char args[64];
+    char args[96];
 
     (void)b;
     if (!mode || (strcmp(mode, "off") && strcmp(mode, "indicator") &&
                   strcmp(mode, "always")))
         return LE_INVALID;
-    snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
+    if (auto_off != -1 && auto_off != 0 && auto_off != 5 && auto_off != 10 &&
+        auto_off != 30 && auto_off != 60)
+        return LE_INVALID;
+    if (auto_off >= 0)
+        snprintf(args, sizeof(args),
+                 "{\"mode\":\"%s\",\"auto_off_minutes\":%d}", mode, auto_off);
+    else
+        snprintf(args, sizeof(args), "{\"mode\":\"%s\"}", mode);
     return adapter_json_command(LE_ADAPTER_LED_SOCK, "set_idle_mode", args);
 }
 
@@ -3125,6 +3514,59 @@ static int recovery_stop(struct le_backend *b)
     return adapter_json_command(LE_ADAPTER_NETWORK_SOCK, "recovery_stop", NULL);
 }
 
+/*
+ * Do not disturb. audiod owns the silence (chimes, press tones, samples and
+ * wake chirps; alarms pass) and persists the switch; esphomed reads the same
+ * flag for Home Assistant announcements. The ring shows the saved
+ * do-not-disturb theme as a steady pattern owned by "dnd", so the saved ring
+ * colour is never overwritten and the pattern clears when the switch is off.
+ */
+static int do_not_disturb(struct le_backend *b, int enabled)
+{
+    char args[256];
+    struct le_led_state led_state;
+    int rc;
+
+    snprintf(args, sizeof(args), "{\"enabled\":%s}", enabled ? "true" : "false");
+    rc = adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_do_not_disturb", args);
+    if (rc != LE_OK)
+        return rc;
+    if (!enabled) {
+        (void)adapter_json_command(LE_ADAPTER_LED_SOCK, "pattern",
+                                   "{\"name\":\"stop\",\"owner\":\"dnd\"}");
+        return LE_OK;
+    }
+    /* The sound is already silenced; a missing ring is reported by the log
+     * of ledd, not as a failed switch. */
+    if (led(b, &led_state) != LE_OK)
+        return LE_OK;
+    snprintf(args, sizeof(args),
+             "{\"name\":\"solid\",\"r\":%u,\"g\":%u,\"b\":%u,"
+             "\"brightness\":%d,\"repeats\":0,\"owner\":\"dnd\"}",
+             led_state.dnd.r, led_state.dnd.g, led_state.dnd.b,
+             led_state.dnd.brightness);
+    (void)adapter_json_command(LE_ADAPTER_LED_SOCK, "pattern", args);
+    return LE_OK;
+}
+
+/* Owner equaliser and speaker boost: audiod persists them and publishes the
+ * engine's tone.conf / boost.conf. */
+static int owner_eq(struct le_backend *b, const char *preset, const int *halves)
+{
+    char args[160];
+    (void)b;
+    if (le_eq_json(args, sizeof(args), preset, halves) < 0) return LE_INVALID;
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_tone", args);
+}
+
+static int speaker_boost(struct le_backend *b, int db)
+{
+    char args[32];
+    (void)b;
+    snprintf(args, sizeof(args), "{\"boost_db\":%d}", db);
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_boost", args);
+}
+
 static const struct le_backend_ops ops = {
     destroy, status, device,
     audio, volume, gain, mute, tone, tts_voice, announce, stop_speech,
@@ -3141,12 +3583,20 @@ static const struct le_backend_ops ops = {
     spotify, spotify_set,
     light,
     sound_sample,
-    timers, timer_add, timer_cancel, timer_dismiss,
+    timers, timer_add, timer_cancel, timer_dismiss, timer_add_alarm,
     noise_start_ex, led_idle_mode, led_sleep,
     recovery_configure, recovery_prepare, recovery_stop,
     network_portal,
     linux_reboot_bootloader,
-    volume_leveling
+    volume_leveling,
+    sendspin, sendspin_set, sendspin_pairing_token, sendspin_reset_pairing,
+    reply_volume,
+    microphone_mix, microphone_lane,
+    timer_add_repeat, timer_snooze, timer_add_reminder,
+    timer_sunrise_get, timer_sunrise_set,
+    sendspin_set_unpaired,
+    do_not_disturb,
+    owner_eq, speaker_boost
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)

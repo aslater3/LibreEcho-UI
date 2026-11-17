@@ -4,10 +4,9 @@
 #include <string.h>
 
 /*
- * The MT8163 transport advertises packed S24_3LE with 16 useful bits in the
- * low part of each word.  Preserve that observed alignment when converting to
- * the S16 consumer contract; shifting right by eight would discard the live
- * microphone signal.
+ * The MT8163 transport advertises packed S24_3LE carrying 16 useful bits,
+ * left-justified in each word.  Convert to the S16 consumer contract by
+ * taking the top 16 bits (see below).
  */
 int16_t le_voice_unpack_s24_3le(const uint8_t sample[3])
 {
@@ -141,38 +140,6 @@ int16_t le_voice_mix_selected(
     return saturate_s16(divide_rounded(sum, count));
 }
 
-void le_voice_beamformer_init(struct le_voice_beamformer *beamformer)
-{
-    memset(beamformer, 0, sizeof(*beamformer));
-}
-
-int16_t le_voice_beamformer_sample(
-    struct le_voice_beamformer *beamformer,
-    const int16_t logical[LE_VOICE_LOGICAL_CHANNELS])
-{
-    int16_t delayed_early =
-        beamformer->early_delay[beamformer->write_index];
-
-    /*
-     * Directional calibration takes at 0, 90 and 270 degrees consistently
-     * measured logical lane 3 four 16 kHz samples behind lane 0.  A causal
-     * delay-and-sum therefore delays lane 0 by four samples and combines it
-     * with lane 3.  Keeping the delay state here makes the result independent
-     * of tinycap read boundaries.
-     */
-    beamformer->early_delay[beamformer->write_index] =
-        logical[LE_VOICE_BEAM_CHANNEL_EARLY];
-    beamformer->write_index =
-        (beamformer->write_index + 1U) % LE_VOICE_BEAM_DELAY_SAMPLES;
-    if (beamformer->primed < LE_VOICE_BEAM_DELAY_SAMPLES) {
-        ++beamformer->primed;
-        return 0;
-    }
-    return saturate_s16(divide_rounded(
-        (int64_t)delayed_early +
-        logical[LE_VOICE_BEAM_CHANNEL_LATE], 2));
-}
-
 void le_voice_highpass_init(struct le_voice_highpass *filter)
 {
     memset(filter, 0, sizeof(*filter));
@@ -220,29 +187,6 @@ void le_voice_process_interleaved(
             raw + frame * LE_VOICE_RAW_FRAME_BYTES,
             calibration, logical);
         mixed = le_voice_mix_selected(logical, selected_mask);
-        mono[frame] = highpass
-            ? le_voice_highpass_sample(highpass, mixed) : mixed;
-    }
-}
-
-void le_voice_process_beamformed_interleaved(
-    const uint8_t *raw,
-    size_t frames,
-    const struct le_voice_calibration *calibration,
-    struct le_voice_beamformer *beamformer,
-    struct le_voice_highpass *highpass,
-    int16_t *mono)
-{
-    size_t frame;
-
-    for (frame = 0; frame < frames; ++frame) {
-        int16_t logical[LE_VOICE_LOGICAL_CHANNELS];
-        int16_t mixed;
-
-        le_voice_decode_calibrated(
-            raw + frame * LE_VOICE_RAW_FRAME_BYTES,
-            calibration, logical);
-        mixed = le_voice_beamformer_sample(beamformer, logical);
         mono[frame] = highpass
             ? le_voice_highpass_sample(highpass, mixed) : mixed;
     }

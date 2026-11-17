@@ -41,6 +41,8 @@
 #define LE_ADAPTER_STT_SOCK       "/run/libreecho/stt.sock"
 #define LE_ADAPTER_AGENT_SOCK     "/run/libreecho/agent.sock"
 #define LE_ADAPTER_LIVE_SOCK      "/run/libreecho/live.sock"
+/* Datagram socket for hardware button gestures, read by libreecho-esphomed (#394). */
+#define LE_ADAPTER_BUTTON_EVENT_SOCK "/run/libreecho/button-events.sock"
 
 /* Result codes shared between client and daemon sides. */
 enum le_adapter_result {

@@ -143,6 +143,29 @@ async function renderWith(value) {
     assert(!panel.includes('Release tag') && !panel.includes('OTA SHA-256'),
         'a failed check displayed an identity');
 
+    // An installed update waiting for a restart offers the restart button, and
+    // the check that finds it already installed gets a readable label.
+    html = await renderWith(update({ check_status: 'error', check_error: 'update_already_pending',
+        pending_reboot: true, pending_version: '0.14.6', state: 'reboot-pending' }));
+    panel = updatePanel(html);
+    assert(panel.includes('Update installed — restart to finish') && !panel.includes('update_already_pending'),
+        'update_already_pending was not rendered as a readable label');
+    assert(panel.includes('Restart into update') && panel.includes('restart-update'),
+        'a pending reboot did not offer the Restart into update button');
+    // The confirm reads naturally for the restart button; other callers keep "<label> this LibreEcho device?".
+    const asked = [];
+    globalThis.confirm = q => { asked.push(q); return false; };
+    elements.get('restart-update').onclick();
+    vm.runInThisContext("power('reboot','Reboot')");
+    vm.runInThisContext("power('shutdown','Shut down')");
+    globalThis.confirm = () => false;
+    assert(asked[0] === 'Restart this LibreEcho device into the update?', `restart confirm was: ${asked[0]}`);
+    assert(asked[1] === 'Reboot this LibreEcho device?', `reboot confirm changed: ${asked[1]}`);
+    assert(asked[2] === 'Shut down this LibreEcho device?', `shutdown confirm changed: ${asked[2]}`);
+    html = await renderWith(update({}));
+    assert(!updatePanel(html).includes('Restart into update'),
+        'the restart button was offered without a pending reboot');
+
     // Recorded values are escaped, so a hostile record cannot inject markup.
     html = await renderWith(update({ resolved_release_tag: '<img src=x onerror=alert(1)>',
         ota_sha256: '"><script>alert(1)</script>' }));

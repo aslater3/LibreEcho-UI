@@ -1,0 +1,37 @@
+/* Optional unified theme (#188): the setup wizard's palette in the control
+   centre. Applied only when html[data-ui-theme="setup"] and the dark colour
+   mode is in use; the setup palette is dark-only, so light mode keeps the
+   classic light theme. Status colours (connected, unavailable, warnings) keep
+   their meaning and are not remapped. */
+html[data-ui-theme="setup"] body:not(.light){--bg:#090c12;--bg2:#0f131c;--panel:#121722;--panel2:#171d2a;--line:rgba(255,255,255,.1);--text:#f5f7fb;--muted:#9ba6b8;--green:#48d876;--green2:#2f9e55;background:radial-gradient(circle at 75% 15%,rgba(72,216,118,.08),transparent 32%),#090c12;color-scheme:dark}
+html[data-ui-theme="setup"] body:not(.light) .sidebar{border-right-color:rgba(255,255,255,.1);background:rgba(15,19,28,.92)}
+html[data-ui-theme="setup"] body:not(.light) .brand strong em{color:#48d876}
+html[data-ui-theme="setup"] body:not(.light) .brand-mark{border-color:#48d876;background:#121722}
+html[data-ui-theme="setup"] body:not(.light) .brand-mark span,html[data-ui-theme="setup"] body:not(.light) .brand-mark i,html[data-ui-theme="setup"] body:not(.light) .brand-mark b{border-color:#48d876}
+html[data-ui-theme="setup"] body:not(.light) .nav-item{color:#c9d0db}
+html[data-ui-theme="setup"] body:not(.light) .nav-item svg{stroke:#9ba6b8}
+html[data-ui-theme="setup"] body:not(.light) .nav-item:hover{background:rgba(255,255,255,.055)}
+html[data-ui-theme="setup"] body:not(.light) .nav-item.active{background:rgba(72,216,118,.1);color:#f5f7fb;border-left-color:#48d876}
+html[data-ui-theme="setup"] body:not(.light) .nav-item.active svg{stroke:#48d876}
+html[data-ui-theme="setup"] body:not(.light) .status-card,html[data-ui-theme="setup"] body:not(.light) .github-card{border-color:rgba(255,255,255,.1);background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));color:#c9d0db}
+html[data-ui-theme="setup"] body:not(.light) .github-card small{color:#9ba6b8}
+html[data-ui-theme="setup"] body:not(.light) .panel,html[data-ui-theme="setup"] body:not(.light) .shortcut{border-color:rgba(255,255,255,.1);background:linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018));border-radius:22px}
+html[data-ui-theme="setup"] body:not(.light) .shortcut:hover{border-color:#48d876;background:rgba(72,216,118,.07)}
+html[data-ui-theme="setup"] body:not(.light) .hero{background:radial-gradient(circle at 76% 24%,rgba(72,216,118,.12),transparent 46%),linear-gradient(145deg,rgba(255,255,255,.055),rgba(255,255,255,.018))}
+html[data-ui-theme="setup"] body:not(.light) .hero p,html[data-ui-theme="setup"] body:not(.light) .shortcut p,html[data-ui-theme="setup"] body:not(.light) .community p{color:#9ba6b8}
+html[data-ui-theme="setup"] body:not(.light) .outline-btn,html[data-ui-theme="setup"] body:not(.light) .icon-btn{border-color:rgba(255,255,255,.16);background:transparent;color:#f5f7fb;border-radius:999px}
+html[data-ui-theme="setup"] body:not(.light) .outline-btn:hover,html[data-ui-theme="setup"] body:not(.light) .icon-btn:hover{border-color:#48d876;background:rgba(72,216,118,.07)}
+html[data-ui-theme="setup"] body:not(.light) .primary-btn,html[data-ui-theme="setup"] body:not(.light) .save-btn{background:#48d876;border-color:transparent;color:#07130c;border-radius:999px;font-weight:800}
+html[data-ui-theme="setup"] body:not(.light) .secondary-btn{background:transparent;border-color:rgba(255,255,255,.16);color:#f5f7fb;border-radius:999px}
+html[data-ui-theme="setup"] body:not(.light) .field input,html[data-ui-theme="setup"] body:not(.light) .field select,html[data-ui-theme="setup"] body:not(.light) .field textarea{background:#171d2a;border-color:rgba(255,255,255,.1);color:#f5f7fb;border-radius:12px}
+html[data-ui-theme="setup"] body:not(.light) .field label,html[data-ui-theme="setup"] body:not(.light) .field>span{color:#c9d0db}
+html[data-ui-theme="setup"] body:not(.light) .metric,html[data-ui-theme="setup"] body:not(.light) .switch-row{border-bottom-color:rgba(255,255,255,.08)}
+html[data-ui-theme="setup"] body:not(.light) .metric svg{stroke:#9ba6b8}
+html[data-ui-theme="setup"] body:not(.light) .bar{background:rgba(255,255,255,.08)}
+html[data-ui-theme="setup"] body:not(.light) .bar i{background:#48d876}
+html[data-ui-theme="setup"] body:not(.light) .switch{background:#343b48}
+html[data-ui-theme="setup"] body:not(.light) .switch.on{background:#48d876}
+html[data-ui-theme="setup"] body:not(.light) .toast{background:#48d876;color:#07130c}
+html[data-ui-theme="setup"] body:not(.light) button:focus-visible,html[data-ui-theme="setup"] body:not(.light) input:focus-visible,html[data-ui-theme="setup"] body:not(.light) select:focus-visible,html[data-ui-theme="setup"] body:not(.light) a:focus-visible{outline-color:#58c9f3}
+html[data-ui-theme="setup"] body:not(.light) .toggle-input:checked+.switch{background:#48d876}
+html[data-ui-theme="setup"] body:not(.light) .primary-btn:disabled,html[data-ui-theme="setup"] body:not(.light) .save-btn:disabled{background:rgba(255,255,255,.06);border-color:rgba(255,255,255,.1);color:#9ba6b8}

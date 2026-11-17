@@ -1,7 +1,7 @@
 """Real ffmpeg pipe WAV, unchanged audio bytes, through the focused C fixture.
 
 Run with --http-fixture <compiled tests/test_esphomed_http.c>, or --tls-prefix
-<mbedTLS 3.6.4 prefix> to build just that fixture. Requires ffmpeg and TMPDIR.
+<mbedTLS 3.6.7 prefix> to build just that fixture. Requires ffmpeg and TMPDIR.
 No HA, hardware, global environment changes, or audio-header rewriting.
 """
 import argparse

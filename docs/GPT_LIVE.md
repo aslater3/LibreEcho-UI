@@ -105,7 +105,9 @@ actionable result remains `sign in to ChatGPT again`.
 | Realtime WebSocket transport | done; real-account acceptance pending |
 | Web control-centre mode selector and status panel | done |
 | Spoken `stop` cancels local playback and closes the Live session | done |
-| Home Assistant `homeassistant.conversation` tool | not done; lights and HA-owned media fail closed |
+| Home Assistant control (`ha.state`, `ha.call`) | done, opt-in: off unless the owner sets an HA URL and token file |
+| Home Assistant `homeassistant.conversation` tool | not done; general conversation and HA-owned media still fail closed |
+| Owner API key transport (public Realtime API wire format) | not done; the transport only speaks the ChatGPT subscription protocol |
 | LED patterns for Live states | not done |
 | Process-level mode orchestration (stopping `sttd`/`ttsd`/`wyomingd`) | not done |
 
@@ -128,8 +130,27 @@ the conversation.
 timer.set  timer.cancel  timer.dismiss  timer.query
 media.stop media.status  radio.play
 device.time  device.volume  device.weather
+ha.state  ha.call          (Home Assistant REST, opt-in; see below)
 voice.request (bounded natural-language router for the actions above)
 ```
+
+### Home Assistant
+
+`ha.state` reads one entity; `ha.call` switches one entity with `turn_on`,
+`turn_off` or `toggle`. Both are off unless `lived` is started with
+`--ha-url http://host[:port]` (the init script reads `HA_URL` and
+`HA_TOKEN_FILE` from `/etc/default/libreecho-lived`). The token is a Home
+Assistant long-lived access token in `/data/libreecho/secrets/home-assistant-token`
+(default), read per call and never logged or returned.
+
+- Readable domains: `light`, `switch`, `input_boolean`, `fan`, `sensor`,
+  `binary_sensor`. Switchable domains: `light`, `switch`, `input_boolean`, `fan`.
+- A call first checks the entity exists; an unknown name fails without
+  calling a service, so a spoken name cannot reach a different device.
+- Spoken requests of the form `turn on|off the <name> light|lights|switch`
+  are routed to these tools. Other phrasings are refused, not guessed.
+- Only plain `http://` is spoken, with a fixed timeout and one request per
+  connection. Use a Home Assistant on the LAN or loopback; HTTPS is refused.
 
 Every handler is a client of the daemon that already owns the capability, so
 behaviour cannot drift between the local assistant and a Live conversation.
@@ -202,6 +223,7 @@ present:
 | Local LibreEcho | Recognised text only, to the configured model provider |
 | Home Assistant | Post-AEC audio, to the configured Home Assistant server |
 | GPT-Live | Post-AEC audio, including up to 150 ms of RAM-only preroll, after the wake word starts a conversation |
+| GPT-Live with Home Assistant configured | As GPT-Live, plus entity states and switch requests sent to the configured Home Assistant server |
 
 Idle microphone audio is never transmitted. The preroll buffer is RAM-only,
 bounded at 96 KB, never persisted, and discarded after use. The transcript is

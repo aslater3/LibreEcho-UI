@@ -117,19 +117,19 @@ int main(void)
     assert(mkdir(sandbox_dir, 0755) == 0);
 
     /* ledd not up yet: nothing to bridge, never an error. */
-    assert(airplay_led_bridge_refresh(source, target) == 0);
+    assert(airplay_socket_bridge_refresh(source, target) == 0);
     assert(fake_mount_calls == 0);
 
     first = listen_at(source);
     /* Sandbox /run not prepared yet: wait, do not create it. */
-    assert(airplay_led_bridge_refresh(source, missing) == 0);
+    assert(airplay_socket_bridge_refresh(source, missing) == 0);
     assert(fake_mount_calls == 0);
 
     /* First bridge, then idempotent while current. */
-    assert(airplay_led_bridge_refresh(source, target) == 1);
+    assert(airplay_socket_bridge_refresh(source, target) == 1);
     assert(same_inode(source, target));
     require_reaches(target, first);
-    assert(airplay_led_bridge_refresh(source, target) == 0);
+    assert(airplay_socket_bridge_refresh(source, target) == 0);
     assert(fake_mount_calls == 1);
 
     /* ledd restarts: a new socket inode at the same path. The bridge still
@@ -137,11 +137,11 @@ int main(void)
     close(first);
     second = listen_at(source);
     assert(!same_inode(source, target));
-    assert(airplay_led_bridge_refresh(source, target) == 1);
+    assert(airplay_socket_bridge_refresh(source, target) == 1);
     assert(fake_umount_calls >= 1);
     assert(same_inode(source, target));
     require_reaches(target, second);
-    assert(airplay_led_bridge_refresh(source, target) == 0);
+    assert(airplay_socket_bridge_refresh(source, target) == 0);
     assert(fake_mount_calls == 2);
 
     close(second);

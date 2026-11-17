@@ -140,3 +140,31 @@ int update_record_read(const char *path, struct le_update_field *fields,
     }
     return (int)reported;
 }
+
+int update_pending_resolve(const char *pending_slot, const char *record_version,
+                           const char *check_status, const char *latest_version,
+                           const char *state, const char *selected,
+                           char *version, size_t version_size,
+                           char *current, char *inactive)
+{
+    /* The update tool writes the record before it activates the slot, so a
+     * record left by a failed activation must not offer a restart. */
+    int valid = (pending_slot[0] == 'a' || pending_slot[0] == 'b') && !pending_slot[1] &&
+                !strcmp(state, "reboot-pending");
+    char chosen[256] = "";
+
+    /* record_version may alias version, so settle the answer before writing. */
+    if (valid && record_version[0])
+        snprintf(chosen, sizeof(chosen), "%s", record_version);
+    else if (valid && !strcmp(check_status, "reboot-pending"))
+        snprintf(chosen, sizeof(chosen), "%s", latest_version);
+    if (version_size)
+        snprintf(version, version_size, "%s", chosen);
+    if (!valid)
+        return 0;
+    if (!strcmp(selected, pending_slot)) {
+        strcpy(inactive, pending_slot);
+        strcpy(current, pending_slot[0] == 'a' ? "b" : "a");
+    }
+    return 1;
+}

@@ -38,7 +38,11 @@ ARGS=${ARGS:---foreground --socket $SOCKET --root $RUNTIME_ROOT}
 # reads the persisted pipeline mode and the Home Assistant integration bit
 # itself, so this wrapper neither stages a Wyoming record nor touches a
 # responder.
+# Bit 64 is the Sendspin player. It is independent of the AirPlay receiver
+# and off unless explicitly enabled; airplayd starts it only when the payload
+# carries the player and the shared engine is serving its sink.
 airplay_enabled_at_boot=1
+sendspin_enabled_at_boot=0
 if [ -r "$CONFIG" ]; then
     integrations=$(sed -n 's/.*"integrations"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$CONFIG" | sed -n '1p')
     case "$integrations" in
@@ -49,11 +53,17 @@ if [ -r "$CONFIG" ]; then
             else
                 airplay_enabled_at_boot=0
             fi
+            if [ $((integrations & 64)) -ne 0 ]; then
+                sendspin_enabled_at_boot=1
+            fi
             ;;
     esac
 fi
 if [ "$airplay_enabled_at_boot" -eq 1 ]; then
     ARGS="$ARGS --enable-on-start"
+fi
+if [ "$sendspin_enabled_at_boot" -eq 1 ]; then
+    ARGS="$ARGS --sendspin-on-start"
 fi
 
 mount_led_socket() {

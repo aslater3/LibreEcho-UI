@@ -16,8 +16,26 @@ PORT=${LIBREECHO_TEST_PORT:-18082}
 URL="http://127.0.0.1:$PORT"
 CFG=./build/test-suite-config.json
 rm -f "$CFG" "$CFG.bak" "$CFG.tmp" "$CFG.setup-complete"
+# Radio stations are stored beside the configuration; a previous run leaves
+# them behind and test_api.sh expects none.
+rm -f ./build/radio-stations.json ./build/radio-stations.json.bak ./build/radio-stations.json.tmp
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Isrc tests/test_unit.c src/json.c src/config_store.c -o build/test-unit
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_news.c src/news.c src/json.c -o build/test-news
+./build/test-news
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_wifi_motion.c src/wifi_motion.c -o build/test-wifi-motion
+./build/test-wifi-motion
 ./build/test-unit
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror -Isrc tests/test_json_text.c src/json.c -o build/test-json-text
+./build/test-json-text
+# #522: the self-signed HTTPS pair must survive restarts; links the real src/tls.c.
+if [ -n "${ESPHOMED_TEST_TLS_PREFIX:-}" ]; then
+    TP=$ESPHOMED_TEST_TLS_PREFIX
+    cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Werror -Isrc -I"$TP/include" tests/test_tls_self_signed.c src/tls.c \
+        "$TP/lib/libmbedtls.a" "$TP/lib/libmbedx509.a" "$TP/lib/libmbedcrypto.a" -o build/test-tls-self-signed
+    ./build/test-tls-self-signed
+else
+    echo "SKIP test-tls-self-signed: set ESPHOMED_TEST_TLS_PREFIX to a staged mbedTLS 3.6.7 prefix"
+fi
 make build/test-update-identity
 ./build/test-update-identity
 python3 tests/test_github_link_contract.py
@@ -26,6 +44,8 @@ python3 tests/test_acoustic_events_review_contract.py
 python3 tests/test_about_supported_devices.py
 python3 tests/test_setup_wifi_ui_contract.py
 sh tests/test_active_device_ping.sh
+sh tests/test_timezone_setup.sh
+sh tests/test_pycache_untracked.sh
 python3 tests/test_pr244_review_contract.py
 python3 tests/test_pr245_review_contract.py
 make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-nl80211-scan-transport build/test-bt-mgmt-events build/test-bt-pairing-events build/test-factory-reset
@@ -58,6 +78,7 @@ make build/test-http-worker-registry
 ./build/test-http-worker-registry
 python3 tests/test_http_worker_registry_contract.py
 python3 tests/test_pr141_review_contract.py
+python3 tests/test_https_trust_contract.py
 sh tests/test_pr137_review_contract.sh
 sh tests/test_pr139_review_contract.sh
 make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection build/test-light-sensor
@@ -70,6 +91,7 @@ python3 tests/test_networkd_health_integration.py
 python3 tests/test_backend_linux_wifi_contract.py
 sh tests/test_network_liveness_contract.sh
 sh tests/test_init_service_control.sh
+sh tests/test_init_process_finding.sh
 sh tests/test_watchdog_stop_recovery_contract.sh
 sh tests/test_bluetooth_pairing_contract.sh
 sh tests/test_bluetooth_pairing_code_ui.sh
@@ -79,25 +101,34 @@ sh tests/test_bluetooth_profile_service_contract.sh
 sh tests/test_bluetooth_device_metadata_contract.sh
 sh tests/test_bluetooth_cache_bust_contract.sh
 sh tests/test_bluetooth_mgmt_observability_contract.sh
+sh tests/test_bluetooth_enable_persistence.sh
 # Compiles btd.c into the test so the real status writer and discovery
 # bookkeeping run. No -Werror here: the daemon source carries two
 # platform-dependent warnings this test must not silence for the main build.
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic \
     -Isrc -Isrc/adapter tests/test_bluetooth_status_capacity.c \
     src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c \
+    src/adapter/bt_adv_proxy.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -o build/test-bluetooth-status-capacity
 ./build/test-bluetooth-status-capacity
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic \
     -Isrc -Isrc/adapter tests/test_bluetooth_bond_persistence.c \
     src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c \
+    src/adapter/bt_adv_proxy.c \
     src/adapter/adapter_server.c src/log.c \
     -o build/test-bluetooth-bond-persistence
 ./build/test-bluetooth-bond-persistence
+make build/test-bt-adv-proxy
+./build/test-bt-adv-proxy
+make build/test-esphome-ble-proxy
+./build/test-esphome-ble-proxy
 make build/test-sdp-wire-format
 ./build/test-sdp-wire-format
 make build/test-avdtp-wire-format
 ./build/test-avdtp-wire-format
+make build/test-bt-a2dp-source
+./build/test-bt-a2dp-source
 make build/test-avrcp-wire-format
 ./build/test-avrcp-wire-format
 sh tests/test_network_scan_contract.sh
@@ -110,15 +141,22 @@ grep -q '"SAVE_CONFIG\\n"' src/adapter/networkd.c
 sh tests/test_led_pattern_ownership.sh
 make build/libreecho-ledd build/libreecho-buttond
 python3 tests/test_buttond_led_restart.py
-make build/test-action-sample build/test-cue-rate-limit build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-timing build/test-watchdog-policy
+make build/test-action-sample build/test-dnd-audio build/test-cue-rate-limit build/test-audiod-review build/test-led-night-review build/test-button-settings build/test-buttond-privacy build/test-buttond-events build/test-buttond-actions build/test-buttond-timing build/test-buttond-gesture build/test-watchdog-policy
 ./build/test-action-sample
+# Owner event sounds (#410): WAV conversion/store and audiod playback.
+make build/test-sound-store build/test-event-sound
+./build/test-sound-store
+./build/test-event-sound
+./build/test-dnd-audio
 ./build/test-cue-rate-limit
 ./build/test-audiod-review
 ./build/test-led-night-review
 ./build/test-button-settings
 ./build/test-buttond-privacy
 ./build/test-buttond-events
+./build/test-buttond-actions
 ./build/test-buttond-timing
+./build/test-buttond-gesture
 make build/test-wake-led-profile
 ./build/test-wake-led-profile
 sh tests/test_voice_listening_led_profile.sh
@@ -129,6 +167,10 @@ sh tests/test_watchdogd_recovery.sh
 sh tests/test_watchdog_voice_mode.sh
 make build/libreecho-waked
 WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
+WAKED_REQUIRED=1 python3 tests/test_waked_listen.py
+WAKED_REQUIRED=1 python3 tests/test_waked_clap.py
+WAKED_REQUIRED=1 python3 tests/test_waked_smoke_alarm.py
+WAKED_REQUIRED=1 python3 tests/test_waked_nearest_answers.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
 make build/libreecho-timerd build/libreecho-watchdogd
@@ -137,6 +179,10 @@ python3 tests/test_install_completeness.py
 python3 tests/test_watchdog_build_contract.py
 make build/test-wake-decode
 ./build/test-wake-decode
+make build/test-wake-model
+./build/test-wake-model
+make build/test-voice-clip-store
+./build/test-voice-clip-store
 make build/test-wake-health build/test-wake-health-api
 ./build/test-wake-health
 ./build/test-wake-health-api
@@ -146,6 +192,10 @@ sh tests/test_bluetooth_startup_readiness_contract.sh
 sh tests/test_bluetooth_startup_optionality_contract.sh
 sh tests/test_bluetooth_decoder_state_contract.sh
 make build/test-wake-led
+make build/test-clap-detector
+./build/test-clap-detector
+make build/test-smoke-alarm-detector
+./build/test-smoke-alarm-detector
 sh tests/test_microphone_fanout_contract.sh
 sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py
@@ -165,18 +215,29 @@ python3 tests/test_config_persist_contract.py
 python3 tests/test_web_ui_behaviour_contract.py
 node tests/test_reboot_reconnect.js
 node tests/test_kernel_log_ui.js
+node tests/test_sendspin_ui.js
 node tests/test_led_brightness_gate.js
 sh tests/test_update_size_contract.sh
 node tests/test_timers_ui.js
+node tests/test_own_sounds_ui.js
 node tests/test_frontend_state_ui.js
 node tests/test_update_identity_ui.js
+node tests/test_timezone_ui.js
 node tests/test_baby_monitor_ui.js
+node tests/test_peer_pairing_ui.js
 node tests/test_voice_assistant_ha_mode_ui.js
 node tests/test_privacy_disclosure_ui.js
+node tests/test_privacy_future_reporting_ui.js
 node tests/test_assistant_clock_format_ui.js
+node tests/test_assistant_pipeline_wait_ui.js
+node tests/test_stop_without_wake_ui.js
 node tests/test_chatgpt_auth_gate_ui.js
 node tests/test_home_location_lookup_ui.js
 node tests/test_mute_lamp_ui.js
+node tests/test_reply_volume_ui.js
+node tests/test_eq_ui.js
+node tests/test_noise_suppression_ui.js
+node tests/test_doa_ui.js
 python3 tests/test_issue_34.py
 python3 tests/test_issue_94.py
 python3 tests/voice-e2e/test_audio_quality.py
@@ -245,6 +306,8 @@ sh tests/run_recovery_backend_integration.sh
 sh tests/test_feature_batch_api.sh
 sh tests/test_feature_batch_noise_heartbeat.sh
 node tests/test_feature_batch_ui.js
+node tests/test_theme_ui.js
+node tests/test_i18n_ui.js
 sh tests/test_feature_batch_build.sh
 sh tests/test_radio_icy_metadata.sh
 HELIX_OBJS="build/helix-aac/aacdec.o build/helix-aac/aactabs.o build/helix-aac/bitstream.o build/helix-aac/buffers.o build/helix-aac/dct4.o build/helix-aac/decelmnt.o build/helix-aac/dequant.o build/helix-aac/fft.o build/helix-aac/filefmt.o build/helix-aac/huffmanaac.o build/helix-aac/hufftabs.o build/helix-aac/imdct.o build/helix-aac/noiseless.o build/helix-aac/pns.o build/helix-aac/sbr.o build/helix-aac/sbrfft.o build/helix-aac/sbrfreq.o build/helix-aac/sbrhfadj.o build/helix-aac/sbrhfgen.o build/helix-aac/sbrhuff.o build/helix-aac/sbrimdct.o build/helix-aac/sbrmath.o build/helix-aac/sbrqmf.o build/helix-aac/sbrside.o build/helix-aac/sbrtabs.o build/helix-aac/stproc.o build/helix-aac/tns.o build/helix-aac/trigtabs.o"
@@ -268,6 +331,8 @@ sh tests/test_airplay_setup_persistence.sh
 sh tests/test_airplay_mount_failure.sh
 python3 tests/test_airplay_premounted_runtime.py
 python3 tests/test_airplayd_accept_backlog.py
+python3 tests/test_sendspin_service.py
+sh tests/test_sendspin_api.sh
 python3 tests/test_wyoming_discovery_port.py
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_metadata.c \
@@ -275,20 +340,35 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -lm -o build/test-airplay-metadata
 ./build/test-airplay-metadata
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_airplay_nqptp_ready.c \
+    src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    -lm -o build/test-airplay-nqptp-ready
+./build/test-airplay-nqptp-ready
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_airplay_led_bridge_refresh.c \
     src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
     -lm -o build/test-airplay-led-bridge-refresh
 ./build/test-airplay-led-bridge-refresh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
-    -Isrc -Isrc/adapter tests/test_micd.c \
+    -Isrc -Isrc/adapter tests/test_airplay_mdns_restart.c \
+    src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
+    -lm -o build/test-airplay-mdns-restart
+./build/test-airplay-mdns-restart
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_micd.c src/adapter/mic_array_render.c \
     src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c \
-    -o build/test-micd
+    -lm -o build/test-micd
 ./build/test-micd
 sh tests/test_waked_init_model.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_mic_beamformer.c \
+    src/adapter/mic_beamformer.c src/adapter/voice_dsp.c \
+    -lm -o build/test-mic-beamformer
+./build/test-mic-beamformer
 # M_PI is not in C99, and glibc hides it under a strict _POSIX_C_SOURCE, so this
 # built only on toolchains whose headers leak it. It failed to compile on glibc
 # and took every test after it down with it.
@@ -300,14 +380,20 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
     -Isrc -Isrc/adapter tests/test_bt_media_resample.c src/adapter/radio_resample.c \
     -lm -o build/test-bt-media-resample
 ./build/test-bt-media-resample
-make build/test-voice-aec build/test-voice-reference build/test-spoken-time
+make build/test-voice-aec build/test-voice-reference build/test-voice-aec-guard build/test-spoken-time build/test-timezone
 ./build/test-voice-aec
+# #401: noise suppressor, and the local pipeline's off/on contract.
+make build/test-voice-ns build/test-voice-pipeline-noise
+./build/test-voice-ns
+./build/test-voice-pipeline-noise
 ./build/test-voice-reference
+./build/test-voice-aec-guard
 ./build/test-spoken-time
+./build/test-timezone
 make build/test-voice-stream build/test-sttd build/test-llm-provider \
     build/test-llm-http build/test-llm-store build/test-agentd
 make build/test-voice-reply build/test-voice-playback
-make build/test-voice-pipeline
+make build/test-voice-pipeline build/test-voice-whisper
 make build/test-voice-listening-feedback
 ./build/test-voice-stream
 ./build/test-sttd
@@ -329,8 +415,19 @@ python3 tests/test_voice_listening_callers.py
 make build/test-stop-intent
 ./build/test-stop-intent
 python3 tests/test_stop_intent_integration.py
+./build/test-voice-whisper
 ./build/test-voice-pipeline
+# Stop without the wake word (#405): the wake-free stop window in the pipeline,
+# then the real agent acting on it (timer, reply, chatter, remote STT guard).
+make build/test-voice-pipeline-stop-window build/mock-llm-curl
+./build/test-voice-pipeline-stop-window
+python3 tests/test_stop_without_wake.py
 make test-mdns
+make test-peer-auth
+make test-wake-arbiter
+make test-peer-group
+make test-peer-settings
+make test-peer-announce
 # Guard the nested-make provenance contract before the ESPHome section: its
 # strict radio-controls build is the first -Werror consumer of the augmented
 # CPPFLAGS, so a snapshot mismatch surfaces there. This reproduces the
@@ -354,6 +451,14 @@ sh tests/test_timed.sh
 make test-lived
 sh tests/test_timed_timeout.sh
 make build/libreecho-web
+# Owns its own port and private sound directory.
+sh tests/test_event_sounds_api.sh
+# Device list (#413): browse and advertisement through the real daemon, own ports.
+python3 tests/test_network_peers.py
+python3 tests/test_peer_pairing.py
+python3 tests/test_peer_group.py
+python3 tests/test_peer_settings.py
+python3 tests/test_peer_announce.py
 sh tests/test_setup_first_run.sh
 # First-boot provisioning drives the real daemon over loopback with the mock
 # backend and owns its own ports, so it runs outside the shared server above.
@@ -380,9 +485,15 @@ make build/test-backend-mock-timers
 make build/test-timer-persistence build/libreecho-audiod build/libreecho-timerd
 ./build/test-timer-persistence
 sh tests/test_timerd.sh
+sh tests/test_timerd_event_sound.sh
 make build/libreecho-agentd
 sh tests/test_agentd_startup_readiness_contract.sh
+sh tests/test_agentd_init_lifecycle_lock.sh
+NO_SETSID=1 sh tests/test_agentd_init_lifecycle_lock.sh
 sh tests/test_agentd_timers.sh
+# Wake clips are kept under a suite-private directory, never /data.
+LIBREECHO_VOICE_CLIP_DIR="$SUITE_TMP/voice-clips"
+export LIBREECHO_VOICE_CLIP_DIR
 ./build/libreecho-web --backend mock --config "$CFG" --mock-config ./config/mock-state.json --web-root ./web --listen "127.0.0.1:$PORT" --seed 42 --dev-controls >./build/test-server.log 2>&1 &
 pid=$!
 i=0
@@ -390,10 +501,16 @@ while ! curl -fsS "$URL/api/v1/status" >/dev/null 2>&1; do i=$((i+1)); [ "$i" -l
 # Timer HTTP cases require this ready, isolated mock server.
 LIBREECHO_TEST_URL="$URL" sh tests/test_timers_api.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_api.sh
+LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_timezone_api.sh
+sh tests/test_ntp_api.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_https_trust_api.sh
+sh tests/test_https_pem_api.sh
+python3 tests/test_voice_clips_contract.py
 LIBREECHO_TEST_URL="$URL" sh tests/test_kernel_log_stream.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_navigation.sh
 LIBREECHO_TEST_URL="$URL" sh tests/test_diagnostics_export.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_config.sh
+LIBREECHO_TEST_URL="$URL" sh tests/test_owner_eq_api.sh
 LIBREECHO_TEST_URL="$URL" LIBREECHO_TEST_CONFIG="$CFG" sh tests/test_voice_pipeline_ha_transitions.sh
 # Starts its own isolated mock server with the readiness overrides, so it does
 # not depend on the shared server above.
@@ -428,6 +545,9 @@ pid=$!
 sleep 1
 LIBREECHO_TEST_URL="$URL" sh tests/test_auth_bootstrap.sh
 kill "$pid"
+sh tests/test_ssh_status.sh
+sh tests/test_local_services_api.sh
+sh tests/test_news_api.sh
 wait "$pid" 2>/dev/null || true
 pid=0
 pid=0
@@ -588,4 +708,23 @@ code=$(curl -sS -o "$TMPDIR/le-origin.out" -w '%{http_code}' -X PUT "$URL/api/v1
 [ "$code" = 403 ]
 curl -fsS -X PUT "$URL/api/v1/network" -H 'Authorization: Bearer test-token-0123456789abcdef' -H "$CSRF" -H 'Origin: http://device.test' -H 'Content-Type: application/json' --data '{"hostname":"allowed"}' >/dev/null
 echo 'authentication and origin: ok'
+# Sendspin adapter contract is dependency-free and always runs. The heavy pinned
+# SDK build is a separate opt-in lane that fails closed when unprovisioned; it is
+# never forced into the default suite.
+python3 tests/test_sendspin_adapter_contract.py
+if [ "${LIBREECHO_SENDSPIN_SDK:-0}" = "1" ]; then
+    : "${SENDSPIN_PLATFORM_DIR:?set SENDSPIN_PLATFORM_DIR for the Sendspin SDK lane}"
+    python3 "$SENDSPIN_PLATFORM_DIR/tools/mt8163-arm32/sendspin/test_sdk_build.py" -v
+fi
+if [ "${LIBREECHO_SENDSPIN_HOST:-0}" = "1" ]; then
+    : "${SENDSPIN_PLATFORM_DIR:?set SENDSPIN_PLATFORM_DIR for the host SDK lane}"
+    : "${SENDSPIN_ARCHIVE_DIR:?set SENDSPIN_ARCHIVE_DIR for the host SDK lane}"
+    make test-sendspin-host
+fi
+# The C++20 engine-sink client lane is a separate opt-in (needs a C++20 compiler
+# and the Platform airplay sources); it is never forced onto the C99-only default.
+if [ "${LIBREECHO_SENDPIN_SINK:-0}" = "1" ]; then
+    : "${SENDSPIN_PLATFORM_DIR:?set SENDSPIN_PLATFORM_DIR for the Sendspin sink lane}"
+    make test-sendspin-sink
+fi
 echo 'all tests: ok'

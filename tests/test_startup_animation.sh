@@ -103,12 +103,20 @@ def assert_chase(status):
     # the gamma-2 perceptual transfer (ceil(v^2/255), led_output.c, asserted by
     # test_led_output_core). The logic value 255 stays 255; the trail value 64
     # drives 17, not 64. The status frame is the physical drive output.
-    assert sum(pixel["g"] == 255 for pixel in pixels) == 1, status
-    assert sum(pixel["g"] == 17 for pixel in pixels) == 11, status
+    # Soft comet: every pixel sits between the floor (17) and full green, a
+    # bright head with a fading tail, and most of the ring at the floor.
+    greens = [pixel["g"] for pixel in pixels]
+    assert all(17 <= g <= 255 for g in greens), status
+    assert max(greens) >= 180, status
+    assert sum(g == 17 for g in greens) >= 6, status
+    assert sum(17 < g < max(greens) for g in greens) >= 2, status
+    return greens
 
-assert_chase(call("status"))
+first = assert_chase(call("status"))
 time.sleep(0.12)
-assert_chase(call("status"))
+second = assert_chase(call("status"))
+# The head position is continuous in time, so the frame moves between samples.
+assert first != second, (first, second)
 assert not os.path.exists(ready)
 
 open(ready, "w", encoding="ascii").close()

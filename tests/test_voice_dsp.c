@@ -35,7 +35,6 @@ int main(void)
         16384, 8192, 16384, 16384, 32768, 16384, 16384
     };
     struct le_voice_calibration calibration;
-    struct le_voice_beamformer beamformer;
     uint8_t raw[LE_VOICE_RAW_FRAME_BYTES];
     uint8_t beam_raw[12 * LE_VOICE_RAW_FRAME_BYTES];
     int16_t logical[LE_VOICE_LOGICAL_CHANNELS];
@@ -78,39 +77,32 @@ int main(void)
     CHECK(le_voice_mix_selected(logical, LE_VOICE_WAKE_MIC_MASK) == 1125);
 
     /*
-     * Lane 3 carries the same ramp four samples later than lane 0.  Process
-     * across an awkward five-frame boundary to prove the measured delay line
-     * remains continuous across capture reads.
+     * The wake path averages its four microphones with no delay: a sample on
+     * each selected lane comes out in the same frame, across an awkward
+     * five-frame read boundary, and unselected lanes are ignored.  A delay
+     * here would only suit one source direction (the fixed-beam stage in
+     * mic_beamformer.c does the steering).
      */
     memset(beam_raw, 0, sizeof(beam_raw));
     for (i = 0; i < 12; ++i) {
-        int16_t source = (int16_t)((i + 1) * 100);
-        int16_t late = i >= LE_VOICE_BEAM_DELAY_SAMPLES
-            ? (int16_t)((i + 1 - LE_VOICE_BEAM_DELAY_SAMPLES) * 100)
-            : 0;
+        uint8_t *frame_raw = beam_raw + i * LE_VOICE_RAW_FRAME_BYTES;
 
-        pack_s16_as_s24_3le(
-            source,
-            beam_raw + i * LE_VOICE_RAW_FRAME_BYTES +
-                LE_VOICE_BEAM_CHANNEL_EARLY * 3);
-        pack_s16_as_s24_3le(
-            late,
-            beam_raw + i * LE_VOICE_RAW_FRAME_BYTES +
-                LE_VOICE_BEAM_CHANNEL_LATE * 3);
+        pack_s16_as_s24_3le((int16_t)((i + 1) * 100), frame_raw + 0 * 3);
+        pack_s16_as_s24_3le((int16_t)((i + 1) * 300), frame_raw + 1 * 3);
+        pack_s16_as_s24_3le((int16_t)((i + 1) * 100), frame_raw + 3 * 3);
+        pack_s16_as_s24_3le((int16_t)((i + 1) * 300), frame_raw + 4 * 3);
+        /* Lane 2 is not a wake microphone and must not leak in. */
+        pack_s16_as_s24_3le(30000, frame_raw + 2 * 3);
     }
     le_voice_calibration_init(
         &calibration, NULL, identity, LE_VOICE_CALIBRATION_OFF);
-    le_voice_beamformer_init(&beamformer);
-    le_voice_process_beamformed_interleaved(
-        beam_raw, 5, &calibration, &beamformer, NULL, beam_output);
-    le_voice_process_beamformed_interleaved(
-        beam_raw + 5 * LE_VOICE_RAW_FRAME_BYTES, 7,
-        &calibration, &beamformer, NULL, beam_output + 5);
-    for (i = 0; i < LE_VOICE_BEAM_DELAY_SAMPLES; ++i)
-        CHECK(beam_output[i] == 0);
-    for (i = LE_VOICE_BEAM_DELAY_SAMPLES; i < 12; ++i)
-        CHECK(beam_output[i] ==
-              (i + 1 - LE_VOICE_BEAM_DELAY_SAMPLES) * 100);
+    le_voice_process_interleaved(beam_raw, 5, &calibration,
+                                 LE_VOICE_WAKE_MIC_MASK, NULL, beam_output);
+    le_voice_process_interleaved(beam_raw + 5 * LE_VOICE_RAW_FRAME_BYTES, 7,
+                                 &calibration, LE_VOICE_WAKE_MIC_MASK, NULL,
+                                 beam_output + 5);
+    for (i = 0; i < 12; ++i)
+        CHECK(beam_output[i] == (i + 1) * 200);
 
     le_voice_calibration_init(
         &calibration, gains, identity, LE_VOICE_CALIBRATION_INVERSE_Q14);
@@ -169,6 +161,6 @@ int main(void)
                                       LE_VOICE_FRAME_SAMPLES);
     CHECK(vad_result.active);
 
-    puts("voice_dsp: conversion, calibration, beamforming, HPF and VAD ok");
+    puts("voice_dsp: conversion, calibration, wake mix, HPF and VAD ok");
     return 0;
 }

@@ -54,7 +54,7 @@ class MediaStateFixture(Fixture):
                 self.assertTrue((await announcement).success)
                 with contextlib.suppress(BlockingIOError):
                     self.busbytes += os.read(self.busfd, 65536)
-                self.assertEqual(self.busbytes, pcm * 2)
+                self.assertEqual(self.sound(), pcm * 2)
                 await asyncio.sleep(.05)
                 self.assertEqual(states[-1].state, MediaPlayerState.IDLE)
                 self.assertNotIn(MediaPlayerState.ANNOUNCING, [state.state for state in states])

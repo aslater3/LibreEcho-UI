@@ -174,6 +174,69 @@ int main(void)
                               ctx.rendered_pixels[i].b == 9U,
                           "the pattern owner must keep the ring from the v1 spectrum");
 
+    /*
+     * ---- 4. v1 beat release and rhythm cooldown follow elapsed time, so a
+     * 23.4 fps producer does not decay twice as fast or re-trigger the
+     * rhythm on a latched second frame.
+     */
+    {
+        static const double periods[2] = {0.0854, 0.0427};
+        unsigned int beat_at[2];
+        int k;
+
+        for (k = 0; k < 2; k++) {
+            double t0 = 400.0, t;
+            reset(&ctx);
+            for (i = 0; i < RING_PIXELS; i++)
+                levels[i] = 20U;
+            start_visualizer(&ctx, levels, 100U, "music", t0);
+            for (i = 4; i < 9; i++)
+                levels[i] = 230U;          /* mid-band hit, bass unchanged */
+            t0 += periods[k];
+            start_visualizer(&ctx, levels, 100U, "music", t0);
+            require_condition(ctx.visualizer_beat > 0U,
+                              "the v1 hit must raise the beat halo");
+            for (t = t0 + periods[k]; t < t0 + 0.12 - 1e-9; t += periods[k])
+                start_visualizer(&ctx, levels, 100U, "music", t);   /* held */
+            apply_visualizer(&ctx, t0 + 0.12);
+            beat_at[k] = ctx.visualizer_beat;
+        }
+        require_condition((beat_at[0] > beat_at[1] ? beat_at[0] - beat_at[1]
+                                                   : beat_at[1] - beat_at[0])
+                              <= 6U,
+                          "v1 beat release must not depend on frame rate");
+
+        /* Rhythm cooldown: hits 42.7 and 85.4 ms after a hit stay blocked
+           (the old 2-frame cooldown at 11.7 fps), one 171 ms later fires. */
+        {
+            unsigned int step;
+            double t0 = 500.0;
+            reset(&ctx);
+            for (i = 0; i < RING_PIXELS; i++)
+                levels[i] = 20U;
+            start_visualizer(&ctx, levels, 100U, "music", t0);
+            for (i = 4; i < 9; i++)
+                levels[i] = 230U;
+            start_visualizer(&ctx, levels, 100U, "music", t0 + 0.0427);
+            step = ctx.visualizer_rhythm_step;
+            for (i = 4; i < 9; i++)
+                levels[i] = 20U;
+            for (i = 9; i < RING_PIXELS; i++)
+                levels[i] = 230U;
+            start_visualizer(&ctx, levels, 100U, "music", t0 + 0.0854);
+            for (i = 0; i < RING_PIXELS; i++)
+                levels[i] = i < 4 ? 230U : 20U;
+            start_visualizer(&ctx, levels, 100U, "music", t0 + 0.1281);
+            require_condition(ctx.visualizer_rhythm_step == step,
+                              "a hit within the cooldown must not step the rhythm");
+            for (i = 0; i < RING_PIXELS; i++)
+                levels[i] = (i >= 4 && i < 9) ? 230U : 20U;
+            start_visualizer(&ctx, levels, 100U, "music", t0 + 0.2135);
+            require_condition(ctx.visualizer_rhythm_step != step,
+                              "a hit after the cooldown must step the rhythm");
+        }
+    }
+
     puts("LED no-timer-fx: ok");
     return 0;
 }

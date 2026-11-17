@@ -48,6 +48,12 @@ DUMP_MAX_SECONDS=${DUMP_MAX_SECONDS:-20}
 # never costs the device its wake word. Remove the file to return to stock.
 WAKE_MODEL_FILE=${WAKE_MODEL_FILE:-/data/libreecho/config/wake-model}
 WAKE_MODEL_BASE=${WAKE_MODEL_BASE:-/data/libreecho/wakeword-models}
+# Optional second wake word. Write an owner-staged model folder name to
+# $WAKE_SECOND_FILE: waked then also listens for that word, running its
+# classifier on the first model's features, and reports detections under the
+# folder name. Only the folder's alexa_v0.1.onnx is used. Off when the file is
+# absent; a bad or incomplete name is ignored with a note.
+WAKE_SECOND_FILE=${WAKE_SECOND_FILE:-/data/libreecho/config/wake-second}
 # How long a custom model gets to prove it loads before falling back.
 WAKE_MODEL_SETTLE_SECONDS=${WAKE_MODEL_SETTLE_SECONDS:-3}
 VAD_FLOOR_DEFAULT=16
@@ -151,6 +157,23 @@ custom_model_root() {
     printf '%s\n' "$dir"
 }
 
+second_model_root() {
+    [ -r "$WAKE_SECOND_FILE" ] || return 0
+    name=$(sed -n '1p' "$WAKE_SECOND_FILE")
+    case "$name" in
+        ''|.*|*[!A-Za-z0-9._-]*)
+            model_note "invalid second wake word in $WAKE_SECOND_FILE; ignoring it"
+            return 0
+            ;;
+    esac
+    dir=$WAKE_MODEL_BASE/$name
+    if [ -L "$dir/alexa_v0.1.onnx" ] || [ ! -f "$dir/alexa_v0.1.onnx" ]; then
+        model_note "second wake word '$name' has no classifier in $WAKE_MODEL_BASE; ignoring it"
+        return 0
+    fi
+    printf '%s\n' "$dir"
+}
+
 wait_for_microphone() {
     count=0
     while [ ! -S "$MIC_SOCKET" ] && [ "$count" -lt 50 ]; do
@@ -231,7 +254,13 @@ start_service() {
         MODEL_ROOT=$SELECTED_MODEL_ROOT
         model_note "using owner-staged model $MODEL_ROOT"
     fi
-    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET $AEC_REFERENCE_ARG --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS $DUMP_ARG}
+    SECOND_ARG=""
+    SECOND_MODEL_ROOT=$(second_model_root)
+    if [ -n "$SECOND_MODEL_ROOT" ]; then
+        SECOND_ARG="--second-model-dir $SECOND_MODEL_ROOT"
+        model_note "listening for a second wake word from $SECOND_MODEL_ROOT"
+    fi
+    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET $AEC_REFERENCE_ARG --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS $DUMP_ARG $SECOND_ARG}
     launch_daemon
     # waked exits at startup when it cannot load its models. Only a custom
     # model gets this check, and a failure restarts on the stock model.

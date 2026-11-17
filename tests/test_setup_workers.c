@@ -108,7 +108,7 @@ int main(void) {
         expect_exact_error(raw_request(&api,oversized_headers),413,headers_error);
         expect_exact_error(raw_request(&api,"POST /api/v1/test HTTP/1.1\r\nHost: local\r\nContent-Length: 16385\r\n\r\n"),413,body_error);
     }
-    api.integrations |= 2u; /* An unrelated existing choice must survive setup. */
+    api.integrations |= 2u | 64u; /* Unrelated existing choices (MQTT, Sendspin) must survive setup. */
     strcpy(auth,api.auth_token);
     /* Unauthorized or malformed operations never allocate a worker. */
     expect(dispatch(&api,"POST","/api/v1/setup",body,"",csrf,"http://127.0.0.1"),401,NULL);
@@ -136,17 +136,17 @@ int main(void) {
     expect(request(&api,"GET","/api/v1/config",""),200,"\"setup_completed\":true");
     assert(api.setup_completed && !api.privacy_local_only && api.privacy_telemetry);
     assert(api.configured_wake_sensitivity==67 && !strcmp(api.auth_token,auth));
-    assert(api.integrations==22u); /* Setup-enabled AirPlay is visible in the parent. */
+    assert(api.integrations==86u); /* Setup-enabled AirPlay is visible in the parent. */
     expect(request(&api,"GET","/",""),200,"LibreEcho Control Centre");
     finish(&api);
     expect(request(&api,"PUT","/api/v1/buttons","{\"tones\":false}"),200,NULL);
     assert(config_read(cfg,saved,sizeof(saved))>0);
     assert(strstr(saved,"\"privacy_local_only\": false") && strstr(saved,"\"button_tones\": false"));
-    assert(strstr(saved,"\"integrations\": 22"));
+    assert(strstr(saved,"\"integrations\": 86"));
     assert(api_init(&restarted,backend,1,0,token,NULL,csrf,cfg,NULL)==0);
     assert(refresh_setup_completed(&restarted)==0 && restarted.setup_completed);
     assert(!restarted.privacy_local_only && restarted.privacy_telemetry && !restarted.button_tones);
-    assert(restarted.integrations==22u);
+    assert(restarted.integrations==86u);
     puts("setup worker: completed state, subsequent writes and restart: ok");
     start=millis();fd=request(&api,"POST","/api/v1/network/wifi/connect","{\"ssid\":\"fixture\",\"security\":\"open\"}");
     assert(millis()-start<250);

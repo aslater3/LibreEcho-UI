@@ -214,6 +214,20 @@ int main(void)
     expect_invoked("libreecho-ha-sttd.init", "stop");
     expect_invoked("libreecho-ha-ttsd.init", "stop");
     expect_invoked("libreecho-ha-esphomed.init", "start");
+    /* ttsd stays up in HA mode: reminders and the announce action speak
+     * through it. It is restarted after the satellite so its engine follows
+     * the saved mode. */
+    expect_invoked("libreecho-ha-ttsd.init", "start");
+    if (log_position("libreecho-ha-sttd.init start") >= 0 ||
+        log_position("libreecho-ha-agentd.init start") >= 0) {
+        fprintf(stderr, "sttd and agentd must stay stopped in HA mode\n");
+        return 1;
+    }
+    if (log_position("libreecho-ha-ttsd.init start") <=
+        log_position("libreecho-ha-esphomed.init start")) {
+        fprintf(stderr, "ttsd start must follow the HA satellite start\n");
+        return 1;
+    }
     if (log_position("libreecho-ha-agentd.init stop") >=
             log_position("libreecho-ha-esphomed.init start") ||
         log_position("libreecho-ha-sttd.init stop") >=
@@ -229,8 +243,8 @@ int main(void)
     expect_invoked("libreecho-ha-mdnsd.init", "status");
     expect_invoked("libreecho-ha-mdnsd.init", "start");
     expect_not_invoked("libreecho-ha-airplayd.init");
-    if (log_count() != 7) {
-        fprintf(stderr, "enable ran %d commands, expected 7\n", log_count());
+    if (log_count() != 8) {
+        fprintf(stderr, "enable ran %d commands, expected 8\n", log_count());
         return 1;
     }
 
@@ -245,8 +259,8 @@ int main(void)
     }
     expect_invoked("libreecho-ha-mdnsd.init", "status");
     expect_not_invoked("libreecho-ha-airplayd.init");
-    if (log_count() != 6) {
-        fprintf(stderr, "healthy probe ran %d commands, expected 6\n", log_count());
+    if (log_count() != 7) {
+        fprintf(stderr, "healthy probe ran %d commands, expected 7\n", log_count());
         return 1;
     }
 
@@ -291,6 +305,37 @@ int main(void)
     if (voice_pipeline_restart("local") != LE_IO) {
         fprintf(stderr, "a failing pipeline command must report LE_IO\n");
         return 1;
+    }
+
+    /* ttsd that will not stop or start never blocks the satellite. */
+    rewrite_all(1, 0, 0);
+    write_script(LE_INIT_TTSD, 1, 1);
+    reset_log();
+    if (voice_pipeline_restart("home-assistant") != LE_OK ||
+        log_position("libreecho-ha-ttsd.init start") < 0) {
+        fprintf(stderr, "a failing ttsd must not fail HA enable\n");
+        return 1;
+    }
+    /* No tts feature payload (no ttsd init): HA enable succeeds and starts
+     * nothing for it. */
+    rewrite_all(1, 0, 0);
+    unlink(LE_INIT_TTSD);
+    reset_log();
+    if (voice_pipeline_restart("home-assistant") != LE_OK ||
+        log_position("libreecho-ha-esphomed.init start") < 0) {
+        fprintf(stderr, "HA enable must succeed without a ttsd init\n");
+        return 1;
+    }
+    {
+        FILE *log = fopen(LOG_PATH, "r");
+        char line[256];
+        while (log && fgets(line, sizeof(line), log))
+            if (strstr(line, "ttsd")) {
+                fprintf(stderr, "absent ttsd must not be invoked: %s", line);
+                return 1;
+            }
+        if (log)
+            fclose(log);
     }
 
     /* The documented voice-pipeline route must synchronize discovery through

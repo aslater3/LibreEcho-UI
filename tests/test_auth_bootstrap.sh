@@ -20,6 +20,15 @@ code=$(curl -sS -o /tmp/le-bootstrap-bad.out -w '%{http_code}' \
     -H 'Content-Type: application/json' \
     --data '{"username":"admin","password":"short","password_confirm":"short"}')
 [ "$code" = 400 ]
+# #24: names the SSH account contract reserves cannot be created, because one
+# such account keeps SSH stopped for every user.
+for reserved in root ROOT . .. libreecho-ssh LibreEcho-SSH; do
+    code=$(curl -sS -o /tmp/le-bootstrap-reserved.out -w '%{http_code}' \
+        -X POST "$URL/api/v1/auth/bootstrap" -H "$CSRF" -H 'Content-Type: application/json' \
+        --data "{\"username\":\"$reserved\",\"password\":\"test-password-123\",\"password_confirm\":\"test-password-123\"}")
+    [ "$code" = 400 ]
+done
+curl -fsS "$URL/api/v1/config" | jq -e '.data.bootstrap_required == true' >/dev/null
 session=$(curl -fsS -X POST "$URL/api/v1/auth/bootstrap" -H "$CSRF" \
     -H 'Content-Type: application/json' \
     --data '{"username":"admin","password":"test-password-123","password_confirm":"test-password-123"}')
@@ -36,6 +45,14 @@ curl -fsS -X POST "$URL/api/v1/auth/users" -H "Authorization: Bearer $token" -H 
     -H 'Content-Type: application/json' \
     --data '{"username":"operator","password":"operator-password-123","password_confirm":"operator-password-123"}' |
     jq -e '.ok and ((.data.users | length) == 2)' >/dev/null
+for reserved in root .. libreecho-ssh; do
+    code=$(curl -sS -o /tmp/le-add-reserved.out -w '%{http_code}' \
+        -X POST "$URL/api/v1/auth/users" -H "Authorization: Bearer $token" -H "$CSRF" \
+        -H 'Content-Type: application/json' \
+        --data "{\"username\":\"$reserved\",\"password\":\"operator-password-123\",\"password_confirm\":\"operator-password-123\"}")
+    [ "$code" = 409 ] || [ "$code" = 400 ]
+done
+curl -fsS "$URL/api/v1/auth/users" -H "Authorization: Bearer $token" | jq -e '(.data.users | length) == 2' >/dev/null
 curl -fsS -X DELETE "$URL/api/v1/auth/users/operator" -H "Authorization: Bearer $token" -H "$CSRF" |
     jq -e '.ok and (.data.users | length) == 1' >/dev/null
 code=$(curl -sS -o /tmp/le-last-user-delete.out -w '%{http_code}' \

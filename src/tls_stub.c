@@ -98,3 +98,35 @@ int le_tls_ensure_self_signed(const char *cert_path, const char *key_path,
     (void)common_name;
     return LE_NOT_SUPPORTED;
 }
+
+int le_tls_check_certificate_pair(const char *cert_pem, size_t cert_len,
+                                  const char *key_pem, size_t key_len)
+{
+    (void)cert_pem;
+    (void)cert_len;
+    (void)key_pem;
+    (void)key_len;
+    return LE_NOT_SUPPORTED;
+}
+
+int le_tls_check_ca_bundle(const char *pem, size_t len)
+{
+    (void)pem;
+    (void)len;
+    return LE_NOT_SUPPORTED;
+}
+
+int le_tls_install_file(const char *path, const char *data, size_t len,
+                        int public_readable)
+{
+    (void)path;
+    (void)data;
+    (void)len;
+    (void)public_readable;
+    return LE_NOT_SUPPORTED;
+}
+
+int le_tls_available(void)
+{
+    return 0;
+}

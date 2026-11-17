@@ -108,7 +108,7 @@ int le_voice_reference_open(struct le_voice_reference *reference,
     struct sockaddr_un address;
     SpeexResamplerState *resampler;
     int resampler_error = RESAMPLER_ERR_SUCCESS;
-    int receive_buffer = 32768;
+    int receive_buffer = 131072;
     int flags;
     size_t path_length;
 
@@ -205,6 +205,16 @@ void le_voice_reference_read(struct le_voice_reference *reference,
                (samples - copied) * sizeof(output[0]));
         ++reference->underflows;
     }
+}
+
+void le_voice_reference_clear(struct le_voice_reference *reference)
+{
+    if (!reference)
+        return;
+    ring_clear(reference);
+    if (reference->resampler)
+        speex_resampler_reset_mem(
+            (SpeexResamplerState *)reference->resampler);
 }
 
 int le_voice_reference_active(const struct le_voice_reference *reference,

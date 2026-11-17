@@ -1299,8 +1299,8 @@ static void avdtp_handle_set_configuration(struct le_profiles *p,
             case 0x01: session->sbc.blocks = SBC_BLK_16; break;
             default: session->sbc.blocks = SBC_BLK_16; break;
             }
-            session->sbc.subbands = (value[3] & 0x02) ? SBC_SB_8 : SBC_SB_4;
-            session->sbc.allocation = (value[3] & 0x01) ? SBC_AM_SNR :
+            session->sbc.subbands = (value[3] & 0x04) ? SBC_SB_8 : SBC_SB_4;
+            session->sbc.allocation = (value[3] & 0x02) ? SBC_AM_SNR :
                 SBC_AM_LOUDNESS;
             session->sbc.bitpool = value[5] > 53 ? 53 : value[5];
             codec_seen = 1;
@@ -2185,6 +2185,24 @@ done:
     session->fd = -1;
     session->signal_used = 0;
     return result;
+}
+
+int le_profile_test_avdtp_sbc_byte3(const struct le_profiles *p,
+                                    uint8_t *blocks, uint8_t *subbands,
+                                    uint8_t *allocation)
+{
+    const struct le_profile_sessions *sessions = p ? p->sessions : NULL;
+    const struct le_avdtp_session *session;
+
+    if (!sessions || !blocks || !subbands || !allocation)
+        return -1;
+    session = &sessions->avdtp[0];
+    if (!session->configured)
+        return -1;
+    *blocks = session->sbc.blocks;
+    *subbands = session->sbc.subbands;
+    *allocation = session->sbc.allocation;
+    return 0;
 }
 
 ssize_t le_profile_test_avrcp_exchange(struct le_profiles *p,

@@ -21,6 +21,7 @@ class FinalSpec(unittest.TestCase):
     http_audio=NativeLifecycle.http_audio
     unread_audio=NativeLifecycle.unread_audio
     drain_audio=NativeLifecycle.drain_audio
+    sound=NativeLifecycle.sound
     wait_completion=NativeLifecycle.wait_completion
 
     def media(self,client,url,announce=True):

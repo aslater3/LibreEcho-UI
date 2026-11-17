@@ -55,6 +55,36 @@ persistent file is ignored in favour of the immutable image defaults.
 The override lives on userdata and therefore survives boot-image flashes and
 OTA updates.
 
+Owners set it from Device settings › Time servers, or with
+`PUT /api/v1/system/ntp` (see `docs/API.md`). The web daemon applies the same
+peer rules, writes the file atomically, and restarts `libreecho-timed`, which
+reads its peers only at start. Saving an empty list removes the file.
+
+## Time zone
+
+The clock stays UTC; the time zone is presentation only. It is a POSIX TZ
+string stored as `timezone` in `web-config.json` (the image has no zoneinfo
+database) and set from Device settings, the setup wizard, or Home Assistant:
+
+- The picker lists IANA names and sends the matching POSIX string from
+  `web/js/timezones.js`, generated from tzdata by `tools/generate-timezones.py`.
+  The wizard starts from the browser's zone.
+- With "Use the time zone from Home Assistant" on (`timezone_source:
+  home_assistant`), esphomed asks the connected Home Assistant for the time
+  when it subscribes and hourly after that. Home Assistant answers with its
+  configured zone, which esphomed stores. Only the zone is taken; the clock
+  itself still comes from NTP and the RTC.
+- The initramfs exports the stored zone as `TZ` before the service graph
+  starts. LED night mode, the assistant's clock, the live-session time tool and
+  `timerd` also re-read it within seconds of a change (`src/timezone.h`);
+  `timerd` then moves pending alarms and reminders to the same local time of
+  day (countdowns, a ringing alarm and a snoozed alarm stay as they are).
+  Other daemons pick it up at the next boot.
+
+The initramfs only exports letters, digits and `+-:,./`, so angle-bracket
+abbreviations (`<+04>-4`) are stored as `LST`/`LDT` (`LST-4`). Offsets and
+daylight-saving rules are unchanged.
+
 ## Runtime API
 
 `GET /api/v1/system` reports:

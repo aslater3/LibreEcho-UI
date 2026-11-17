@@ -27,7 +27,7 @@ class HealthFixture(Fixture):
                  '-DLE_SOURCE_COMMIT="fixture"', '-DLE_SOURCE_DIGEST="fixture"', '-DLE_SOURCE_DIRTY="1"']
         subprocess.run(flags + ["tests/test_esphome_health_probe.c", "src/backend.c", "src/json.c",
                                "src/config_store.c", "src/service_env.c", "src/event_bus.c", "src/log.c",
-                               "src/adapter/wyoming_client.c", "src/adapter/adapter_client.c", "src/adapter/watchdog_policy.c",
+                               "src/adapter/wyoming_client.c", "src/adapter/adapter_client.c", "src/adapter/watchdog_policy.c", "src/adapter/timer_schedule.c",
                                "-o", str(cls.probe)], cwd=ROOT, check=True, timeout=60)
         script = (ROOT / "init/libreecho-web.init").read_text()
         start = script.index("esphome_service_ready() {")

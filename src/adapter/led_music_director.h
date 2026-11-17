@@ -35,6 +35,20 @@ enum le_music_effect {
     LE_EFFECT_SHOCK_RING
 };
 
+/*
+ * Acoustic mood, not a genre claim: how loud and how bright-tilted the music
+ * has been over the last several seconds.  It picks the palette family, from
+ * cool blues for calm material to reds and oranges for loud, bright, driving
+ * material.
+ */
+enum le_music_mood {
+    LE_MOOD_CALM = 0,
+    LE_MOOD_BALANCED,
+    LE_MOOD_ENERGETIC,
+    LE_MOOD_INTENSE,
+    LE_MOOD_COUNT
+};
+
 struct le_music_palette {
     struct led_rgb primary;
     struct led_rgb secondary;
@@ -63,9 +77,17 @@ struct le_music_director {
     double change_started;
     int have_scene_time;
 
+    enum le_music_mood mood;
+    unsigned int palette_index;      /* within the mood's family */
+    double heat;                     /* slow mood score, see le_mood_for() */
+    double heat_seconds;             /* music heard by the mood score */
+    double first_update;
+
     unsigned int confidence_ema;
     unsigned int build_ema;
-    unsigned int quiet_frames;
+    double last_update;      /* EMAs follow elapsed time, not frame count */
+    double quiet_since;
+    int quiet;
     int have_history;
 
     enum le_music_effect effect;
@@ -107,6 +129,7 @@ void le_music_director_scene(const struct le_music_director *director,
 void le_music_director_interrupt(struct le_music_director *director);
 
 const char *le_music_grammar_name(enum le_music_grammar grammar);
+const char *le_music_mood_name(enum le_music_mood mood);
 const char *le_music_effect_name(enum le_music_effect effect);
 
 #endif /* LE_MUSIC_DIRECTOR_H */
