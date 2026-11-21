@@ -1,0 +1,13 @@
+# Dependencies of the pinned aiosendspin server oracle (with its "server"
+# extra) for the Sendspin interop lane. The aiosendspin code itself comes from
+# the archive pinned in Platform's SOURCE.lock, not from PyPI.
+aiohttp==3.14.5
+cpace==0.1.0
+cryptography==50.0.2
+mashumaro==3.23
+noiseprotocol==0.3.1
+orjson==3.13.0
+zeroconf==0.151.5
+av==19.0.2
+numpy==2.5.4
+pillow==13.0.0
