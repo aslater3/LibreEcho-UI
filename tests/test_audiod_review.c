@@ -10,6 +10,8 @@
 #define LE_VOLUME_LEVELING_PATH "/tmp/libreecho-audiod-review-volume-leveling"
 #define LE_REPLY_VOLUME_PATH "/tmp/libreecho-audiod-review-reply-volume"
 #define LE_REPLY_VOLUME_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/reply.volume"
+#define LE_DUCK_PERCENT_PATH "/tmp/libreecho-audiod-review-duck-percent"
+#define LE_DUCK_PERCENT_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/duck.volume"
 #define LE_TONE_PATH "/tmp/libreecho-audiod-review-tone"
 #define LE_BOOST_PATH "/tmp/libreecho-audiod-review-speaker-boost"
 #define LE_TONE_RUNTIME_PATH LE_MASTER_VOLUME_DIR "/tone.conf"
@@ -857,6 +859,75 @@ static void test_reply_volume(void)
     unlink(LE_REPLY_VOLUME_PATH); unlink(LE_REPLY_VOLUME_RUNTIME_PATH);
 }
 
+/* Residual media duck level: persisted owner percent drives duck.volume. */
+static void test_duck_percent(void)
+{
+    struct audio_hw audio;
+    struct stat st;
+    char response[1024], text[16];
+    int level = -1;
+
+    unlink(LE_DUCK_PERCENT_PATH); unlink(LE_DUCK_PERCENT_RUNTIME_PATH);
+    require_condition(duck_percent_load(&level) < 0, "missing choice means the engine default");
+    require_condition(duck_percent_publish(0, 0) == 0 && access(LE_DUCK_PERCENT_RUNTIME_PATH, F_OK) != 0,
+                      "default publishes no duck.volume");
+    memset(&audio, 0, sizeof(audio)); audio.volume = 40; audio.notification_volume = 40;
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"duck_percent\":25,\"duck_percent_custom\":false") != NULL,
+                      "status reports the engine default while following");
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_duck_percent\",\"args\":{\"percent\":7}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.duck_percent_custom == 1 &&
+                      audio.duck_percent == 7, "duck percent set");
+    require_condition(read_small(LE_DUCK_PERCENT_RUNTIME_PATH, text, sizeof(text)) == 2 && !strcmp(text, "7\n"),
+                      "duck.volume published for the engine");
+    require_condition(stat(LE_DUCK_PERCENT_PATH, &st) == 0 && (st.st_mode & 0777) == 0600,
+                      "duck percent persisted 0600");
+    require_condition(duck_percent_load(&level) == 0 && level == 7,
+                      "persisted duck percent survives a restart");
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"status\"}", response, sizeof(response));
+    require_condition(strstr(response, "\"duck_percent\":7,\"duck_percent_custom\":true") != NULL,
+                      "status reports the owner duck level");
+
+    /* A cleared /run or a stray edit is corrected at the poll cadence. */
+    unlink(LE_DUCK_PERCENT_RUNTIME_PATH);
+    audio.last_duck_check_ms = 0;
+    duck_percent_reconcile(&audio, 1000);
+    require_condition(read_small(LE_DUCK_PERCENT_RUNTIME_PATH, text, sizeof(text)) == 2 && !strcmp(text, "7\n"),
+                      "missing duck.volume re-published");
+    { int fd = open(LE_DUCK_PERCENT_RUNTIME_PATH, O_WRONLY | O_TRUNC); require_condition(fd >= 0 && write(fd, "9\n", 2) == 2, "stale write"); close(fd); }
+    duck_percent_reconcile(&audio, 1000 + VOLUME_GUARD_POLL_MS);
+    require_condition(read_small(LE_DUCK_PERCENT_RUNTIME_PATH, text, sizeof(text)) == 2 && !strcmp(text, "7\n"),
+                      "stale duck.volume corrected");
+
+    {
+        static const char *const bad[] = {
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_duck_percent\",\"args\":{\"percent\":101}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_duck_percent\",\"args\":{\"percent\":-1}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_duck_percent\",\"args\":{}}",
+            "{\"v\":1,\"id\":1,\"cmd\":\"set_duck_percent\",\"args\":{\"custom\":true}}"
+        };
+        size_t k;
+        for (k = 0; k < sizeof(bad) / sizeof(bad[0]); ++k) {
+            mock_audiod_ipc(&audio, bad[k], response, sizeof(response));
+            require_condition(strstr(response, "\"ok\":false") != NULL && audio.duck_percent == 7 &&
+                              audio.duck_percent_custom == 1, "invalid duck level rejected without change");
+        }
+    }
+
+    mock_audiod_ipc(&audio, "{\"v\":1,\"id\":1,\"cmd\":\"set_duck_percent\",\"args\":{\"custom\":false}}",
+                    response, sizeof(response));
+    require_condition(strstr(response, "\"ok\":true") != NULL && audio.duck_percent_custom == 0,
+                      "duck returns to the engine default");
+    require_condition(access(LE_DUCK_PERCENT_RUNTIME_PATH, F_OK) != 0 && access(LE_DUCK_PERCENT_PATH, F_OK) != 0,
+                      "default removes duck.volume and the persisted choice");
+    { int fd = open(LE_DUCK_PERCENT_RUNTIME_PATH, O_WRONLY | O_CREAT, 0640); require_condition(fd >= 0 && write(fd, "50\n", 3) == 3, "stray write"); close(fd); }
+    duck_percent_reconcile(&audio, 1000 + 2 * VOLUME_GUARD_POLL_MS);
+    require_condition(access(LE_DUCK_PERCENT_RUNTIME_PATH, F_OK) != 0, "a stray duck.volume is removed while following");
+    unlink(LE_DUCK_PERCENT_PATH); unlink(LE_DUCK_PERCENT_RUNTIME_PATH);
+}
+
 
 /* Exact file content, or a failure naming what differed. */
 static void require_file(const char *path, const char *expected, int mode, const char *message)
@@ -1231,6 +1302,7 @@ int main(void)
     test_logical_master_status();
     test_volume_leveling();
     test_reply_volume();
+    test_duck_percent();
     test_owner_eq();
     test_airplay_restore();
     test_airplay_restart_recovery();

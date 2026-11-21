@@ -121,7 +121,7 @@ struct state {
  /* Optional noise suppression on the speech sent to Home Assistant (#401), off unless web-config says voice_noise_suppression. It runs on every frame so the noise estimate is settled when a turn starts. */
  int noise_suppression;struct le_voice_ns ns;
  char conversation[128],tts_url[1024],next_url[1024],result[24];int continue_turn,run_end,early_tts,playing,announcement,pipeline,tts_done,timer_pending;
- time_t result_time;struct esp_playback playback;int mdns_fd;
+ time_t result_time;struct esp_playback playback;int mdns_fd;int duck_fd;
  char process_start[32],boot_id[64],listener_inode[32];unsigned listener_port;
  /* set_ring (#397): when its ledd overlay ends; 0 when none is running. */
  uint64_t action_ring_end;
@@ -315,7 +315,20 @@ static int announce_done(int success){unsigned char b[4];struct ep_writer w={b,s
 static void capture_end(void){if(S.turn==2&&S.owner>=0){unsigned char b[4];struct ep_writer w={b,sizeof b,0,0};ep_uint(&w,2,1);(void)send_writer(&S.clients[S.owner],106,&w);}if(S.turn==1||S.turn==2){S.turn=3;event_send(ACTIVITY_VOICE_KEY,"thinking");}profile("thinking");}
 /* Playback ends through turn_clear or the tick; report it once, when S.playing drops. */
 static void playback_stopped(void){if(!S.playing)return;S.playing=0;event_send(ACTIVITY_PLAYBACK_KEY,"stopped");}
-static void turn_clear(const char *result,int notify){int active=S.turn||S.playing,server=S.server_turn;if(notify)(void)announce_done(0);playback_stopped();esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=S.server_turn=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);
+/* Wake-word ducking: while a voice turn waits on the mic or STT (turn 1-3,
+ * no playback), silence on the priority bus keeps the engine's media duck
+ * engaged for the whole listening window, like the stock Alexa behaviour.
+ * TTS playback then takes the bus over, so this writer is closed as soon as
+ * playback starts -- two writers on the same FIFO would interleave garbage. */
+static void duck_stop(void){if(S.duck_fd>=0)close(S.duck_fd);S.duck_fd=-1;}
+static void duck_pump(void){
+ static const int16_t silence[2048*2]; /* one 48 kHz stereo period */
+ if(S.duck_fd<0)S.duck_fd=open(S.bus_path,O_WRONLY|O_NONBLOCK|O_CLOEXEC);
+ if(S.duck_fd<0)return;
+ ssize_t n=write(S.duck_fd,silence,sizeof silence);
+ if(n<0&&errno!=EAGAIN&&errno!=EINTR)duck_stop();
+}
+static void turn_clear(const char *result,int notify){int active=S.turn||S.playing,server=S.server_turn;duck_stop();if(notify)(void)announce_done(0);playback_stopped();esp_playback_close(&S.playback);S.playing=S.turn=S.continue_turn=S.run_end=S.early_tts=S.announcement=S.pipeline=S.tts_done=S.server_turn=0;S.next_url[0]=S.tts_url[0]=S.conversation[0]=0;snprintf(S.result,sizeof S.result,"%s",result);S.result_time=time(NULL);
  /* A server-wake stream ends by timeout or HA error; retry after a second so a rejected run cannot spin. */
  if(server)S.server_retry=S.now+1000;
  /* One voice event per opened turn (wake, announcement or continued turn). */
@@ -354,7 +367,7 @@ static int server_listen_start(void){unsigned char b[160];struct ep_writer w={b,
  from=S.ring_end>16000?S.ring_end-16000:0;if(from<S.ring_first)from=S.ring_first;S.capture_next=from;
  S.turn=1;S.server_turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;profile("listening");status_write();return 0;
 }
-static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}S.playing=1;S.turn=4;all_states();event_send(ACTIVITY_PLAYBACK_KEY,"started");return 0;}
+static int playback_start(const char *url){if(!url[0]||S.playing)return -1;if(esp_playback_start(&S.playback,url,S.bus_path,S.ca_path,S.now)<0){esp_playback_close(&S.playback);return -1;}duck_stop();S.playing=1;S.turn=4;all_states();event_send(ACTIVITY_PLAYBACK_KEY,"started");return 0;}
 /* HA may await the drain ack before RUN_END. Ack once, but keep this pipeline
  * alive until RUN_END so its delayed event cannot address a new capture. */
 static void completed(void){if(!S.tts_done)(void)announce_done(1);S.tts_done=1;if(S.pipeline&&!S.run_end)return;char conv[128];int cont=S.continue_turn;snprintf(conv,sizeof conv,"%s",S.conversation);turn_clear("success",0);if(cont&&!mic_muted()){snprintf(S.conversation,sizeof S.conversation,"%s",conv);(void)voice_start(S.ring_end,1);}}
@@ -698,7 +711,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
   char *end;unsigned long p;if(!le_eh_decimal(argv[4]))return 2;p=strtoul(argv[4],&end,10);if(*end||p<1||p>65535)return 2;
   return le_esphome_health(argv[2],argv[3],argv[5],(unsigned)p,argv[6],!strcmp(argv[1],"--process-check"))?0:1;
  }
- memset(&S,0,sizeof S);le_ble_proxy_init(&B);S.owner=-1;S.mdns_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;S.lux=S.lux_sent=-1;S.led_r=S.led_g=S.led_b=255;S.led_brightness=100;
+ memset(&S,0,sizeof S);le_ble_proxy_init(&B);S.owner=-1;S.mdns_fd=-1;S.duck_fd=-1;S.muted=1;S.privacy=-1;S.radio_state=1;S.active_wake=1;S.restore_volume=66;S.turn_limit=120000;S.lux=S.lux_sent=-1;S.led_r=S.led_g=S.led_b=255;S.led_brightness=100;
  S.config_path=getenv("LE_CONFIG_PATH");if(!S.config_path||!S.config_path[0])S.config_path="/etc/libreecho/web-config.json";S.status_path="/run/libreecho/esphome-status.json";S.control_path="/run/libreecho/esphome-control.sock";S.agent_path=LE_ADAPTER_AGENT_SOCK;S.control_fd=-1;S.audio_path="/run/libreecho/audio.sock";S.wake_path="/run/libreecho/wakeword.sock";S.radio_path="/run/libreecho/radio.sock";S.timer_path="/run/libreecho/timer.sock";S.led_path="/run/libreecho/led.sock";S.mdns_path=LE_MDNS_SOCKET;S.bus_path="/run/libreecho-audio/system.pcm";S.privacy_path="/sys/devices/platform/amz_privacy/privacy_state";S.idme_path="/sys/firmware/devicetree/base/idme";
  for(unsigned i=0;i<CLIENTS;i++)S.clients[i].fd=-1;for(unsigned i=0;i<JOBS;i++)S.jobs[i].fd=-1;S.wake.fd=S.mic.fd=S.timer_cleanup.fd=-1;S.button_fd=-1;esp_playback_init(&S.playback);
  snprintf(S.button_path,sizeof S.button_path,"%s",LE_ADAPTER_BUTTON_EVENT_SOCK);
@@ -735,6 +748,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  jobs_tick();ble_tick();led_tick();action_ring_tick();level_tick();if(S.now>=S.wake_retry){if(S.wake.fd<0)(void)io_open(&S.wake,S.wake_path,"subscribe","{}",0);if(S.mic.fd<0)(void)io_open(&S.mic,S.wake_path,"stream_audio","{}",0);S.wake_retry=S.now+1000;}
  stream_tick(&S.mic,1);stream_tick(&S.wake,0);control_tick();capture_tick();
  if(!S.turn&&S.owner>=0)(void)server_listen_start();
+ if(S.turn&&S.turn!=4&&!S.playing)duck_pump();
  if(S.turn&&S.now>S.turn_deadline)cancel_turn("timeout");
  /* next_url is set only while a preannounce plays: the announcement follows whether the chime finished or failed. */
  if(S.playing){int rc=esp_playback_tick(&S.playback,S.now);if(rc){playback_stopped();if(S.next_url[0]){char next[1024];snprintf(next,sizeof next,"%s",S.next_url);S.next_url[0]=0;if(playback_start(next)<0)turn_clear("playback_error",1);}else if(rc<0)turn_clear("playback_error",1);else completed();}}
@@ -744,7 +758,7 @@ int main(int argc,char **argv){const char *bind_addr="0.0.0.0";unsigned port=605
  mdns_tick(port);
  }
  S.ready=0;for(unsigned i=0;i<CLIENTS;i++)client_close(i);
- close(listener);if(S.button_fd>=0){close(S.button_fd);unlink(S.button_path);S.button_fd=-1;}io_close(&S.wake);io_close(&S.mic);esp_playback_close(&S.playback);if(S.mdns_fd>=0)close(S.mdns_fd);if(S.control_fd>=0){close(S.control_fd);(void)unlink(S.control_path);}
+ close(listener);if(S.button_fd>=0){close(S.button_fd);unlink(S.button_path);S.button_fd=-1;}io_close(&S.wake);io_close(&S.mic);esp_playback_close(&S.playback);duck_stop();if(S.mdns_fd>=0)close(S.mdns_fd);if(S.control_fd>=0){close(S.control_fd);(void)unlink(S.control_path);}
  /* No new owners/events during shutdown. Retire unsent jobs, settle sent
   * ones, then clear via the reserved slot. Adapter outage must not hang exit;
   * the next startup keeps its cleanup fence until it receives an ACK. */

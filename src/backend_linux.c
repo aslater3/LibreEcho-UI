@@ -1337,6 +1337,15 @@ static int audio(struct le_backend *b, struct le_audio_state *o)
         json_get_int(response, "reply_volume", &v) > 0 && v >= 0 && v <= 100) {
         o->reply_volume = v; o->reply_volume_custom = 1;
     }
+    /* Older audiod builds have no duck level; the engine's default applies. */
+    o->duck_percent = 25; o->duck_percent_custom = 0;
+    if (json_get_bool(response, "duck_percent_custom", &v) > 0 && v &&
+        json_get_int(response, "duck_percent", &v) > 0 && v >= 0 && v <= 100) {
+        o->duck_percent = v; o->duck_percent_custom = 1;
+    } else if (json_get_int(response, "duck_percent", &v) > 0 &&
+               v >= 0 && v <= 100) {
+        o->duck_percent = v;
+    }
     read_owner_eq(response, o);
     if (json_get_bool(response, "volume_leveling", &v) > 0) o->volume_leveling = v;
     else if (json_get_bool(response, "microphone_muted", &v) > 0) { o->muted = v; found = 1; }
@@ -1430,6 +1439,16 @@ static int reply_volume(struct le_backend *b, int custom, int value)
     if (custom) snprintf(args, sizeof(args), "{\"volume\":%d}", value);
     else snprintf(args, sizeof(args), "{\"custom\":false}");
     return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_reply_volume", args);
+}
+
+static int duck_percent(struct le_backend *b, int custom, int value)
+{
+    char args[32];
+    (void)b;
+    if (custom && (value < 0 || value > 100)) return LE_INVALID;
+    if (custom) snprintf(args, sizeof(args), "{\"percent\":%d}", value);
+    else snprintf(args, sizeof(args), "{\"custom\":false}");
+    return adapter_json_command(LE_ADAPTER_AUDIO_SOCK, "set_duck_percent", args);
 }
 
 /* The live mixing mode is micd's; an unreachable micd reports the default. */
@@ -3596,7 +3615,8 @@ static const struct le_backend_ops ops = {
     timer_sunrise_get, timer_sunrise_set,
     sendspin_set_unpaired,
     do_not_disturb,
-    owner_eq, speaker_boost
+    owner_eq, speaker_boost,
+    duck_percent
 };
 
 int le_linux_create(struct le_backend *b, const char *cfg)
