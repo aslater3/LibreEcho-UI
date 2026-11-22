@@ -1,6 +1,7 @@
 #include "voice_dsp.h"
 
 #include <limits.h>
+#include <math.h>
 #include <string.h>
 
 /*
@@ -140,22 +141,38 @@ int16_t le_voice_mix_selected(
     return saturate_s16(divide_rounded(sum, count));
 }
 
+void le_voice_highpass_set_hz(struct le_voice_highpass *filter, float hz)
+{
+    /*
+     * First-order high-pass coefficient for 16 kHz:
+     * y[n] = a * (y[n-1] + x[n] - x[n-1]), a = exp(-2*pi*fc/fs).
+     * 80 Hz -> 0.9691 -> 31755 Q15.  hz <= 0 disables the filter.
+     */
+    if (hz > 0.f && hz < 7900.f)
+        filter->coefficient_q15 = (int32_t)(
+            expf(-2.f * 3.14159265358979f * hz / 16000.f) * 32768.f +
+            0.5f);
+    else
+        filter->coefficient_q15 = 0;
+}
+
 void le_voice_highpass_init(struct le_voice_highpass *filter)
 {
     memset(filter, 0, sizeof(*filter));
+    le_voice_highpass_set_hz(filter, 80.f);
 }
 
 int16_t le_voice_highpass_sample(struct le_voice_highpass *filter,
                                  int16_t input)
 {
-    /*
-     * First-order 80 Hz high-pass at 16 kHz:
-     * y[n] = 0.9691 * (y[n-1] + x[n] - x[n-1]).
-     * The Q15 coefficient keeps the hot path integer-only on ARMv7.
-     */
-    const int32_t coefficient_q15 = 31755;
-    int64_t difference = (int64_t)filter->previous_output +
-                         input - filter->previous_input;
+    /* The Q15 coefficient keeps the hot path integer-only on ARMv7. */
+    const int32_t coefficient_q15 = filter->coefficient_q15;
+    int64_t difference;
+
+    if (!coefficient_q15)
+        return input;
+    difference = (int64_t)filter->previous_output +
+                 input - filter->previous_input;
     /*
      * Truncate toward zero here rather than rounding.  Rounding leaves a
      * small fixed-point limit cycle after a DC step; truncation lets the

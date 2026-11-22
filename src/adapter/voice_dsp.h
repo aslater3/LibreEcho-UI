@@ -51,6 +51,7 @@ struct le_voice_calibration {
 struct le_voice_highpass {
     int32_t previous_input;
     int32_t previous_output;
+    int32_t coefficient_q15;
 };
 
 struct le_voice_vad {
@@ -87,6 +88,7 @@ int16_t le_voice_mix_selected(
     unsigned int selected_mask);
 
 void le_voice_highpass_init(struct le_voice_highpass *filter);
+void le_voice_highpass_set_hz(struct le_voice_highpass *filter, float hz);
 int16_t le_voice_highpass_sample(struct le_voice_highpass *filter,
                                  int16_t input);
 

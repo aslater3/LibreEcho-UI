@@ -1,0 +1,29 @@
+{
+  "name": "Amazon Echo (2nd Gen, radar_puffin)",
+  "ir_file": "A3S5BH2HU6VAYF.bin",
+  "mic_x_um": [
+    -31176,
+    -31176,
+    0,
+    31176,
+    31176,
+    0,
+    0
+  ],
+  "mic_y_um": [
+    18000,
+    -18000,
+    -36000,
+    -18000,
+    18000,
+    36000,
+    0
+  ],
+  "capture": {
+    "channels": 9,
+    "ref_lane": 7,
+    "filler_lanes": [
+      8
+    ]
+  }
+}

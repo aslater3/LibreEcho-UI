@@ -56,9 +56,28 @@ struct le_beamformer {
     unsigned long switches;
     int locked;              /* -1 = automatic selection, else beam index */
     int primed;
+    /* Anti-beam: spatial null onto the measured speaker->mic path H(k).
+     * X'_m[k] = X_m[k] - H_m[k] * (H[k]^H X[k]) / (H[k]^H H[k] + eps).
+     * When enabled the output is the projected channel sum (no beam select). */
+    int antibeam;
+    /* Hop crossfade between beam-select and projected-sum output:
+     * ab_rendered = mode currently being faded toward, ab_fade hops left. */
+    int ab_rendered;
+    int ab_fade;
+    float ab_re[LE_BEAM_BINS][LE_VOICE_LOGICAL_CHANNELS];
+    float ab_im[LE_BEAM_BINS][LE_VOICE_LOGICAL_CHANNELS];
+    float ab_den[LE_BEAM_BINS];
 };
 
+#define LE_AB_FADE_HOPS 8
+
 /* Returns 0, or -1 when mic_mask or beam_count is unusable. */
+/* Override the compiled-in geometry with per-lane positions in
+ * micrometres (x east, y north in the array frame). Call before
+ * le_beamformer_init; lanes beyond count keep the default layout. */
+void le_beamformer_set_positions(const double *x_um, const double *y_um,
+                                 unsigned int count);
+
 int le_beamformer_init(struct le_beamformer *beamformer,
                        unsigned int mic_mask, unsigned int beam_count);
 
@@ -92,10 +111,13 @@ enum le_mic_mix {
     LE_MIC_MIX_BEAMFORMER = 0,   /* fixed beams, follows the talker (default) */
     LE_MIC_MIX_AVERAGE = 1,      /* mean of the selected microphones */
     LE_MIC_MIX_SINGLE = 2,       /* one microphone: the lowest selected lane */
-    LE_MIC_MIX_COUNT = 3
+    /* Spatial anti-beam null against the measured speaker->mic transfer
+     * (needs loaded taps, falls back to the beamformer without them). */
+    LE_MIC_MIX_ANTIBEAM = 3,
+    LE_MIC_MIX_COUNT = 4
 };
 
-/* Parses "beamformer", "average" or "single"; returns -1 for anything else. */
+/* Parses "beamformer", "average", "single" or "antibeam"; -1 otherwise. */
 int le_mic_mix_parse(const char *text);
 
 /* The canonical name of a mode, or NULL when out of range. */
@@ -115,5 +137,15 @@ int le_mic_mix_single_lane(unsigned int mic_mask);
  */
 int16_t le_mic_mix_single(const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
                           unsigned int mic_mask, int lane);
+
+/*
+ * Enable the anti-beam spatial null: taps are the measured speaker->mic
+ * impulse responses, int16, [channel][ntaps] (as in echo-ir.bin; pass
+ * reversed=1 when taps arrive reversed, like the FIR dot-product layout).
+ * Only the channels selected by mic_mask are used.  Returns 0 on success.
+ */
+int le_beamformer_antibeam_load(struct le_beamformer *beamformer,
+                                const int16_t *taps, int ntaps, int channels,
+                                int reversed);
 
 #endif

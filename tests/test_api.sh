@@ -554,10 +554,23 @@ done
 curl -fsS "$URL/api/v1/audio" | grep -q '"reply_volume":35,"reply_volume_custom":true'
 curl -fsS "$URL/api/v1/audio" | grep -q "\"data\":{\"volume\":$master,"
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"reply_volume_custom":false}' | grep -q "\"reply_volume\":$master,\"reply_volume_custom\":false"
+# Media duck level: engine default until set, own percent, back to default, validated.
+curl -fsS "$URL/api/v1/audio" | grep -q '"duck_percent_custom":false'
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"duck_percent":5}' | grep -q '"duck_percent":5,"duck_percent_custom":true'
+# A bad duck level is rejected before any other field in the same request is applied.
+for bad in '{"duck_percent":101}' '{"duck_percent":-1}' '{"duck_percent":"low"}' '{"duck_percent":5.5}' '{"duck_percent_custom":true}' '{"duck_percent_custom":"no"}' '{"volume":7,"duck_percent":101}'; do
+  code=$(curl -sS -o /tmp/le-duck-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data "$bad")
+  [ "$code" = 400 ] || { echo "duck percent accepted $bad ($code)" >&2; exit 1; }
+done
+curl -fsS "$URL/api/v1/audio" | grep -q '"duck_percent":5,"duck_percent_custom":true'
+curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"duck_percent_custom":false}' | grep -q '"duck_percent_custom":false'
 code=$(curl -sS -o /tmp/le-voice-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"tts_voice":"not-a-voice"}')
 [ "$code" = 400 ]
 # Microphone mixing: beamformer by default, persisted choice, unknown mode rejected.
 curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_mix":"beamformer"'
+# microphone_antibeam_available is reported whenever micd answers; the mock
+# backend has no measured IR, so the antibeam mix option is not offered.
+curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_antibeam_available":false'
 curl -fsS -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"average"}' | grep -q '"microphone_mix":"average"'
 curl -fsS "$URL/api/v1/audio" | grep -q '"microphone_mix":"average"'
 code=$(curl -sS -o /tmp/le-mix-invalid.out -w '%{http_code}' -X PUT "$URL/api/v1/audio" -H "$CSRF" -H 'Content-Type: application/json' --data '{"microphone_mix":"echo"}')

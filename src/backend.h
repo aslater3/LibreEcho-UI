@@ -33,10 +33,17 @@ struct le_audio_state { int volume, microphone_gain, notification_volume, muted,
  /* Separate assistant-reply volume (#409). reply_volume_custom 0: replies
     follow the master and reply_volume equals volume; 1: their own level. */
  int reply_volume, reply_volume_custom;
+ /* Residual media level while ducked under higher-priority audio (voice
+    turns, announcements), percent 0-100. duck_percent_custom 0: the audio
+    engine's compiled default applies; 1: the owner's level. */
+ int duck_percent, duck_percent_custom;
  /* Mic array mixing mode for the voice stream: beamformer (default), average or single. */
  char microphone_mix[16];
  /* Array lane (0-6) used by the single mode; -1 is automatic (lowest selected lane). */
  int microphone_lane;
+ /* 1 when the measured anti-beam IR loaded for this device model, so the
+    antibeam mix mode is selectable; 0 on models without shipped taps. */
+ int microphone_antibeam_available;
  /* Owner four-band equaliser (owner_eq.h): band gains in half-decibels
     (bass, low_mid, high_mid, treble; -12..12 = -6..+6 dB) and the display
     preset name ("" means flat). boost_db is the speaker boost: 0, 3 or 6. */
@@ -207,7 +214,7 @@ void le_backend_destroy(struct le_backend *b);
 const char *le_backend_mode(struct le_backend *b);
 const char *le_result_code(int rc);
 int le_get_system_status(struct le_backend*,struct le_system_status*); int le_get_device_info(struct le_backend*,struct le_device_info*);
-int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_set_volume_leveling(struct le_backend*,int); int le_set_reply_volume(struct le_backend*,int,int); int le_set_microphone_mix(struct le_backend*,const char*); int le_set_microphone_lane(struct le_backend*,int); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*); int le_radio_play(struct le_backend*,const char*); int le_radio_stop(struct le_backend*); int le_radio_playing(struct le_backend*,struct le_radio_status*); int le_set_do_not_disturb(struct le_backend*,int);
+int le_get_audio_state(struct le_backend*,struct le_audio_state*); int le_set_volume(struct le_backend*,int); int le_set_microphone_gain(struct le_backend*,int); int le_set_microphone_muted(struct le_backend*,int); int le_play_test_tone(struct le_backend*); int le_set_tts_voice(struct le_backend*,const char*); int le_set_volume_leveling(struct le_backend*,int); int le_set_reply_volume(struct le_backend*,int,int); int le_set_duck_percent(struct le_backend*,int,int); int le_set_microphone_mix(struct le_backend*,const char*); int le_set_microphone_lane(struct le_backend*,int); int le_announce(struct le_backend*,const char*); int le_stop_speech(struct le_backend*); int le_start_noise(struct le_backend*,const char*,int,int); int le_stop_noise(struct le_backend*); int le_simulate_audio(struct le_backend*,const char*); int le_radio_play(struct le_backend*,const char*); int le_radio_stop(struct le_backend*); int le_radio_playing(struct le_backend*,struct le_radio_status*); int le_set_do_not_disturb(struct le_backend*,int);
 int le_start_noise_ex(struct le_backend*,const struct le_noise_request*);
 /* Owner equaliser: preset is a canonical name from owner_eq.h ("custom"
    included), halves the four band gains; LE_INVALID outside the rules. */

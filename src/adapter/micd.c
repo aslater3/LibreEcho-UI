@@ -1,18 +1,29 @@
 #include "adapter.h"
+#include "json.h"
 #include "log.h"
 #include "mic_beamformer.h"
+#include "voice_aec.h"
 #include "voice_dsp.h"
 
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 #include <errno.h>
 #include <math.h>
+#include <arpa/inet.h>
+#include <ctype.h>
 #include <fcntl.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
 #include <stdio.h>
+#include <sys/prctl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -30,6 +41,17 @@
 #define MIC_LOGICAL_CHANNELS LE_VOICE_LOGICAL_CHANNELS
 #define MIC_BITS 24
 #define MICCAL_UNITY LE_VOICE_MICCAL_UNITY
+/*
+ * The capture carries one speaker reference lane (the electrical playback
+ * signal): it correlates with every microphone at the acoustic delay, which
+ * lets a per-channel echo canceller work sample-synchronously inside the
+ * same capture clock instead of chasing a buffered software mix.  Which raw
+ * lane carries it comes from the model profile (capture.ref_lane); any
+ * remaining lanes past it are undriven fillers.
+ */
+#define MIC_POST_AEC_FRAME_SAMPLES LE_VOICE_AEC_FRAME_SAMPLES
+#define MIC_POST_AEC_DEFAULT_TAIL_MS 128
+#define MIC_POST_AEC_MAX_TAIL_MS 400
 
 struct micd_config {
     const char *socket_path;
@@ -64,6 +86,10 @@ struct beam_view {
     volatile unsigned int mix_mode;
     /* Array lane used by the "single" mode; -1 is automatic (lowest selected lane). */
     volatile int mix_lane;
+    /* Runtime gate for the per-channel static FIR echo subtraction. */
+    volatile int fir_enable;
+    /* Set by the worker when the measured IR (and thus anti-beam) loaded. */
+    volatile int antibeam_available;
 };
 
 static struct beam_view *beam_view;
@@ -325,6 +351,7 @@ static int write_all(int fd, const void *buffer, size_t size)
     return 0;
 }
 
+
 static int read_request_line(int fd, char *buffer, size_t size)
 {
     size_t used = 0;
@@ -544,17 +571,183 @@ static unsigned int digital_gain_from_environment(void)
     return (unsigned int)parsed;
 }
 
+static int mic_ir_ntaps;
+
+static int read_device_type_id(const char *dt_idme_dir, char *out,
+                               size_t size);
+
+/* Per-model profile: models/<device_type_id>.json wires up the shipped
+ * IR file and the mic geometry for hardware whose layout differs from
+ * the compiled-in Echo 2 ring. Missing file or fields keep defaults. */
+struct mic_model {
+    char ir_file[64];
+    double mic_x_um[LE_VOICE_LOGICAL_CHANNELS];
+    double mic_y_um[LE_VOICE_LOGICAL_CHANNELS];
+    unsigned int mic_pos_count;
+    unsigned int ref_lane;
+    unsigned int beam_mic_mask;
+};
+
+static unsigned int json_floats(const char *p, size_t n, double *out,
+                                unsigned int cap)
+{
+    unsigned int count = 0;
+    const char *end = p + n;
+
+    while (p < end && count < cap) {
+        char *stop;
+        double v;
+        while (p < end && (isspace((unsigned char)*p) || *p == ',' ||
+                           *p == '[' || *p == ']'))
+            ++p;
+        v = strtod(p, &stop);
+        if (stop == p)
+            break;
+        out[count++] = v;
+        p = stop;
+    }
+    return count;
+}
+
+static void mic_model_load(const char *dt_idme_dir, struct mic_model *model)
+{
+    const char *dir = getenv("LE_MIC_MODEL_DIR");
+    char path[320], id[64], *json = NULL;
+    FILE *f;
+    long size;
+
+    memset(model, 0, sizeof(*model));
+    /* Convention: the speaker reference is the last capture lane before
+     * any filler lanes; capture.ref_lane in the model profile overrides. */
+    model->ref_lane = LE_VOICE_RAW_CHANNELS - 2;
+    if (!dir)
+        dir = "/usr/local/share/libreecho/models";
+    if (read_device_type_id(dt_idme_dir, id, sizeof(id)) < 0 ||
+        snprintf(path, sizeof(path), "%s/%s.json", dir, id) >=
+            (int)sizeof(path))
+        return;
+    f = fopen(path, "rb");
+    if (!f)
+        return;
+    fseek(f, 0, SEEK_END);
+    size = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    if (size > 0 && size < 16384 && (json = malloc((size_t)size + 1))) {
+        if (fread(json, 1, (size_t)size, f) == (size_t)size) {
+            const char *arr;
+            size_t arr_n;
+
+            json[size] = '\0';
+            {
+                int lane;
+
+                if (json_get_int(json, "ref_lane", &lane) > 0 &&
+                    lane >= 0 && lane < LE_VOICE_RAW_CHANNELS)
+                    model->ref_lane = (unsigned int)lane;
+            }
+            (void)json_get_string(json, "ir_file", model->ir_file,
+                                  sizeof(model->ir_file));
+            if (json_get_array_top_level(json, "beam_mics_default", &arr,
+                                         &arr_n) > 0) {
+                double lanes[LE_VOICE_LOGICAL_CHANNELS];
+                unsigned int i, n = json_floats(arr, arr_n, lanes,
+                                                LE_VOICE_LOGICAL_CHANNELS);
+                for (i = 0; i < n; ++i) {
+                    unsigned int lane = (unsigned int)lanes[i];
+                    if (lane < LE_VOICE_LOGICAL_CHANNELS)
+                        model->beam_mic_mask |= 1U << lane;
+                }
+            }
+            if (json_get_array_top_level(json, "mic_x_um", &arr, &arr_n) > 0) {
+                unsigned int nx = json_floats(arr, arr_n, model->mic_x_um,
+                                              LE_VOICE_LOGICAL_CHANNELS);
+                if (json_get_array_top_level(json, "mic_y_um", &arr,
+                                             &arr_n) > 0 &&
+                    json_floats(arr, arr_n, model->mic_y_um,
+                                LE_VOICE_LOGICAL_CHANNELS) == nx)
+                    model->mic_pos_count = nx;
+            }
+            le_log_info("mic model: %s (ir=%s, positions=%u)", path,
+                        model->ir_file[0] ? model->ir_file : "none",
+                        model->mic_pos_count);
+            le_log_info("mic model: ref_lane=%u", model->ref_lane);
+        }
+        free(json);
+    }
+    fclose(f);
+}
+
 /*
  * Microphones fed to the fixed beams.  The default is the stock speech set
  * (lanes 0, 1, 3 and 4); LE_MIC_BEAM_MICS="all" or a list such as "0,1,3,4,6"
  * selects another subset for comparison.  An invalid value falls back to the
  * default rather than failing the stream.
  */
-static unsigned int beam_mic_mask(void)
+static unsigned int beam_mic_mask(const struct mic_model *model)
 {
     unsigned int mask = le_beamformer_parse_mics(getenv("LE_MIC_BEAM_MICS"));
 
-    return mask && (mask & (mask - 1U)) ? mask : LE_BEAM_DEFAULT_MIC_MASK;
+    /* LE_MIC_BEAM_MICS stays the escape hatch for experiments; next a
+     * beam_mics_default list from the model profile. */
+    if (mask && (mask & (mask - 1U)))
+        return mask;
+    if (model->beam_mic_mask)
+        return model->beam_mic_mask;
+    /* Anti-beam and the per-channel FIR want the measured path on every
+     * microphone; the stock four-mic speech subset nulled noticeably
+     * worse.  Without loaded IR taps there is no measured path at all,
+     * so fall back to the stock speech set (lanes 0, 1, 3, 4). */
+    return (mic_ir_ntaps > 0 ||
+            (beam_view && beam_view->antibeam_available))
+               ? LE_BEAM_ALL_MIC_MASK : 0x1BU;
+}
+
+/*
+ * Optional adaptive residual stage after FIR + beamformer + highpass: a
+ * single Speex canceller on the mono stream against the speaker reference lane,
+ * mopping up what the static IR leaves behind (nonlinearities, drift).
+ * Enabled by default; LE_MIC_POST_AEC=0 falls back to FIR-only output.
+ */
+static int mic_post_aec_enabled(void)
+{
+    const char *value = getenv("LE_MIC_POST_AEC");
+
+    return !value || strcmp(value, "0") != 0;
+}
+
+/* Echo tail the post stage models, in milliseconds (128 default). */
+static unsigned int mic_post_aec_tail_samples(void)
+{
+    const char *value = getenv("LE_MIC_POST_AEC_TAIL_MS");
+    char *end = NULL;
+    unsigned long parsed;
+    unsigned int ms = MIC_POST_AEC_DEFAULT_TAIL_MS;
+
+    if (value && *value) {
+        errno = 0;
+        parsed = strtoul(value, &end, 10);
+        if (!errno && end != value && *end == '\0' &&
+            parsed > 0 && parsed <= MIC_POST_AEC_MAX_TAIL_MS)
+            ms = (unsigned int)parsed;
+    }
+    return ms * (MIC_RATE / 1000U);
+}
+
+/* Residual-echo suppressor depth in dB (negative). */
+static int mic_post_aec_suppress_db(const char *name, int fallback)
+{
+    const char *value = getenv(name);
+    char *end = NULL;
+    long parsed;
+
+    if (!value || !*value)
+        return fallback;
+    errno = 0;
+    parsed = strtol(value, &end, 10);
+    if (errno || end == value || *end != '\0' ||
+        parsed < -120 || parsed > 0)
+        return fallback;
+    return (int)parsed;
 }
 
 /* Writes the selected lanes as "0,1,3,4"; needs 14 bytes for all seven. */
@@ -765,10 +958,12 @@ static int format_status(char *buffer, size_t size,
     int values[MIC_LOGICAL_CHANNELS];
     int count = read_miccal(config->idme_dir, config->dt_idme_dir, values);
     int available = access(config->pcm_path, R_OK) == 0;
+    struct mic_model model;
     char mics[16];
     int n;
 
-    format_mic_list(beam_mic_mask(), mics, sizeof(mics));
+    mic_model_load(config->dt_idme_dir, &model);
+    format_mic_list(beam_mic_mask(&model), mics, sizeof(mics));
     n = snprintf(
         buffer, size,
         "{\"available\":%s,\"simulated\":false,"
@@ -802,10 +997,11 @@ static int format_status(char *buffer, size_t size,
         "\"relative_delay_samples\":{}},"
         "\"pipeline\":{\"stage\":\"fixed-beam-select\","
         "\"microphone_mix\":\"%s\",\"microphone_lane\":%d,"
+        "\"antibeam_available\":%s,"
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
-        "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
-        "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
+        "\"highpass_hz\":120,\"vad\":\"native-energy-baseline\","
+        "\"aec\":\"anti-beam-ir\",\"beamforming\":true,\"wake_word\":false}}",
         available ? "true" : "false",
         capture_active ? "true" : "false",
         capture_active ? "\"raw-stream\"" : "null",
@@ -815,6 +1011,7 @@ static int format_status(char *buffer, size_t size,
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
         mics, le_mic_mix_name(current_mix_mode()), current_mix_lane(),
+        beam_view && beam_view->antibeam_available ? "true" : "false",
         LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
@@ -883,6 +1080,10 @@ static int relay_capture(int client_fd, const struct micd_config *config)
         if (dup2(pipe_fds[1], STDOUT_FILENO) < 0)
             _exit(127);
         close(pipe_fds[1]);
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
+            _exit(127);
+        if (getppid() == 1)
+            _exit(127);
         execv(config->capture_bin, argv);
         _exit(127);
     }
@@ -921,9 +1122,194 @@ static pid_t start_capture(const struct micd_config *config, int output_fd)
             _exit(127);
         if (output_fd != STDOUT_FILENO)
             close(output_fd);
+        /* Kill tinycap automatically when the relay worker dies, so a
+         * crashed worker cannot leave an orphaned capture holding the
+         * PCM device busy for every later stream. */
+        if (prctl(PR_SET_PDEATHSIG, SIGKILL) < 0)
+            _exit(127);
+        if (getppid() == 1)
+            _exit(127);
         execv(config->capture_bin, argv);
         _exit(127);
     }
+}
+
+/*
+ * Measured echo-path model: per-microphone impulse responses of the
+ * speaker reference lane (capture.ref_lane in the model profile),
+ * measured once by the sweep calibration.
+ * The anti-beam projection uses them as the per-frequency speaker-to-mic
+ * steering path. File format: LE_VOICE_LOGICAL_CHANNELS x N int16 Q15
+ * taps, mic-major.
+ */
+#define MIC_IR_MAX_TAPS 512
+/* Taps are stored reversed at load time: that is the layout the anti-beam
+ * projection loader consumes directly (reversed=1). */
+static int16_t mic_ir_taps[LE_VOICE_LOGICAL_CHANNELS][MIC_IR_MAX_TAPS];
+/* Mirrored reference history for the per-channel FIR. */
+static int16_t mic_ir_hist[2 * MIC_IR_MAX_TAPS];
+static unsigned int mic_ir_pos;
+static unsigned int mic_ir_mask;
+
+static int mic_ir_load(const char *path)
+{
+    FILE *f;
+    int16_t buf[LE_VOICE_LOGICAL_CHANNELS * MIC_IR_MAX_TAPS];
+    size_t n;
+
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    n = fread(buf, sizeof(*buf), sizeof(buf) / sizeof(*buf), f);
+    fclose(f);
+    if (n % LE_VOICE_LOGICAL_CHANNELS || n < LE_VOICE_LOGICAL_CHANNELS)
+        return -1;
+    mic_ir_ntaps = (int)(n / LE_VOICE_LOGICAL_CHANNELS);
+    if (mic_ir_ntaps > MIC_IR_MAX_TAPS)
+        mic_ir_ntaps = MIC_IR_MAX_TAPS;
+    {
+        /* store taps reversed: taps_rev[k] = taps[N-1-k] pairs the
+         * oldest->newest window into a normal convolution */
+        int c, k;
+        for (c = 0; c < LE_VOICE_LOGICAL_CHANNELS; ++c)
+            for (k = 0; k < mic_ir_ntaps; ++k)
+                mic_ir_taps[c][k] =
+                    buf[c * mic_ir_ntaps + mic_ir_ntaps - 1 - k];
+    }
+    memset(mic_ir_hist, 0, sizeof(mic_ir_hist));
+    mic_ir_pos = 0;
+    le_log_info("mic ir: %d taps/mic", mic_ir_ntaps);
+    return 0;
+}
+
+/* Amazon device type id ("A3S5BH2HU6VAYF" for the second-gen Echo) from
+ * the idme area; used to pick the shipped per-model IR taps. */
+static int read_device_type_id(const char *dt_idme_dir, char *out,
+                               size_t out_size)
+{
+    char path[256];
+    FILE *f;
+    size_t n;
+
+    if (snprintf(path, sizeof(path), "%s/device_type_id/value",
+                 dt_idme_dir) >= (int)sizeof(path))
+        return -1;
+    f = fopen(path, "rb");
+    if (!f)
+        return -1;
+    n = fread(out, 1, out_size - 1, f);
+    fclose(f);
+    while (n && (out[n - 1] == '\n' || out[n - 1] == '\0' ||
+                 out[n - 1] == ' ' || out[n - 1] == '\t'))
+        --n;
+    out[n] = '\0';
+    return n ? 0 : -1;
+}
+
+/* IR taps resolution: LE_MIC_IR_FILE wins (experiments), then the
+ * per-device calibration /data/libreecho/echo-ir.bin, then the shipped
+ * per-model file /usr/local/share/libreecho/ir/<device_type_id>.bin.
+ * LE_MIC_IR_DIR relocates the shipped directory. */
+static const char *mic_ir_resolve(const char *dt_idme_dir,
+                                  const struct mic_model *model)
+{
+    static char path[320];
+    const char *env = getenv("LE_MIC_IR_FILE");
+    const char *dir = getenv("LE_MIC_IR_DIR");
+    char id[64];
+
+    if (env && env[0])
+        return env;
+    if (access("/data/libreecho/echo-ir.bin", R_OK) == 0)
+        return "/data/libreecho/echo-ir.bin";
+    if (!dir)
+        dir = "/usr/local/share/libreecho/ir";
+    if (model->ir_file[0] &&
+        snprintf(path, sizeof(path), "%s/%s", dir, model->ir_file) <
+            (int)sizeof(path) &&
+        access(path, R_OK) == 0)
+        return path;
+    if (read_device_type_id(dt_idme_dir, id, sizeof(id)) == 0 &&
+        snprintf(path, sizeof(path), "%s/%s.bin", dir, id) <
+            (int)sizeof(path) &&
+        access(path, R_OK) == 0)
+        return path;
+    return NULL;
+}
+
+/* LE_MIC_FIR_NEON=0 forces the scalar dot product for A/B comparison. */
+static int mic_fir_use_neon(void)
+{
+    static int cached = -1;
+    const char *value;
+
+    if (cached < 0) {
+        value = getenv("LE_MIC_FIR_NEON");
+        cached = !value || strcmp(value, "0") != 0;
+    }
+    return cached;
+}
+
+static int64_t mic_fir_dot(const int16_t *a, const int16_t *b, int n)
+{
+    int64_t acc = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+    if (mic_fir_use_neon()) {
+        int32x4_t v = vdupq_n_s32(0);
+        for (; n >= 8; n -= 8, a += 8, b += 8) {
+            int16x8_t qa = vld1q_s16(a), qb = vld1q_s16(b);
+            v = vmlal_s16(v, vget_low_s16(qa), vget_low_s16(qb));
+            v = vmlal_s16(v, vget_high_s16(qa), vget_high_s16(qb));
+        }
+        {
+            int32x2_t s = vadd_s32(vget_low_s32(v), vget_high_s32(v));
+            acc = (int64_t)vget_lane_s32(s, 0) + vget_lane_s32(s, 1);
+        }
+    }
+#else
+    (void)mic_fir_use_neon;
+#endif
+    for (; n > 0; --n)
+        acc += (int64_t)(*a++) * (*b++);
+    return acc;
+}
+
+/* conv(ref, ir[channel]) subtracted from one microphone sample. */
+static int16_t mic_ir_subtract(unsigned int channel, int16_t sample)
+{
+    int64_t acc = mic_fir_dot(mic_ir_taps[channel],
+                              mic_ir_hist + mic_ir_pos + 1, mic_ir_ntaps);
+    acc = sample - (acc >> 15);
+    if (acc > INT16_MAX)
+        acc = INT16_MAX;
+    if (acc < INT16_MIN)
+        acc = INT16_MIN;
+    return (int16_t)acc;
+}
+
+/* Polls a small status file for a literal flag substring; re-reads only
+ * when mtime changed.  Used to follow esphomed's voice-turn state. */
+static int mic_file_flag_poll(const char *path, long *sec, long *nsec,
+                              const char *flag, int current)
+{
+    struct stat st;
+    FILE *f;
+    char buf[512];
+    size_t n;
+
+    if (stat(path, &st) != 0)
+        return current;
+    if ((long)st.st_mtime == *sec && (long)st.st_mtim.tv_nsec == *nsec)
+        return current;
+    *sec = (long)st.st_mtime;
+    *nsec = (long)st.st_mtim.tv_nsec;
+    f = fopen(path, "r");
+    if (!f)
+        return current;
+    n = fread(buf, 1, sizeof(buf) - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, flag) != NULL;
 }
 
 /*
@@ -941,8 +1327,17 @@ static int relay_capture_mono(int client_fd, unsigned long id,
     static struct le_beamformer beamformer;
     struct le_voice_calibration calibration;
     struct le_voice_highpass highpass;
+    struct mic_model model;
+    struct le_voice_highpass ref_highpass;
     unsigned char input[LE_VOICE_RAW_FRAME_BYTES * 256];
-    int16_t output[256];
+    int16_t output[512];
+    int16_t post_in[MIC_POST_AEC_FRAME_SAMPLES];
+    int16_t post_ref[MIC_POST_AEC_FRAME_SAMPLES];
+    int16_t post_out[MIC_POST_AEC_FRAME_SAMPLES];
+    unsigned int post_fill = 0;
+    int post_aec_on = 0;
+    int speex_on = 1;
+    struct le_voice_aec post_aec;
     int miccal[LE_VOICE_LOGICAL_CHANNELS];
     size_t pending = 0;
     int pipe_fds[2];
@@ -970,7 +1365,21 @@ static int relay_capture_mono(int client_fd, unsigned long id,
     le_voice_calibration_init(
         &calibration, miccal, identity_map,
         LE_VOICE_CALIBRATION_DIRECT_Q14);
-    if (le_beamformer_init(&beamformer, beam_mic_mask(),
+    /*
+     * Static measured IR is the only echo cancellation: LE_MIC_IR_FILE
+     * overrides the default location.
+     */
+    mic_model_load(config->dt_idme_dir, &model);
+    if (model.mic_pos_count)
+        le_beamformer_set_positions(model.mic_x_um, model.mic_y_um,
+                                    model.mic_pos_count);
+    mic_ir_ntaps = 0;
+    {
+        const char *ir_path = mic_ir_resolve(config->dt_idme_dir, &model);
+        if (ir_path && mic_ir_load(ir_path) == 0)
+            le_log_info("mic ir: taps from %s", ir_path);
+    }
+    if (le_beamformer_init(&beamformer, beam_mic_mask(&model),
                            LE_BEAM_DEFAULT_BEAMS) < 0) {
         close(pipe_fds[0]);
         kill(capture, SIGTERM);
@@ -978,8 +1387,118 @@ static int relay_capture_mono(int client_fd, unsigned long id,
             ;
         return -1;
     }
+    /*
+     * LE_MIC_ANTIBEAM=1: spatial null onto the measured speaker path H(k)
+     * before beam synthesis; output becomes the projected channel sum.
+     * LE_MIC_ANTIBEAM=auto: same, but only while the playback
+     * reference carries energy (media playback), with hold-off hysteresis.
+     * Uses the same IR file as the static FIR subtraction.
+     */
+    int ab_loaded = 0;
+    /* ab_force: LE_MIC_ANTIBEAM set to anything but "auto"/"0" keeps the
+     * null on permanently.  ab_env_auto: "auto" gates on playback.
+     * Without the env var the "antibeam" mix mode (GUI/API, persisted in
+     * the mic config) gates the same way — taps load whenever the
+     * measured IR file exists so the mode can be switched live. */
+    int ab_force = 0, ab_env_auto = 0;
+    {
+        const char *ab = getenv("LE_MIC_ANTIBEAM");
+        if (mic_ir_ntaps > 0 &&
+            le_beamformer_antibeam_load(&beamformer,
+                                        (const int16_t *)mic_ir_taps,
+                                        mic_ir_ntaps,
+                                        LE_VOICE_LOGICAL_CHANNELS, 1) == 0) {
+            ab_loaded = 1;
+            if (beam_view)
+                beam_view->antibeam_available = 1;
+            ab_env_auto = ab && !strcmp(ab, "auto");
+            ab_force = ab && !ab_env_auto && strcmp(ab, "0");
+            beamformer.antibeam = ab_force;
+            le_log_info("antibeam: %s, %d taps x %u mics",
+                        ab_force ? "always"
+                                 : (ab_env_auto ? "auto (follows playback)"
+                                                : "mode-selectable"),
+                        mic_ir_ntaps, beamformer.mic_count);
+        } else if (ab && strcmp(ab, "0")) {
+            le_log_error("antibeam: load failed, disabled");
+        }
+    }
+    /* Residual IR post-filter behind the anti-beam (see above): only
+     * armed when taps load AND the projection can render. */
+    /* Per-channel static FIR against the speaker reference lane: the stage
+     * that removed the bulk of the measured speaker path in the old
+     * build, ahead of beamforming/anti-beam.  On by default whenever
+     * the measured IR loaded; LE_MIC_IR_SUBTRACT=0 or the runtime
+     * "set_fir" command disables it. */
+    int ir_subtract = 0;
+    {
+        const char *irs = getenv("LE_MIC_IR_SUBTRACT");
+        ir_subtract = mic_ir_ntaps > 0 && (!irs || strcmp(irs, "0") != 0);
+        mic_ir_mask = (1U << LE_VOICE_LOGICAL_CHANNELS) - 1;
+        if (ir_subtract)
+            le_log_info("mic fir: %d taps x %u channels, mask 0x%x",
+                        mic_ir_ntaps, LE_VOICE_LOGICAL_CHANNELS,
+                        mic_ir_mask);
+    }
+    float ab_ref_env = 0.0f;
+    long ab_hold = 0;
+    /* While a voice turn is in progress (wake-word capture + STT) the
+     * engine ducks media fully; the projection is then unnecessary and
+     * would only colour the speech, so it is forced off. */
+    const char *turn_status = getenv("LE_MIC_TURN_STATUS");
+    long turn_sec = -1, turn_nsec = -1;
+    unsigned int ab_gate_ticks = 0;
+    int ab_turn_gate = 0;
+    long gate_hold = 0;
+    int wake_fd = -1;
+    int wake_sub_sent = 0;
+    const char *wake_path = getenv("LE_MIC_WAKE_SOCK");
+    if (!turn_status || !turn_status[0])
+        turn_status = "/run/libreecho/esphome-status.json";
+    if (!wake_path || !wake_path[0])
+        wake_path = "/run/libreecho/wakeword.sock";
+    if (mic_post_aec_enabled()) {
+        int suppress = mic_post_aec_suppress_db(
+            "LE_MIC_POST_AEC_SUPPRESS_DB", -40);
+        int active = mic_post_aec_suppress_db(
+            "LE_MIC_POST_AEC_SUPPRESS_ACTIVE_DB", -15);
+        unsigned int tail = mic_post_aec_tail_samples();
+
+        if (le_voice_aec_init_suppress(&post_aec,
+                                       MIC_POST_AEC_FRAME_SAMPLES,
+                                       tail, suppress, active) == 0) {
+            const char *dn_env = getenv("LE_MIC_POST_AEC_DENOISE");
+
+            if (dn_env && atoi(dn_env) != 0 &&
+                le_voice_aec_set_denoise(&post_aec, 1) == 0) {
+                const char *ndb_env =
+                    getenv("LE_MIC_POST_AEC_NOISE_DB");
+
+                if (ndb_env)
+                    le_voice_aec_set_noise_db(&post_aec,
+                                              atoi(ndb_env));
+                le_log_info("mic post-aec: denoise on%s%s",
+                            ndb_env ? ", noise " : "",
+                            ndb_env ? ndb_env : "");
+            }
+            post_aec_on = 1;
+            const char *sx_env = getenv("LE_MIC_POST_AEC_SPEEX");
+
+            if (sx_env && !strcmp(sx_env, "0"))
+                speex_on = 0;
+            le_log_info(
+                "mic post-aec: %s tail %u suppress %d/%d dB",
+                speex_on ? "speex" : "passthrough",
+                tail, suppress, active);
+        } else {
+            le_log_error("mic post-aec: init failed, disabled");
+        }
+    }
     le_voice_highpass_init(&highpass);
-    mix_mask = beam_mic_mask();
+    le_voice_highpass_init(&ref_highpass);
+    le_voice_highpass_set_hz(&highpass, 120.f);
+    le_voice_highpass_set_hz(&ref_highpass, 120.f);
+    mix_mask = beam_mic_mask(&model);
 
     count = read(pipe_fds[0], input, sizeof(input));
     if (count <= 0) {
@@ -991,50 +1510,211 @@ static int relay_capture_mono(int client_fd, unsigned long id,
         if (n > 0)
             (void)write_all(client_fd, error, (size_t)n);
     } else if (write_all(client_fd, header, header_size) == 0) {
-        while (count > 0) {
+        while ((count = read(pipe_fds[0], input + pending,
+                             sizeof(input) - pending)) > 0) {
             size_t available = pending + (size_t)count;
             size_t frames = available / LE_VOICE_RAW_FRAME_BYTES;
             size_t consumed = frames * LE_VOICE_RAW_FRAME_BYTES;
 
-            if (frames > 0) {
-                size_t frame;
+        if (frames > 0) {
+            size_t frame;
+            size_t out_pos = 0;
 
-                for (frame = 0; frame < frames; ++frame) {
-                    int16_t logical[LE_VOICE_LOGICAL_CHANNELS];
+            for (frame = 0; frame < frames; ++frame) {
+                const uint8_t *raw = input + frame * LE_VOICE_RAW_FRAME_BYTES;
+                int16_t logical[LE_VOICE_LOGICAL_CHANNELS];
+                int16_t ref = 0;
+                int16_t sample;
+                unsigned int channel;
 
-                    le_voice_decode_calibrated(
-                        input + frame * LE_VOICE_RAW_FRAME_BYTES,
-                        &calibration, logical);
-                    /* The beamformer runs in every mode, so its selection
-                       and beam view stay warm; the mode only picks the
-                       output. */
-                    unsigned int mode = current_mix_mode();
-                    int16_t mixed = le_beamformer_sample(&beamformer, logical);
+                le_voice_decode_calibrated(raw, &calibration, logical);
+                /* Mix mode: anti-beam is selectable like the other modes
+                 * (set_mix / saved config); LE_MIC_ANTIBEAM keeps working
+                 * as a start-up override. */
+                unsigned int mode = current_mix_mode();
+                int ab_gated = ab_loaded &&
+                               (ab_env_auto || mode == LE_MIC_MIX_ANTIBEAM);
+                if (ir_subtract || post_aec_on || ab_gated)
+                    ref = le_voice_unpack_s24_3le(
+                        raw + model.ref_lane *
+                                LE_VOICE_BYTES_PER_SAMPLE);
+                if (ir_subtract &&
+                    (!beam_view || beam_view->fir_enable)) {
+                    int16_t fed[LE_VOICE_LOGICAL_CHANNELS];
+
+                    mic_ir_hist[mic_ir_pos] = ref;
+                    mic_ir_hist[mic_ir_pos + mic_ir_ntaps] = ref;
+                    for (channel = 0;
+                         channel < LE_VOICE_LOGICAL_CHANNELS; ++channel)
+                        fed[channel] = (mic_ir_mask & (1U << channel))
+                            ? mic_ir_subtract(channel, logical[channel])
+                            : logical[channel];
+                    if (++mic_ir_pos == (unsigned int)mic_ir_ntaps)
+                        mic_ir_pos = 0;
+                    memcpy(logical, fed, sizeof(fed));
+                }
+                if (ab_gated || post_aec_on) {
+                    /* Voice-turn gate: opens instantly on waked's
+                     * wake_detected broadcast (no esphomed latency),
+                     * stays open while in_progress is true plus ~1 s,
+                     * or 4 s after a bare wake event (covers turns that
+                     * never reach esphomed). */
+                    /* Socket setup/IO only on the ~20 ms tick: a
+                     * per-sample recv/connect-retry storm would itself
+                     * starve the real-time loop. */
+                    if (++ab_gate_ticks >= 320) {
+                        ab_gate_ticks = 0;
+                        if (wake_fd < 0) {
+                            struct sockaddr_un wa;
+
+                            wake_fd = socket(AF_UNIX,
+                                             SOCK_STREAM | SOCK_NONBLOCK |
+                                             SOCK_CLOEXEC, 0);
+                            if (wake_fd >= 0) {
+                                memset(&wa, 0, sizeof(wa));
+                                wa.sun_family = AF_UNIX;
+                                snprintf(wa.sun_path,
+                                         sizeof(wa.sun_path), "%s",
+                                         wake_path);
+                                if (connect(wake_fd,
+                                            (struct sockaddr *)&wa,
+                                            sizeof(wa)) < 0 &&
+                                    errno != EINPROGRESS) {
+                                    close(wake_fd);
+                                    wake_fd = -1;
+                                }
+                            }
+                        }
+                        if (wake_fd >= 0 && !wake_sub_sent) {
+                            static const char sub[] =
+                                "{\"v\":1,\"id\":1,\"cmd\":\"subscribe\","
+                                "\"args\":{}}\n";
+
+                            if (send(wake_fd, sub, sizeof(sub) - 1,
+                                     MSG_NOSIGNAL) >= 0)
+                                wake_sub_sent = 1;
+                        }
+                        if (wake_fd >= 0) {
+                            char wbuf[1024];
+                            ssize_t wn = recv(wake_fd, wbuf,
+                                              sizeof(wbuf) - 1, 0);
+
+                            if (wn == 0 ||
+                                (wn < 0 && errno != EAGAIN &&
+                                 errno != EWOULDBLOCK)) {
+                                close(wake_fd);
+                                wake_fd = -1;
+                                wake_sub_sent = 0;
+                            } else if (wn > 0) {
+                                wbuf[wn] = '\0';
+                                if (strstr(wbuf, "wake_detected")) {
+                                    ab_turn_gate = 1;
+                                    if (gate_hold < 64000)
+                                        gate_hold = 64000;
+                                }
+                            }
+                        }
+                        if (mic_file_flag_poll(
+                                turn_status, &turn_sec, &turn_nsec,
+                                "\"in_progress\":true", 0)) {
+                            ab_turn_gate = 1;
+                            if (gate_hold < 64000)
+                                gate_hold = 64000;
+                        } else if (gate_hold > 0) {
+                            gate_hold -= 320;
+                            if (gate_hold <= 0)
+                                ab_turn_gate = 0;
+                        }
+                    }
+                }
+                if (ab_gated) {
+                    /* Playback envelope on the reference lane: peak-hold with
+                     * fast decay; anti-beam on above on-threshold, off after
+                     * ~2 s below off-threshold (hysteresis + hold). */
+                    float a = ref < 0 ? -(float)ref : (float)ref;
+                    if (a > ab_ref_env)
+                        ab_ref_env = a;
+                    else
+                        ab_ref_env *= 0.9995f;
+                    if (ab_ref_env > 500.0f)
+                        ab_hold = 32000;        /* 2 s @16 kHz */
+                    else if (ab_hold > 0)
+                        --ab_hold;
+                    beamformer.antibeam = (ab_hold > 0) && !ab_turn_gate;
+                } else {
+                    beamformer.antibeam = ab_force;
+                }
+                {
+                    int16_t mixed =
+                        le_beamformer_sample(&beamformer, logical);
 
                     if (mode == LE_MIC_MIX_AVERAGE)
                         mixed = le_mic_mix_average(logical, mix_mask);
                     else if (mode == LE_MIC_MIX_SINGLE)
                         mixed = le_mic_mix_single(logical, mix_mask,
                                                   current_mix_lane());
-                    output[frame] = le_voice_highpass_sample(&highpass, mixed);
-                    if (beamformer.fill == 0)
-                        beam_view_publish(&beamformer);
+                    sample =
+                        le_voice_highpass_sample(&highpass, mixed);
                 }
-                apply_digital_gain(output, frames, digital_gain);
+                /* In passthrough mode (no speex) the post path runs
+                 * always — the AGC gain simply fades between adaptive
+                 * (turn) and 1.0 (idle), which makes the switch
+                 * click-free and loss-free by construction. */
+                if (post_aec_on && (ab_turn_gate || !speex_on)) {
+                    post_in[post_fill] = sample;
+                    post_ref[post_fill] =
+                        le_voice_highpass_sample(&ref_highpass, ref);
+                    if (++post_fill == MIC_POST_AEC_FRAME_SAMPLES) {
+                        post_fill = 0;
+                        if (speex_on)
+                            le_voice_aec_process(&post_aec, post_in,
+                                                 post_ref, post_out);
+                        else
+                            memcpy(post_out, post_in,
+                                   sizeof(post_in));
+                        apply_digital_gain(post_out,
+                                           MIC_POST_AEC_FRAME_SAMPLES,
+                                           digital_gain);
+                        if (write_all(client_fd, post_out,
+                                      sizeof(post_out)) < 0)
+                            goto relay_done;
+                    }
+                } else {
+                    /* Turn just ended: emit the partial buffered frame raw
+                     * instead of dropping it — avoids an up-to-10 ms gap
+                     * at the path switch. */
+                    if (post_aec_on && post_fill > 0) {
+                        unsigned int fi;
+
+                        for (fi = 0; fi < post_fill &&
+                                    out_pos < sizeof(output) /
+                                              sizeof(output[0]); ++fi)
+                            output[out_pos++] = post_in[fi];
+                        post_fill = 0;
+                    }
+                    output[out_pos++] = sample;
+                }
+                if (beamformer.fill == 0)
+                    beam_view_publish(&beamformer);
+            }
+            if (out_pos > 0) {
+                apply_digital_gain(output, out_pos, digital_gain);
                 if (write_all(client_fd, output,
-                              frames * sizeof(output[0])) < 0)
+                              out_pos * sizeof(output[0])) < 0)
                     break;
             }
-            pending = available - consumed;
-            if (pending > 0)
-                memmove(input, input + consumed, pending);
-            count = read(pipe_fds[0], input + pending,
-                         sizeof(input) - pending);
         }
-        result = count < 0 ? -1 : 0;
+        pending = available - consumed;
+        if (pending > 0)
+            memmove(input, input + consumed, pending);
+        }
     }
-    beam_view_stop();
+relay_done:
+    result = count < 0 ? -1 : 0;
+    if (post_aec_on)
+        le_voice_aec_destroy(&post_aec);
 
+    beam_view_stop();
     close(pipe_fds[0]);
     kill(capture, SIGTERM);
     while (waitpid(capture, NULL, 0) < 0 && errno == EINTR)
@@ -1051,9 +1731,11 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
     int n;
 
     if (calibrated_mono) {
+        struct mic_model model;
         char mics[16];
 
-        format_mic_list(beam_mic_mask(), mics, sizeof(mics));
+        mic_model_load(config->dt_idme_dir, &model);
+        format_mic_list(beam_mic_mask(&model), mics, sizeof(mics));
         n = snprintf(
             data, sizeof(data),
             "{\"format\":\"pcm_s16_le\",\"rate\":16000,"
@@ -1064,7 +1746,7 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
             "\"logical_map\":\"measured\","
             "\"beamforming\":\"fixed_beam_select\","
             "\"beams\":%d,\"latency_samples\":%d,"
-            "\"highpass_hz\":80}", mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
+            "\"highpass_hz\":120}", mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
     } else {
         n = snprintf(data, sizeof(data),
                      "{\"format\":\"pcm_s24_3le\",\"rate\":16000,"
@@ -1163,6 +1845,7 @@ int main(int argc, char **argv)
         int mode, lane;
 
         memset(beam_view, 0, sizeof(*beam_view));
+        beam_view->fir_enable = 1;
         saved_mix_settings(&mode, &lane);
         beam_view->mix_mode = (unsigned int)mode;
         beam_view->mix_lane = lane;
@@ -1175,6 +1858,7 @@ int main(int argc, char **argv)
     le_log_info("microphone daemon listening on %s (capture idle)",
                 config.socket_path);
 
+
     while (running) {
         struct pollfd descriptor;
         int client_fd;
@@ -1186,15 +1870,22 @@ int main(int argc, char **argv)
 
         if (child_changed || stream_worker > 0) {
             int child_status;
-            pid_t result = waitpid(stream_worker, &child_status, WNOHANG);
+            pid_t result;
             child_changed = 0;
+            result = waitpid(stream_worker, &child_status, WNOHANG);
             if (result == stream_worker) {
                 /* A worker that died mid-write must not leave stale beams. */
                 if (beam_view) {
                     beam_view->running = 0;
                     beam_view->seq = (beam_view->seq + 1U) & ~1U;
                 }
-                le_log_info("raw microphone stream stopped");
+                le_log_info("raw microphone stream stopped (%s %d)",
+                            WIFSIGNALED(child_status) ? "signal"
+                            : WIFEXITED(child_status) ? "exit" : "?",
+                            WIFSIGNALED(child_status)
+                                ? WTERMSIG(child_status)
+                                : WIFEXITED(child_status)
+                                    ? WEXITSTATUS(child_status) : -1);
                 stream_worker = -1;
             }
         }
@@ -1206,6 +1897,22 @@ int main(int argc, char **argv)
         client_fd = le_adapter_accept(listen_fd);
         if (client_fd < 0)
             continue;
+        /* Reap dead workers before deciding the capture is busy: without
+         * this a client connecting in the window between a worker's death
+         * and the next loop iteration gets a spurious "already in use". */
+        {
+            int child_status;
+
+            if (stream_worker > 0 &&
+                waitpid(stream_worker, &child_status, WNOHANG) ==
+                    stream_worker) {
+                if (beam_view) {
+                    beam_view->running = 0;
+                    beam_view->seq = (beam_view->seq + 1U) & ~1U;
+                }
+                stream_worker = -1;
+            }
+        }
         if (read_request_line(client_fd, message, sizeof(message)) < 0 ||
             le_adapter_parse_request(message, command, sizeof(command),
                                      &args, &id) < 0) {
@@ -1237,6 +1944,11 @@ int main(int argc, char **argv)
             } else if (!beam_view) {
                 (void)respond(client_fd, id, 0,
                               "microphone mix is unavailable");
+            } else if (mode == LE_MIC_MIX_ANTIBEAM &&
+                       !beam_view->antibeam_available) {
+                (void)respond(client_fd, id, 0,
+                              "anti-beam needs the measured IR file "
+                              "for this device model");
             } else {
                 beam_view->mix_mode = (unsigned int)mode;
                 le_log_info("microphone mix set to %s", le_mic_mix_name(mode));
@@ -1259,6 +1971,24 @@ int main(int argc, char **argv)
                 le_log_info("microphone lane set to %d", lane);
                 (void)snprintf(status, sizeof(status),
                                "{\"microphone_lane\":%d}", lane);
+                (void)respond(client_fd, id, 1, status);
+            }
+            close(client_fd);
+        } else if (!strcmp(command, "set_fir")) {
+            int enable;
+
+            if (lane_from_json(args, "\"enable\"", &enable) < 0 ||
+                (enable != 0 && enable != 1)) {
+                (void)respond(client_fd, id, 0,
+                              "invalid fir enable flag");
+            } else if (!beam_view) {
+                (void)respond(client_fd, id, 0,
+                              "fir gate is unavailable");
+            } else {
+                beam_view->fir_enable = enable;
+                le_log_info("mic fir %s", enable ? "enabled" : "disabled");
+                (void)snprintf(status, sizeof(status),
+                               "{\"fir_enable\":%d}", enable);
                 (void)respond(client_fd, id, 1, status);
             }
             close(client_fd);

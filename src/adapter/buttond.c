@@ -462,7 +462,7 @@ static int alarm_snooze_press(void)
 
 static int refresh_audio(struct context *ctx)
 {
-    char data[512];
+    char data[2048];
     int volume, muted;
 
     if (audio_call(ctx, "status", NULL, data, sizeof(data)) != LE_ADAPTER_OK ||
@@ -698,7 +698,7 @@ static int voice_request_cancel(const struct context *ctx)
 
 static int action_noise_toggle(struct context *ctx)
 {
-    char data[1024];
+    char data[2048];
     int active;
 
     if (audio_call(ctx, "status", NULL, data, sizeof(data)) != LE_ADAPTER_OK ||

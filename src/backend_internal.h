@@ -77,6 +77,10 @@ struct le_backend_ops {
     reports unsupported. */
  int (*owner_eq)(struct le_backend*,const char*,const int*);
  int (*speaker_boost)(struct le_backend*,int);
+ /* Residual media level while ducked, percent: (custom, percent); custom 0
+    returns to the engine default. Appended last for the positional-init
+    reason above; null reports unsupported. */
+ int (*duck_percent)(struct le_backend*,int,int);
 };
 struct le_backend { const struct le_backend_ops *ops; void *data; char mode[16]; };
 int le_mock_create(struct le_backend*,const char*,const char*,unsigned); int le_linux_create(struct le_backend*,const char*);
