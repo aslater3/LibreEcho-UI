@@ -1680,7 +1680,7 @@ static int status_json(struct bt_context *context, char *data, size_t size)
     char local_name[BT_NAME_MAX * 2];
     const char *profile_state;
     const char *profile_error;
-    int sdp = 0, a2dp = 0, avrcp = 0;
+    int sdp = 0, a2dp = 0, avrcp = 0, spp = 0;
     bonded[0] = '\0';
 
     if (hci_present() && (time(NULL) - context->last_info > 2))
@@ -1693,10 +1693,11 @@ static int status_json(struct bt_context *context, char *data, size_t size)
         sdp = le_profile_registered_sdp(&context->profiles);
         a2dp = le_profile_registered_a2dp_sink(&context->profiles);
         avrcp = le_profile_registered_avrcp(&context->profiles);
+        spp = le_profile_registered_spp(&context->profiles);
     }
-    if (sdp && a2dp && avrcp) {
+    if (sdp && a2dp && avrcp && spp) {
         profile_state = "ready";
-        profile_error = "SDP, A2DP sink, and AVRCP profile services registered";
+        profile_error = "SDP, A2DP sink, AVRCP and SPP profile services registered";
     } else if (sdp || a2dp || avrcp) {
         profile_state = "partial";
         profile_error = "Some Bluetooth profile services could not register";
@@ -1741,7 +1742,7 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     profile_state, profile_error,
                     sdp ? "true" : "false", a2dp ? "true" : "false",
                     avrcp ? "true" : "false",
-                    "false", "false", "false") != 0)
+                    spp ? "true" : "false", "false", "false") != 0)
         return -1;
     if (!context->pairing.active) {
         if (append_text(data, size, &used, "null,\"known_devices\":[") != 0)

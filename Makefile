@@ -53,7 +53,7 @@ RADIOD_OPUS_LIBS ?= $(if $(strip $(RADIOD_OPUS_PREFIX)),\
 	$(RADIOD_OPUS_PREFIX)/lib/libopusfile.a $(RADIOD_OPUS_PREFIX)/lib/libopus.a $(RADIOD_OPUS_PREFIX)/lib/libogg.a)
 RADIOD_OPUS_CPPFLAGS = $(if $(strip $(RADIOD_OPUS_PREFIX)),\
 	-DLE_RADIOD_ENABLE_OPUS -I$(RADIOD_OPUS_PREFIX)/include/opus -I$(RADIOD_OPUS_PREFIX)/include)
-BTD_SOURCES = src/adapter/btd.c src/adapter/bt_adv_proxy.c src/adapter/bt_profile.c src/adapter/radio_resample.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
+BTD_SOURCES = src/adapter/btd.c src/adapter/bt_adv_proxy.c src/adapter/bt_profile.c src/adapter/bt_agt.c src/adapter/bt_gadget.c src/adapter/radio_resample.c src/adapter/bt_mgmt_events.c src/adapter/bt_pairing_events.c src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c src/adapter/bt-sbc/sbc_primitives_neon.c src/adapter/bt-sbc/sbc_primitives_armv6.c src/adapter/bt-sbc/sbc_primitives_sse.c src/adapter/bt-sbc/sbc_primitives_mmx.c src/adapter/bt-sbc/sbc_primitives_iwmmxt.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 AIRPLAYD_SOURCES = src/adapter/airplayd.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
 TIMERD_SOURCES = src/adapter/timerd.c src/adapter/timer_schedule.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/json.c src/log.c
 TTSD_SOURCES = src/adapter/ttsd.c src/adapter/tts_engine_mock.c src/adapter/adapter_server.c src/log.c
@@ -693,6 +693,14 @@ $(BUILD)/test-gateway-probe: tests/test_gateway_probe.c \
 $(BUILD)/test-bt-mgmt-events: tests/test_bt_mgmt_events.c \
 		src/adapter/bt_mgmt_events.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc $^ -o $@
+
+$(BUILD)/test-bt-agt: tests/test_bt_agt.c \
+		src/adapter/bt_agt.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
+
+$(BUILD)/test-bt-gadget: tests/test_bt_gadget.c \
+		src/adapter/bt_gadget.c src/adapter/bt_agt.c
+	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
 $(BUILD)/test-bt-adv-proxy: tests/test_bt_adv_proxy.c \
 		src/adapter/bt_adv_proxy.c

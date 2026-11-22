@@ -12,6 +12,7 @@
 
 #include "adapter.h"
 #include "bt_profile.h"
+#include "bt_agt.h"
 #include "bt-sbc/sbc.h"
 #include "log.h"
 #include "radio_resample.h"
@@ -122,6 +123,10 @@
 #define LE_SDP_RECORD_A2DP_SINK 0x00010001u
 #define LE_SDP_RECORD_AVRCP 0x00010002u
 #define LE_SDP_RECORD_PNP 0x00010004u
+#define LE_SDP_RECORD_SPP 0x00010005u
+
+/* RFCOMM channel the Alexa Gadget transport uses (Amazon AGT: channel 4). */
+#define LE_SPP_RFCOMM_CHANNEL 4
 
 #define LE_SDP_ATTR_HANDLE 0x0000
 #define LE_SDP_ATTR_CLASS_ID_LIST 0x0001
@@ -157,6 +162,15 @@ struct sockaddr_l2_local {
     uint8_t l2_bdaddr_type;
 };
 
+/* RFCOMM (BTPROTO_RFCOMM = 3): the kernel serves the protocol. */
+#define LE_BTPROTO_RFCOMM 3
+
+struct sockaddr_rc_local {
+    sa_family_t rc_family;
+    uint8_t rc_bdaddr[6];
+    uint8_t rc_channel;
+};
+
 struct l2cap_options_local {
     uint16_t omtu;
     uint16_t imtu;
@@ -170,6 +184,7 @@ struct l2cap_options_local {
 #define LE_MAX_SDP_SESSIONS 2
 #define LE_MAX_AVDTP_SESSIONS 2
 #define LE_MAX_AVRCP_SESSIONS 2
+#define LE_MAX_SPP_SESSIONS 2
 
 struct le_sdp_record {
     int in_use;
@@ -210,10 +225,23 @@ struct le_avrcp_session {
     uint8_t volume_transaction;
 };
 
+/*
+ * One Alexa Gadget (e.g. an Echo Wall Clock) on SPP/RFCOMM 4.  `buf` holds
+ * partial AGT frames until a complete one arrives.
+ */
+struct le_spp_session {
+    int fd;
+    uint8_t buf[1024];
+    size_t used;
+    int offered;             /* Discover sent for this connection */
+    uint8_t seq;             /* next frame sequence number */
+};
+
 struct le_profile_sessions {
     struct le_sdp_session sdp[LE_MAX_SDP_SESSIONS];
     struct le_avdtp_session avdtp[LE_MAX_AVDTP_SESSIONS];
     struct le_avrcp_session avrcp[LE_MAX_AVRCP_SESSIONS];
+    struct le_spp_session spp[LE_MAX_SPP_SESSIONS];
     struct le_sdp_record records[8];
 };
 
@@ -233,6 +261,31 @@ static int l2cap_seqpacket_listen(unsigned short psm)
     memset(&addr, 0, sizeof(addr));
     addr.l2_family = AF_BLUETOOTH;
     addr.l2_psm = psm;
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+        listen(fd, 2) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/*
+ * Bind and listen on an RFCOMM channel.  The kernel serves the protocol
+ * (CONFIG_BT_RFCOMM), so this is the standard BTPROTO_RFCOMM socket; a
+ * connected fd carries the byte stream Amazon's AGT framing sits on.
+ */
+static int rfcomm_channel_listen(unsigned char channel)
+{
+    struct sockaddr_rc_local addr;
+    int fd;
+
+    fd = socket(AF_BLUETOOTH, SOCK_STREAM, LE_BTPROTO_RFCOMM);
+    if (fd < 0)
+        return -1;
+    memset(&addr, 0, sizeof(addr));
+    addr.rc_family = AF_BLUETOOTH;
+    memset(addr.rc_bdaddr, 0, sizeof(addr.rc_bdaddr));
+    addr.rc_channel = channel;
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
         listen(fd, 2) < 0) {
         close(fd);
@@ -611,6 +664,45 @@ static void build_record_set(struct le_profile_sessions *sessions,
                               LE_SDP_ATTR_DID_VENDOR_ID_SOURCE);
         offset = sdp_put_uint16(record->data, sizeof(record->data), offset,
                                 LE_DID_VENDOR_ID_SOURCE_USB);
+        record->length = offset;
+    }
+
+    /*
+     * Serial Port (SPP) on RFCOMM channel 4.  An Alexa Gadget such as the
+     * Echo Wall Clock searches for SPP 0x1101 when it calls its partner back
+     * after pairing, and then opens this channel.  The protocol UUID carries
+     * the channel number, so the record must advertise RFCOMM 0x0003 with
+     * channel 4 rather than a bare L2CAP entry.
+     */
+    record = &sessions->records[5];
+    record->in_use = 1;
+    record->handle = LE_SDP_RECORD_SPP;
+    record->searchable_uuid16[0] = 0x1101;
+    record->searchable_uuid16_count = 1;
+    record->public_browse = 1;
+    {
+        size_t offset = 0;
+        uint16_t spp_classes[1] = { 0x1101 };
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_HANDLE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset,
+                                record->handle);
+        offset = sdp_put_uuid_list_attr(record->data, sizeof(record->data),
+                                        offset, LE_SDP_ATTR_CLASS_ID_LIST,
+                                        spp_classes, 1);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_RECORD_STATE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset, 1);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_SERVICE_NAME);
+        offset = sdp_put_text(record->data, sizeof(record->data), offset,
+                              "Serial Port");
+        offset = sdp_put_browse_list(record->data, sizeof(record->data),
+                                     offset);
+        offset = sdp_put_protocol_list(record->data, sizeof(record->data),
+                                       offset, 0x0003, LE_SPP_RFCOMM_CHANNEL);
+        offset = sdp_put_profile_list(record->data, sizeof(record->data),
+                                      offset, 0x1101, 0x0102); /* SPP 1.2 */
         record->length = offset;
     }
 }
@@ -1636,6 +1728,114 @@ static void avrcp_send_volume_changed(struct le_avrcp_session *session,
                    status, payload, sizeof(payload));
 }
 
+/*
+ * Send one AGT directive to a gadget.  The sequence number skips the
+ * framing's reserved bytes, and a failed write ends the session so the
+ * caller's next poll reaps it.
+ */
+static int spp_send(struct le_spp_session *session, const uint8_t *message,
+                    size_t message_length)
+{
+    uint8_t frame[LE_AGT_FRAME_MAX];
+    size_t frame_length;
+    ssize_t written;
+
+    if (!session || session->fd < 0 || message_length == 0)
+        return -1;
+    if (++session->seq > 0xEF)
+        session->seq = 1;
+    frame_length = le_agt_encode(frame, sizeof(frame), session->seq, message,
+                                message_length);
+    if (!frame_length)
+        return -1;
+    written = write(session->fd, frame, frame_length);
+    return written == (ssize_t)frame_length ? 0 : -1;
+}
+
+/*
+ * A gadget has connected and its first frame (Discover) has arrived.  A real
+ * Echo answers by opening the session; the clock needs the state a moment
+ * later, so this replies with the directives it accepts and remembers that
+ * the session was offered.
+ */
+static int spp_send_bootstrap(struct le_spp_session *session)
+{
+    uint8_t message[LE_AGT_FRAME_MAX];
+
+    if (spp_send(session, message,
+                 le_agt_build_clear_indicator(message, sizeof(message))) < 0)
+        return -1;
+    session->offered = 1;
+    return 0;
+}
+
+static void spp_session_read(struct le_profiles *p,
+                             struct le_spp_session *session)
+{
+    ssize_t received;
+    size_t consumed;
+    int payload_length;
+    uint8_t payload[LE_AGT_PAYLOAD_MAX];
+    char namespace_out[48];
+    char name_out[48];
+
+    (void)p;
+    if (!session || session->fd < 0)
+        return;
+    received = read(session->fd, session->buf + session->used,
+                    sizeof(session->buf) - session->used);
+    if (received == 0) {
+        close(session->fd);
+        session->fd = -1;
+        session->used = 0;
+        session->offered = 0;
+        return;
+    }
+    if (received < 0)
+        return;
+    session->used += (size_t)received;
+
+    /* Drain every complete frame the buffer holds. */
+    for (;;) {
+        consumed = 0;
+        payload_length = le_agt_decode(session->buf, session->used, payload,
+                                       sizeof(payload), &consumed);
+        if (payload_length < 0) {
+            /*
+             * Either a partial frame or a corrupt one.  A partial frame is
+             * normal on a stream, so only drop the buffer when it cannot
+             * contain a frame start at all.
+             */
+            if (session->used && session->buf[0] != LE_AGT_STX) {
+                size_t i;
+                for (i = 1; i < session->used; ++i)
+                    if (session->buf[i] == LE_AGT_STX)
+                        break;
+                if (i == session->used) {
+                    session->used = 0;
+                } else {
+                    memmove(session->buf, session->buf + i, session->used - i);
+                    session->used -= i;
+                }
+            }
+            break;
+        }
+        if (consumed && session->used > consumed)
+            memmove(session->buf, session->buf + consumed,
+                    session->used - consumed);
+        if (consumed)
+            session->used -= consumed;
+
+        if (le_agt_read_event_header(payload, (size_t)payload_length,
+                                     namespace_out, sizeof(namespace_out),
+                                     name_out, sizeof(name_out)) == 0 &&
+            strcmp(namespace_out, "Alexa.Discovery") == 0 &&
+            strcmp(name_out, "Discover.Response") == 0) {
+            (void)spp_send_bootstrap(session);
+        }
+    }
+}
+
 static void avrcp_session_read(struct le_profiles *p,
                                struct le_avrcp_session *session)
 {
@@ -1816,13 +2016,27 @@ int le_profile_open(struct le_profiles *p, const char *service_name)
     } else {
         le_log_warn("btd-profiles: AVRCP listener failed: %s", strerror(errno));
     }
+    /*
+     * SPP on RFCOMM channel 4 for Alexa Gadgets.  The protocol is served by
+     * the kernel (CONFIG_BT_RFCOMM), so userspace only binds the channel and
+     * accepts connections; the gadget speaks Amazon's AGT framing on top.
+     */
+    fd = rfcomm_channel_listen(LE_SPP_RFCOMM_CHANNEL);
+    if (fd >= 0) {
+        p->spp_listener = fd;
+        p->registered_spp = 1;
+    } else {
+        le_log_warn("btd-profiles: SPP channel %d listener failed: %s",
+                    LE_SPP_RFCOMM_CHANNEL, strerror(errno));
+    }
 
-    le_log_info("btd-profiles: sdp=%s avdtp=%s avrcp=%s",
+    le_log_info("btd-profiles: sdp=%s avdtp=%s avrcp=%s spp=%s",
                 p->registered_sdp ? "listening" : "unavailable",
                 p->registered_a2dp_sink ? "listening" : "unavailable",
-                p->registered_avrcp ? "listening" : "unavailable");
+                p->registered_avrcp ? "listening" : "unavailable",
+                p->registered_spp ? "listening" : "unavailable");
     return p->registered_sdp || p->registered_a2dp_sink || p->registered_avrcp
-        ? 0 : -1;
+        || p->registered_spp ? 0 : -1;
 }
 
 void le_profile_close(struct le_profiles *p)
@@ -1833,6 +2047,7 @@ void le_profile_close(struct le_profiles *p)
     if (p->sdp_listener >= 0) close(p->sdp_listener);
     if (p->avdtp_listener >= 0) close(p->avdtp_listener);
     if (p->avrcp_listener >= 0) close(p->avrcp_listener);
+    if (p->spp_listener >= 0) close(p->spp_listener);
     if (p->media_bus_fd >= 0) close(p->media_bus_fd);
     if (sessions) {
         for (i = 0; i < LE_MAX_SDP_SESSIONS; ++i)
@@ -1844,12 +2059,15 @@ void le_profile_close(struct le_profiles *p)
         }
         for (i = 0; i < LE_MAX_AVRCP_SESSIONS; ++i)
             if (sessions->avrcp[i].fd >= 0) close(sessions->avrcp[i].fd);
+        for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i)
+            if (sessions->spp[i].fd >= 0) close(sessions->spp[i].fd);
         free(sessions);
     }
     memset(p, 0, sizeof(*p));
     p->sdp_listener = -1;
     p->avdtp_listener = -1;
     p->avrcp_listener = -1;
+    p->spp_listener = -1;
     p->media_bus_fd = -1;
 }
 
@@ -1907,6 +2125,20 @@ int le_profile_poll_setup(struct le_profiles *p, struct pollfd *pollfds,
             pollfds[count].fd = sessions->avrcp[i].fd;
             pollfds[count].events = POLLIN;
             fd_map[count] = 40 + i;
+            count++;
+        }
+    }
+    if (p->spp_listener >= 0 && count < max_fds) {
+        pollfds[count].fd = p->spp_listener;
+        pollfds[count].events = POLLIN;
+        fd_map[count] = 4;
+        count++;
+    }
+    for (i = 0; i < LE_MAX_SPP_SESSIONS && count < max_fds; ++i) {
+        if (sessions->spp[i].fd >= 0) {
+            pollfds[count].fd = sessions->spp[i].fd;
+            pollfds[count].events = POLLIN;
+            fd_map[count] = 50 + i;
             count++;
         }
     }
@@ -1991,6 +2223,24 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
             sessions->avrcp[slot].volume_registered = 0;
             break;
         }
+        case 4: {
+            int client = accept(p->spp_listener, NULL, NULL);
+            int slot;
+            if (client < 0)
+                break;
+            for (slot = 0; slot < LE_MAX_SPP_SESSIONS; ++slot)
+                if (sessions->spp[slot].fd < 0)
+                    break;
+            if (slot == LE_MAX_SPP_SESSIONS) {
+                close(client);
+                break;
+            }
+            sessions->spp[slot].fd = client;
+            sessions->spp[slot].used = 0;
+            sessions->spp[slot].offered = 0;
+            sessions->spp[slot].seq = 0;
+            break;
+        }
         default:
             if (fd_map[i] >= 10 && fd_map[i] < 10 + LE_MAX_SDP_SESSIONS) {
                 sdp_session_read(sessions,
@@ -2001,6 +2251,8 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
                 avdtp_media_read(p, &sessions->avdtp[fd_map[i] - 30]);
             } else if (fd_map[i] >= 40 && fd_map[i] < 40 + LE_MAX_AVRCP_SESSIONS) {
                 avrcp_session_read(p, &sessions->avrcp[fd_map[i] - 40]);
+            } else if (fd_map[i] >= 50 && fd_map[i] < 50 + LE_MAX_SPP_SESSIONS) {
+                spp_session_read(p, &sessions->spp[fd_map[i] - 50]);
             }
             break;
         }
@@ -2028,6 +2280,11 @@ int le_profile_registered_a2dp_sink(const struct le_profiles *p)
 int le_profile_registered_avrcp(const struct le_profiles *p)
 {
     return p->registered_avrcp;
+}
+
+int le_profile_registered_spp(const struct le_profiles *p)
+{
+    return p->registered_spp;
 }
 
 int le_profile_stream_active(const struct le_profiles *p)
@@ -2066,6 +2323,8 @@ int le_profile_test_init(struct le_profiles *p, const char *service_name)
     }
     for (i = 0; i < LE_MAX_AVRCP_SESSIONS; ++i)
         sessions->avrcp[i].fd = -1;
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i)
+        sessions->spp[i].fd = -1;
     p->sessions = sessions;
     build_record_set(sessions, p->service_name);
     return 0;

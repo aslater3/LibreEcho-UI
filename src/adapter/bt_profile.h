@@ -32,10 +32,12 @@ struct le_profiles {
     int sdp_listener;
     int avdtp_listener;
     int avrcp_listener;
+    int spp_listener;
     int media_bus_fd;
     int registered_sdp;
     int registered_a2dp_sink;
     int registered_avrcp;
+    int registered_spp;
     int stream_active;
     uint64_t media_frames_written;
     int volume_percent;                 /* speaker master 0..100, -1 unknown */
@@ -76,6 +78,8 @@ void le_profile_set_local_volume(struct le_profiles *p, int percent);
 int le_profile_registered_sdp(const struct le_profiles *p);
 int le_profile_registered_a2dp_sink(const struct le_profiles *p);
 int le_profile_registered_avrcp(const struct le_profiles *p);
+/* True when the SPP record is registered and RFCOMM channel 4 is served. */
+int le_profile_registered_spp(const struct le_profiles *p);
 int le_profile_stream_active(const struct le_profiles *p);
 
 /*
