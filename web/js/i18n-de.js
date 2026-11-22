@@ -16,7 +16,7 @@ window.LeI18n.register('de', 'Deutsch', {
  'nav.Users': 'Benutzer',
  'nav.Audio': 'Audio',
  'nav.Timers': 'Timer',
- 'nav.Nursery': 'Baby Phone',
+ 'nav.Nursery': 'Babyphone',
  'nav.Wake Word': 'Wake Word',
  'nav.Simulation': 'Simulation',
  'nav.LED & Buttons': 'LED & Tasten',
