@@ -298,6 +298,11 @@ struct audio_hw {
     int reply_volume_custom;
     int reply_volume;
     long long last_reply_check_ms;
+    /* Residual media level while ducked (percent), persisted.  0: the
+     * engine's compiled default applies; 1: duck_percent is the owner's. */
+    int duck_percent_custom;
+    int duck_percent;
+    long long last_duck_check_ms;
     /* Owner equaliser (half-dB per band) and speaker boost (0/3/6 dB),
      * persisted; the preset name is display only. */
     int eq_halves[LE_EQ_BANDS];
@@ -981,6 +986,22 @@ static int volume_leveling_apply(int enabled);
 #endif
 static int reply_volume_load(int *volume);
 static int reply_volume_publish(int custom, int volume);
+/* Media duck under higher-priority audio (voice turns, announcements): the
+ * owner's residual media level in percent, persisted as decimal 0..100.  A
+ * missing or invalid file means the engine's compiled default applies;
+ * while a level is set it is published beside master.volume as duck.volume
+ * in the same form. */
+#ifndef LE_DUCK_PERCENT_PATH
+#define LE_DUCK_PERCENT_PATH "/data/libreecho/config/duck-percent"
+#endif
+#ifndef LE_DUCK_PERCENT_RUNTIME_PATH
+#define LE_DUCK_PERCENT_RUNTIME_PATH "/run/libreecho-audio/duck.volume"
+#endif
+/* What the engine applies while duck.volume is absent (its compiled
+ * MEDIA_DUCK_Q15 default, ~25 percent). */
+#define LE_DUCK_ENGINE_DEFAULT 25
+static int duck_percent_load(int *percent);
+static int duck_percent_publish(int custom, int percent);
 /* Owner equaliser (four bands) and speaker boost.  audiod owns both: the
  * choice is persisted here (absent while flat / 0 dB) and published into the
  * audio runtime root as tone.conf (schema 2) and boost.conf, which the engine
@@ -1303,6 +1324,9 @@ static void audio_init(struct audio_hw *audio, int card)
     audio->reply_volume_custom = reply_volume_load(&audio->reply_volume) == 0;
     if (reply_volume_publish(audio->reply_volume_custom, audio->reply_volume) < 0)
         le_log_warn("audiod: reply volume could not be published");
+    audio->duck_percent_custom = duck_percent_load(&audio->duck_percent) == 0;
+    if (duck_percent_publish(audio->duck_percent_custom, audio->duck_percent) < 0)
+        le_log_warn("audiod: duck percent could not be published");
     owner_tone_load(audio->eq_halves, audio->eq_preset);
     audio->boost_db = owner_boost_load();
     if (owner_tone_publish(audio->eq_halves) < 0)
@@ -1493,6 +1517,79 @@ static int reply_volume_publish(int custom, int volume)
         return -1;
     }
     if (close(fd) < 0 || rename(temp, LE_REPLY_VOLUME_RUNTIME_PATH) < 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+static int duck_percent_load(int *percent)
+{
+    char text[8];
+    int fd = open(LE_DUCK_PERCENT_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    ssize_t n;
+
+    if (fd < 0)
+        return -1;
+    n = read(fd, text, sizeof(text) - 1);
+    close(fd);
+    if (n <= 0)
+        return -1;
+    text[n] = '\0';
+    return parse_level_text(text, percent);
+}
+
+/* Atomic, fsynced 0600 write of the owner's choice; engine default removes it. */
+static int duck_percent_save(int custom, int percent)
+{
+    char temp[sizeof(LE_DUCK_PERCENT_PATH) + 16], text[8];
+    int fd, length;
+
+    if (!custom)
+        return unlink(LE_DUCK_PERCENT_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    length = snprintf(text, sizeof(text), "%d\n", percent);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_DUCK_PERCENT_PATH) >=
+        (int)sizeof(temp))
+        return -1;
+    fd = mkstemp(temp);
+    if (fd < 0)
+        return -1;
+    if (fchmod(fd, 0600) < 0 || write(fd, text, (size_t)length) != length ||
+        fsync(fd) < 0) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temp, LE_DUCK_PERCENT_PATH) < 0) {
+        unlink(temp);
+        return -1;
+    }
+    return 0;
+}
+
+/* Drive the engine's runtime file.  Returns 0 when it matches the choice. */
+static int duck_percent_publish(int custom, int percent)
+{
+    char temp[sizeof(LE_DUCK_PERCENT_RUNTIME_PATH) + 16], text[8];
+    int fd, length;
+
+    if (!custom)
+        return unlink(LE_DUCK_PERCENT_RUNTIME_PATH) == 0 || errno == ENOENT ? 0 : -1;
+    if (ensure_volume_directory() < 0)
+        return -1;
+    length = snprintf(text, sizeof(text), "%d\n", percent);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.XXXXXX", LE_DUCK_PERCENT_RUNTIME_PATH) >=
+        (int)sizeof(temp))
+        return -1;
+    fd = mkstemp(temp);
+    if (fd < 0)
+        return -1;
+    if (fchmod(fd, 0640) < 0 || write(fd, text, (size_t)length) != length) {
+        close(fd);
+        unlink(temp);
+        return -1;
+    }
+    if (close(fd) < 0 || rename(temp, LE_DUCK_PERCENT_RUNTIME_PATH) < 0) {
         unlink(temp);
         return -1;
     }
@@ -2711,6 +2808,7 @@ static int handle_request(struct audio_hw *audio, char *message,
                        "\"startup_sound\":%s,\"amplifier_on\":%s,"
                        "\"volume_leveling\":%s,"
                        "\"reply_volume\":%d,\"reply_volume_custom\":%s,"
+                       "\"duck_percent\":%d,\"duck_percent_custom\":%s,"
                        "\"output_available\":%s,"
                        "\"noise_active\":%s,\"noise_colour\":\"%s\","
                        "\"noise_source\":\"%s\",\"noise_bed\":\"%s\","
@@ -2728,6 +2826,9 @@ static int handle_request(struct audio_hw *audio, char *message,
                        audio->reply_volume_custom ? audio->reply_volume
                                                   : audio->volume,
                        audio->reply_volume_custom ? "true" : "false",
+                       audio->duck_percent_custom ? audio->duck_percent
+                                                  : LE_DUCK_ENGINE_DEFAULT,
+                       audio->duck_percent_custom ? "true" : "false",
                        audio->output_available ? "true" : "false",
                        audio->noise_pid > 0 ? "true" : "false",
                        noise_source_name(audio->noise_source),
@@ -2925,6 +3026,29 @@ static int handle_request(struct audio_hw *audio, char *message,
             le_log_info("audiod: reply volume %d", (int)value);
         else
             le_log_info("audiod: reply volume follows the master");
+        return response_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "set_duck_percent")) {
+        /* {"percent":0-100} sets the residual media level while ducked;
+         * {"custom":false} returns to the engine's compiled default. */
+        int custom = 1;
+        if (json_bool(message, "custom", &boolean) == 0) {
+            if (boolean)
+                return response_error(response, response_size, id, "custom:true needs a percent");
+            custom = 0;
+            value = audio->duck_percent;
+        } else if (json_long(message, "percent", &value) < 0 || value < 0 || value > 100)
+            return response_error(response, response_size, id, "percent must be 0-100");
+        if (duck_percent_save(custom, (int)value) < 0)
+            return response_error(response, response_size, id, "duck percent could not be saved");
+        if (duck_percent_publish(custom, (int)value) < 0)
+            return response_error(response, response_size, id, "duck percent could not be applied");
+        audio->duck_percent_custom = custom;
+        audio->duck_percent = (int)value;
+        if (custom)
+            le_log_info("audiod: duck percent %d", (int)value);
+        else
+            le_log_info("audiod: duck percent follows the engine default");
         return response_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "set_tone")) {
@@ -3416,6 +3540,36 @@ static void reply_volume_reconcile(struct audio_hw *audio, long long now_ms)
         le_log_info("audiod: reply volume re-published");
 }
 
+static void duck_percent_reconcile(struct audio_hw *audio, long long now_ms)
+{
+    char text[8];
+    int fd, current = -1, matches;
+    ssize_t n;
+
+    if (now_ms <= 0 || (audio->last_duck_check_ms != 0 &&
+        now_ms - audio->last_duck_check_ms < VOLUME_GUARD_POLL_MS))
+        return;
+    audio->last_duck_check_ms = now_ms;
+    fd = open(LE_DUCK_PERCENT_RUNTIME_PATH, O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd >= 0) {
+        n = read(fd, text, sizeof(text) - 1);
+        close(fd);
+        if (n > 0) {
+            text[n] = '\0';
+            if (parse_level_text(text, &current) < 0)
+                current = -2;
+        } else {
+            current = -2;
+        }
+    }
+    matches = audio->duck_percent_custom ? current == audio->duck_percent
+                                         : current == -1;
+    if (matches)
+        return;
+    if (duck_percent_publish(audio->duck_percent_custom, audio->duck_percent) == 0)
+        le_log_info("audiod: duck percent re-published");
+}
+
 /* Keep tone.conf and boost.conf in step with the owner's choice, like
  * reply.volume: a cleared /run or a stray edit is corrected at the poll
  * cadence.  Rewritten only when the bytes differ, so the engine's
@@ -3546,6 +3700,7 @@ int main(int argc, char **argv)
         retry_startup_volume(&audio, monotonic_millis());
         volume_leveling_reconcile(&audio, monotonic_millis());
         reply_volume_reconcile(&audio, monotonic_millis());
+        duck_percent_reconcile(&audio, monotonic_millis());
         owner_eq_reconcile(&audio, monotonic_millis());
 
         pollfds[0].fd = listen_fd;

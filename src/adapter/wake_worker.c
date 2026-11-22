@@ -15,6 +15,16 @@
 
 #define WAKE_BLOCK_SAMPLES 1280U
 #define WAKE_QUEUE_BLOCKS 8U
+/*
+ * VAD gating: while the energy VAD stays quiet the engine is not fed at
+ * all -- a wake score on a silent feature window cannot pass the accept
+ * threshold anyway. Incoming PCM still lands in this replay ring; when the
+ * VAD goes active the ring is replayed through the engine (scores
+ * discarded) so mel/embedding history is rebuilt before the first live
+ * block, then normal streaming resumes. 20 x 80 ms covers the model's
+ * 16-frame feature window with margin.
+ */
+#define WAKE_GATE_RING_BLOCKS 20U
 #define WAKE_MODEL_DIRECTORY_BYTES 1024U
 #define WAKE_MAX_WORDS 2U
 #define WAKE_RELOAD_SECONDS 5
@@ -39,7 +49,7 @@
  * accept threshold is untouched and still does the real gating.
  */
 #define WAKE_SUPPORT_THRESHOLD 0.20f
-#define WAKE_LOCKOUT_SAMPLES 28000ULL
+#define WAKE_LOCKOUT_SAMPLES 64000ULL
 #define WAKE_HISTORY_BLOCKS 16U
 
 struct wake_block {
@@ -99,6 +109,10 @@ struct wake_worker_impl {
     size_t accumulated;
     struct le_wake_observation accumulated_observation;
 
+    int vad_gate;
+    int16_t gate_ring[WAKE_GATE_RING_BLOCKS][WAKE_BLOCK_SAMPLES];
+    unsigned int gate_ring_write;
+    unsigned int gate_ring_count;
     struct le_wake_worker_metrics metrics;
     float accept_threshold;
     le_wake_event_callback callback;
@@ -365,6 +379,34 @@ static void *wake_thread(void *opaque)
         --worker->queued;
         pthread_mutex_unlock(&worker->mutex);
 
+        if (worker->vad_gate && !block.observation.vad_active) {
+            memcpy(worker->gate_ring[worker->gate_ring_write],
+                   block.samples, sizeof(block.samples));
+            worker->gate_ring_write =
+                (worker->gate_ring_write + 1U) % WAKE_GATE_RING_BLOCKS;
+            if (worker->gate_ring_count < WAKE_GATE_RING_BLOCKS)
+                ++worker->gate_ring_count;
+            continue;
+        }
+        if (worker->vad_gate && worker->gate_ring_count) {
+            /* VAD went active: rebuild engine history from the ring,
+             * discarding the scores produced for stale audio. */
+            unsigned int i;
+            unsigned int start =
+                (worker->gate_ring_write + WAKE_GATE_RING_BLOCKS -
+                 worker->gate_ring_count) % WAKE_GATE_RING_BLOCKS;
+            float sd[WAKE_MAX_WORDS];
+            int new_score_discard = 0;
+
+            for (i = 0; i < worker->gate_ring_count; ++i)
+                le_wake_engine_feed_words(
+                    worker->engine,
+                    worker->gate_ring[(start + i) % WAKE_GATE_RING_BLOCKS],
+                    WAKE_BLOCK_SAMPLES,
+                    sd, WAKE_MAX_WORDS, &new_score_discard);
+            worker->gate_ring_count = 0;
+        }
+
         if (le_wake_engine_feed_words(
                 worker->engine, block.samples, WAKE_BLOCK_SAMPLES,
                 scores, WAKE_MAX_WORDS, &new_score) < 0 || !new_score) {
@@ -445,6 +487,8 @@ int le_wake_worker_start_words(struct le_wake_worker *worker,
         impl->has_second = 1;
     }
     impl->threads = threads;
+    impl->vad_gate = !getenv("LE_WAKE_VAD_GATE") ||
+        strcmp(getenv("LE_WAKE_VAD_GATE"), "0") != 0;
     impl->accept_threshold = accept_threshold;
     impl->callback = callback;
     impl->callback_opaque = callback_opaque;

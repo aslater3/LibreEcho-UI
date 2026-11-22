@@ -35,7 +35,7 @@ NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
-MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamformer.c src/adapter/adapter_server.c src/log.c
+MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/voice_aec.c src/adapter/mic_beamformer.c src/adapter/adapter_server.c src/json.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
 	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
 	src/adapter/led_music_director.c src/adapter/led_music_render.c
@@ -152,7 +152,9 @@ $(BUILD)/libreecho-audiod: $(AUDIOD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(AUDIOD_OBJECTS) $(LDFLAGS) -lm -o $@
 
 $(BUILD)/libreecho-micd: $(MICD_OBJECTS)
-	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(MICD_OBJECTS) $(LDFLAGS) -lm -o $@
+	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(MICD_OBJECTS) $(LDFLAGS) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
+
+$(BUILD)/adapter/voice_aec.o: CPPFLAGS += -I$(SPEEX_PREFIX)/include
 
 $(BUILD)/libreecho-ledd: $(LEDD_OBJECTS)
 	$(CROSS_COMPILE)$(CC) $(CFLAGS) $(LEDD_OBJECTS) $(LDFLAGS) -o $@
@@ -1469,6 +1471,10 @@ install: $(TARGET) $(LOGD_TARGET) adapters
 	cp -R web/* $(DESTDIR)$(PREFIX)/share/libreecho/web/
 	install -d $(DESTDIR)$(PREFIX)/share/libreecho/sounds
 	install -m 0644 sounds/*.raw $(DESTDIR)$(PREFIX)/share/libreecho/sounds/
+	install -d $(DESTDIR)$(PREFIX)/share/libreecho/ir
+	install -m 0644 data/ir/*.bin $(DESTDIR)$(PREFIX)/share/libreecho/ir/
+	install -d $(DESTDIR)$(PREFIX)/share/libreecho/models
+	install -m 0644 data/models/*.json $(DESTDIR)$(PREFIX)/share/libreecho/models/
 	install -m 0600 config/defaults.json $(DESTDIR)/etc/libreecho/web-config.json
 	install -m 0755 init/libreecho-web.init init/libreecho-logd.init init/libreecho-networkd.init init/libreecho-timed.init init/libreecho-audiod.init init/libreecho-micd.init init/libreecho-ledd.init init/libreecho-buttond.init init/libreecho-watchdogd.init init/libreecho-timerd.init init/libreecho-radiod.init init/libreecho-btd.init init/libreecho-airplayd.init init/libreecho-ttsd.init init/libreecho-waked.init init/libreecho-sttd.init init/libreecho-agentd.init init/libreecho-esphomed.init init/libreecho-mdnsd.init init/libreecho-lived.init $(DESTDIR)/etc/init.d/
 	install -m 0644 config/ntp.conf $(DESTDIR)/etc/libreecho/ntp.conf

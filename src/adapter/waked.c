@@ -4,7 +4,7 @@
 #include "clap_detector.h"
 #include "smoke_alarm_detector.h"
 #include "voice_aec.h"
-#include "voice_aec_guard.h"
+
 #include "voice_dsp.h"
 #include "voice_reference.h"
 #include "voice_stream.h"
@@ -253,14 +253,16 @@ static void preroll_write(int16_t *preroll, size_t *position,
 }
 
 #ifdef LE_WAKE_ENGINE_ONNX
+/* Threshold range 0.30 (most sensitive) to 0.98 (most strict); the strict
+ * end covers hand-tuned setups that run accept scores near 1.0. */
 static float sensitivity_threshold(int sensitivity)
 {
-    float threshold = 0.85f - (float)sensitivity * 0.0044f;
+    float threshold = 0.98f - (float)sensitivity * 0.0068f;
 
     if (threshold < 0.30f)
         threshold = 0.30f;
-    if (threshold > 0.85f)
-        threshold = 0.85f;
+    if (threshold > 0.98f)
+        threshold = 0.98f;
     return threshold;
 }
 #endif
@@ -268,7 +270,7 @@ static float sensitivity_threshold(int sensitivity)
 static int threshold_sensitivity(float threshold)
 {
     int sensitivity =
-        (int)((0.85f - threshold) / 0.0044f + 0.5f);
+        (int)((0.98f - threshold) / 0.0068f + 0.5f);
 
     if (sensitivity < 0)
         sensitivity = 0;
@@ -805,9 +807,7 @@ static void handle_control_client(
     close(client_fd);
 }
 
-static int process_frame(struct le_voice_aec *aec,
-                         struct le_voice_aec_guard *guard,
-                         struct le_voice_reference *reference,
+static int process_frame(struct le_voice_reference *reference,
                          struct le_voice_vad *vad,
                          struct le_wake_worker *wake_worker,
                          struct waked_ipc *ipc,
@@ -818,7 +818,6 @@ static int process_frame(struct le_voice_aec *aec,
                          uint64_t dump_limit,
                          struct waked_metrics *metrics)
 {
-    int16_t far_end[LE_VOICE_AEC_FRAME_SAMPLES];
     int16_t clean[LE_VOICE_AEC_FRAME_SAMPLES];
     struct le_voice_vad_result vad_result;
     float vad_score;
@@ -828,17 +827,13 @@ static int process_frame(struct le_voice_aec *aec,
     size_t dump_count = LE_VOICE_AEC_FRAME_SAMPLES;
 
     metrics->playback_active = playback_active;
-    (void)le_voice_aec_guard_update(guard, aec, reference,
-                                    playback_active, now_ns);
     if (playback_active) {
+        int16_t far_end[LE_VOICE_AEC_FRAME_SAMPLES];
+
         le_voice_reference_read(reference, far_end,
                                 LE_VOICE_AEC_FRAME_SAMPLES);
-        le_voice_aec_process(aec, microphone, far_end, clean);
-        ++metrics->aec_frames;
-    } else {
-        memset(far_end, 0, sizeof(far_end));
-        memcpy(clean, microphone, sizeof(clean));
     }
+    memcpy(clean, microphone, sizeof(clean));
     vad_result = le_voice_vad_process(
         vad, clean, LE_VOICE_AEC_FRAME_SAMPLES);
     vad_score = vad_result.noise_energy
@@ -903,9 +898,13 @@ static int process_frame(struct le_voice_aec *aec,
         return 0;
     if (dump_count > dump_limit - metrics->dump_samples)
         dump_count = (size_t)(dump_limit - metrics->dump_samples);
-    if (write_all(dump_fd, clean, dump_count * sizeof(clean[0])) < 0)
+    ssize_t wr = write(dump_fd, clean, dump_count * sizeof(clean[0]));
+    if (wr < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EPIPE)
+            return 0;  // Fifo voll/kein Leser: Frame droppen statt stauen
         return -1;
-    metrics->dump_samples += dump_count;
+    }
+    metrics->dump_samples += (uint64_t)(wr / sizeof(clean[0]));
     return metrics->dump_samples >= dump_limit ? 1 : 0;
 }
 
@@ -919,8 +918,6 @@ static const char *wake_second_name(const char *directory)
 static int run_waked(const struct waked_config *config)
 {
     struct le_voice_reference reference;
-    struct le_voice_aec aec;
-    struct le_voice_aec_guard aec_guard;
     struct le_voice_vad vad;
     struct le_wake_worker wake_worker;
     struct le_wake_worker_metrics wake_metrics;
@@ -939,8 +936,6 @@ static int run_waked(const struct waked_config *config)
 
     memset(&reference, 0, sizeof(reference));
     reference.fd = -1;
-    memset(&aec, 0, sizeof(aec));
-    le_voice_aec_guard_init(&aec_guard, LE_VOICE_AEC_GUARD_STATUS_PATH);
     memset(&wake_worker, 0, sizeof(wake_worker));
     memset(&wake_metrics, 0, sizeof(wake_metrics));
     memset(&metrics, 0, sizeof(metrics));
@@ -990,11 +985,6 @@ static int run_waked(const struct waked_config *config)
         perror("waked: reference socket");
         goto out;
     }
-    if (le_voice_aec_init(&aec, LE_VOICE_AEC_FRAME_SAMPLES,
-                          LE_VOICE_AEC_DEFAULT_FILTER_SAMPLES) < 0) {
-        fprintf(stderr, "waked: unable to initialize AEC\n");
-        goto out;
-    }
     le_voice_vad_init(&vad);
     if (le_voice_vad_set_floor_rms(
             &vad, config->vad_floor_rms) < 0)
@@ -1029,14 +1019,19 @@ static int run_waked(const struct waked_config *config)
             wake_near_miss_received, NULL) < 0)
         goto out;
 #endif
-    microphone_fd = connect_mic_stream(config->mic_socket);
-    if (microphone_fd < 0) {
-        perror("waked: microphone stream");
-        goto out;
+    while (running) {
+        microphone_fd = connect_mic_stream(config->mic_socket);
+        if (microphone_fd >= 0)
+            break;
+        fprintf(stderr,
+                "waked: microphone stream unavailable, retrying in 1 s\n");
+        sleep(1);
     }
+    if (microphone_fd < 0)
+        goto out;
     if (config->dump_path) {
         dump_fd = open(config->dump_path,
-                       O_WRONLY | O_CREAT | O_TRUNC, 0600);
+                       O_WRONLY | O_CREAT | O_TRUNC | O_NONBLOCK, 0600);
         if (dump_fd < 0) {
             perror("waked: dump output");
             goto out;
@@ -1087,11 +1082,7 @@ static int run_waked(const struct waked_config *config)
                     "waked: warning: unable to stop wake LED indicator\n");
         if (descriptors[1].revents & POLLIN)
             (void)le_voice_reference_drain(&reference);
-        le_voice_aec_guard_status(
-            &aec_guard, &reference,
-            le_voice_reference_active(&reference, monotonic_nanoseconds(),
-                                      REFERENCE_TIMEOUT_NS),
-            metrics.aec_frames, monotonic_nanoseconds(), 0);
+
         if (descriptors[3].revents & POLLIN) {
             struct le_wake_event event;
             ssize_t count;
@@ -1110,40 +1101,61 @@ static int run_waked(const struct waked_config *config)
                 handle_control_client(
                     &ipc, &wake_worker, &metrics, client_fd);
         }
-        if (descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL))
-            break;
-        if (descriptors[0].revents & POLLIN) {
+        if (microphone_fd >= 0 &&
+            (descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL))) {
+            close(microphone_fd);
+            microphone_fd = -1;
+        }
+        if (microphone_fd >= 0 && (descriptors[0].revents & POLLIN)) {
             ssize_t count = read(
                 microphone_fd, microphone_bytes + microphone_used,
                 sizeof(microphone_bytes) - microphone_used);
 
             if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
                 continue;
-            if (count <= 0)
-                break;
-            microphone_used += (size_t)count;
-            while (microphone_used >=
-                   LE_VOICE_AEC_FRAME_SAMPLES * sizeof(int16_t)) {
-                int16_t microphone[LE_VOICE_AEC_FRAME_SAMPLES];
-                const size_t frame_bytes =
-                    LE_VOICE_AEC_FRAME_SAMPLES * sizeof(int16_t);
-                int frame_result;
+            if (count <= 0) {
+                close(microphone_fd);
+                microphone_fd = -1;
+            } else {
+                microphone_used += (size_t)count;
+                while (microphone_used >=
+                       LE_VOICE_AEC_FRAME_SAMPLES * sizeof(int16_t)) {
+                    int16_t microphone[LE_VOICE_AEC_FRAME_SAMPLES];
+                    const size_t frame_bytes =
+                        LE_VOICE_AEC_FRAME_SAMPLES * sizeof(int16_t);
+                    int frame_result;
 
-                memcpy(microphone, microphone_bytes, frame_bytes);
-                memmove(microphone_bytes,
-                        microphone_bytes + frame_bytes,
-                        microphone_used - frame_bytes);
-                microphone_used -= frame_bytes;
-                frame_result = process_frame(
-                    &aec, &aec_guard, &reference, &vad, &wake_worker, &ipc, microphone,
-                    preroll, &preroll_position, dump_fd, dump_limit,
-                    &metrics);
-                if (frame_result < 0)
-                    goto out;
-                if (frame_result > 0) {
-                    result = 0;
-                    goto out;
+                    memcpy(microphone, microphone_bytes, frame_bytes);
+                    memmove(microphone_bytes,
+                            microphone_bytes + frame_bytes,
+                            microphone_used - frame_bytes);
+                    microphone_used -= frame_bytes;
+                    frame_result = process_frame(
+                        &reference, &vad, &wake_worker, &ipc, microphone,
+                        preroll, &preroll_position, dump_fd, dump_limit,
+                        &metrics);
+                    if (frame_result < 0)
+                        goto out;
+                    if (frame_result > 0) {
+                        result = 0;
+                        goto out;
+                    }
                 }
+            }
+        }
+        /* Mic stream ended: reconnect instead of dying, so a micd-side
+         * worker restart does not permanently kill the wakeword path. */
+        if (microphone_fd < 0) {
+            const struct timespec retry_delay = {0, 200000000L};
+
+            fprintf(stderr,
+                    "waked: microphone stream lost, reconnecting\n");
+            microphone_used = 0;
+            while (running) {
+                nanosleep(&retry_delay, NULL);
+                microphone_fd = connect_mic_stream(config->mic_socket);
+                if (microphone_fd >= 0)
+                    break;
             }
         }
     }
@@ -1159,16 +1171,13 @@ out:
     metrics.max_wake_score = wake_metrics.max_score;
     metrics.max_inference_us = wake_metrics.max_inference_us;
 #endif
-    le_voice_aec_guard_status(&aec_guard, &reference, 0,
-                              metrics.aec_frames, monotonic_nanoseconds(),
-                              1);
     fprintf(stderr,
             "waked: frames=%llu aec_frames=%llu vad_active_frames=%llu "
             "wake_scores=%llu wake_events=%llu max_wake_score=%.6f "
             "max_inference_us=%u wake_dropped_blocks=%llu "
             "wake_failed=%s "
             "ref_packets=%u ref_underflows=%u ref_overruns=%u "
-            "ref_discontinuities=%u aec_resets=%u\n",
+            "ref_discontinuities=%u\n",
             (unsigned long long)metrics.processed_frames,
             (unsigned long long)metrics.aec_frames,
             (unsigned long long)metrics.vad_active_frames,
@@ -1178,7 +1187,7 @@ out:
             (unsigned long long)wake_metrics.dropped_blocks,
             wake_metrics.failed ? "true" : "false",
             reference.packets, reference.underflows, reference.overruns,
-            reference.discontinuities, aec_guard.aec_resets);
+            reference.discontinuities);
     if (dump_fd >= 0)
         close(dump_fd);
     if (microphone_fd >= 0)
@@ -1198,7 +1207,6 @@ out:
     if (ipc.listen_fd >= 0)
         close(ipc.listen_fd);
     unlink(config->socket_path);
-    le_voice_aec_destroy(&aec);
     le_voice_reference_close(&reference);
     free(preroll);
     return result;

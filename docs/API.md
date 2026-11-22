@@ -503,10 +503,13 @@ render the existing unsupported state without logging an HTTP error.
     "volume_leveling": false,
     "reply_volume": 50,
     "reply_volume_custom": false,
+    "duck_percent": 25,
+    "duck_percent_custom": false,
     "eq": { "preset": "flat", "bass": 0, "low_mid": 0, "high_mid": 0, "treble": 0 },
     "boost_db": 0,
     "microphone_mix": "beamformer",
     "microphone_lane": -1,
+    "microphone_antibeam_available": true,
     "tts_voice": "southern-female",
     "tts_voices": [
       { "id": "southern-female", "name": "Southern English — female" },
@@ -532,6 +535,7 @@ Update audio settings.
   "tts_voice": "southern-female",
   "volume_leveling": true,
   "reply_volume": 35,
+  "duck_percent": 5,
   "eq": { "preset": "vocal" },
   "boost_db": 3
 }
@@ -540,7 +544,11 @@ Update audio settings.
 All fields are optional. `microphone_mix` chooses how the four speech
 microphones become the mono voice stream: `beamformer` (the default; fixed
 beams, following the strongest talker), `average` (the mean of the four
-speech microphones) or `single` (the lowest-numbered speech microphone). It
+speech microphones), `single` (the lowest-numbered speech microphone) or
+`antibeam` (a spatial null against the measured speaker-to-microphone path;
+only offered when `microphone_antibeam_available` is true, which requires
+shipped or device-calibrated IR taps for the device model — `set_mix`
+rejects `antibeam` otherwise). It
 is persisted, applied to the running voice stream without a restart, and an
 unknown value is rejected with `400`. `microphone_lane` picks the array
 microphone used by `single`: `0` to `6` is array microphone 1 to 7, and `-1`
@@ -574,6 +582,21 @@ before anything changes. Home Assistant sees the same level as the `Reply
 volume` number entity (config category, 0–100 %); setting it there sets a
 separate level. The audible effect needs a LibreEcho-Platform audio engine
 that reads `reply.volume` (0.14.6 and later); older engines ignore it.
+
+`duck_percent` (integer `0`–`100`) is the residual media level while music and
+other media are ducked under higher-priority audio — voice turns,
+announcements and chimes. `0` mutes media completely while ducked. It is
+persisted by audiod and published for the audio engine as
+`/run/libreecho-audio/duck.volume` (a plain percent, like `reply.volume`).
+`"duck_percent_custom": false` returns ducking to the engine's compiled
+default (about 25 percent; the runtime file is then absent). Alarms always
+mute media fully regardless of this setting. GET reports `duck_percent`
+(the level in effect, equal to the engine default while following) and
+`duck_percent_custom`. An out-of-range or non-integer `duck_percent`, a
+non-boolean `duck_percent_custom`, or `duck_percent_custom: true` without
+`duck_percent` is rejected with `400` before anything changes. The audible
+effect needs a LibreEcho-Platform audio engine that reads `duck.volume`;
+older engines keep their compiled duck level.
 
 `eq` is the owner's four-band equaliser: `bass` (low shelf), `low_mid`
 (peaking, 400 Hz), `high_mid` (peaking, 2.5 kHz) and `treble` (high shelf),

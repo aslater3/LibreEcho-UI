@@ -34,11 +34,36 @@
 
 struct cplx { double re, im; };
 
+/* Optional per-lane positions loaded from the model profile JSON; they
+ * replace the compiled-in Echo 2 ring so other mic layouts work. */
+static double pos_x_um[LE_VOICE_LOGICAL_CHANNELS];
+static double pos_y_um[LE_VOICE_LOGICAL_CHANNELS];
+static int pos_override;
+
+void le_beamformer_set_positions(const double *x_um, const double *y_um,
+                                 unsigned int count)
+{
+    unsigned int i;
+
+    if (!x_um || !y_um || count > LE_VOICE_LOGICAL_CHANNELS)
+        return;
+    for (i = 0; i < count; ++i) {
+        pos_x_um[i] = x_um[i];
+        pos_y_um[i] = y_um[i];
+    }
+    pos_override = count;
+}
+
 static void mic_position(unsigned int lane, double *x, double *y)
 {
     double radius = LE_MIC_ARRAY_RING_RADIUS_UM * 1e-6;
     double angle;
 
+    if (pos_override && (int)lane < pos_override) {
+        *x = pos_x_um[lane] * 1e-6;
+        *y = pos_y_um[lane] * 1e-6;
+        return;
+    }
     if (lane == LE_MIC_ARRAY_CENTRE_LANE) {
         *x = 0.0;
         *y = 0.0;
@@ -313,6 +338,8 @@ static void process_hop(struct le_beamformer *bf)
             xi[m][k] = im[k];
         }
     }
+    /* Beam scoring and selection always run on the unprojected spectrum,
+     * so tracking is independent of the anti-beam mode. */
     for (b = 0; b < bf->beam_count; ++b) {
         float energy = 0.0f;
         for (k = BEAM_SCORE_FIRST_BIN; k <= BEAM_SCORE_LAST_BIN; ++k) {
@@ -359,15 +386,57 @@ static void process_hop(struct le_beamformer *bf)
     } else {
         bf->candidate_frames = 0;
     }
+    /* Beam-selected output spectrum of the unprojected mics — always
+     * computed; it is also the fade source when anti-beam toggles. */
     b = bf->selected;
     for (k = 0; k < LE_BEAM_BINS; ++k) {
         float sr = 0.0f, si = 0.0f;
         for (m = 0; m < bf->mic_count; ++m) {
-            sr += bf->w_re[b][k][m] * xr[m][k] - bf->w_im[b][k][m] * xi[m][k];
-            si += bf->w_re[b][k][m] * xi[m][k] + bf->w_im[b][k][m] * xr[m][k];
+            sr += bf->w_re[b][k][m] * xr[m][k]
+                - bf->w_im[b][k][m] * xi[m][k];
+            si += bf->w_re[b][k][m] * xi[m][k]
+                + bf->w_im[b][k][m] * xr[m][k];
         }
         yr[k] = sr;
         yi[k] = si;
+    }
+    if (bf->antibeam != bf->ab_rendered)
+        bf->ab_fade = LE_AB_FADE_HOPS;
+    if (bf->ab_fade > 0 || bf->ab_rendered) {
+        /* Project each bin's mic vector onto the orthogonal complement of
+         * the measured speaker path H(k): X' = X - H (H^H X)/(H^H H + eps). */
+        for (k = 0; k < LE_BEAM_BINS; ++k) {
+            float vr = 0.0f, vi = 0.0f;
+            for (m = 0; m < bf->mic_count; ++m) {
+                vr += bf->ab_re[k][m] * xr[m][k] + bf->ab_im[k][m] * xi[m][k];
+                vi += bf->ab_re[k][m] * xi[m][k] - bf->ab_im[k][m] * xr[m][k];
+            }
+            float s = 1.0f / (bf->ab_den[k] + 1e-6f);
+            float pr = 0.0f, pi = 0.0f;
+            vr *= s;
+            vi *= s;
+            for (m = 0; m < bf->mic_count; ++m) {
+                pr += xr[m][k] - (bf->ab_re[k][m] * vr -
+                                  bf->ab_im[k][m] * vi);
+                pi += xi[m][k] - (bf->ab_re[k][m] * vi +
+                                  bf->ab_im[k][m] * vr);
+            }
+            xr[0][k] = pr;
+            xi[0][k] = pi;
+        }
+        /* Fade hops blend beam-select and projected-sum continuously:
+         * t runs 0 -> 1 over LE_AB_FADE_HOPS hops toward ab_rendered. */
+        bf->ab_rendered = bf->antibeam;
+        float t = 1.0f;
+        if (bf->ab_fade > 0) {
+            t = 1.0f - (float)--bf->ab_fade / LE_AB_FADE_HOPS;
+            if (!bf->antibeam)
+                t = 1.0f - t;
+        }
+        for (k = 0; k < LE_BEAM_BINS; ++k) {
+            yr[k] += (xr[0][k] - yr[k]) * t;
+            yi[k] += (xi[0][k] - yi[k]) * t;
+        }
     }
     /* Inverse real FFT via the conjugate trick on the Hermitian spectrum. */
     for (k = 0; k < LE_BEAM_BINS; ++k) {
@@ -471,7 +540,7 @@ unsigned int le_beamformer_parse_mics(const char *text)
 int le_mic_mix_parse(const char *text)
 {
     static const char *const names[LE_MIC_MIX_COUNT] = {
-        "beamformer", "average", "single"
+        "beamformer", "average", "single", "antibeam"
     };
     int mode;
 
@@ -492,6 +561,8 @@ const char *le_mic_mix_name(int mode)
         return "average";
     case LE_MIC_MIX_SINGLE:
         return "single";
+    case LE_MIC_MIX_ANTIBEAM:
+        return "antibeam";
     default:
         return NULL;
     }
@@ -532,4 +603,38 @@ int16_t le_mic_mix_single(const int16_t logical[LE_VOICE_LOGICAL_CHANNELS],
     if (lane < 0 || lane >= LE_VOICE_LOGICAL_CHANNELS)
         lane = le_mic_mix_single_lane(mic_mask);
     return lane < 0 ? 0 : logical[lane];
+}
+
+int le_beamformer_antibeam_load(struct le_beamformer *bf,
+                                const int16_t *taps, int ntaps, int channels,
+                                int reversed)
+{
+    float re[LE_BEAM_FFT], im[LE_BEAM_FFT];
+    unsigned int m;
+    int k, t;
+
+    if (!bf || !taps || ntaps <= 0)
+        return -1;
+    memset(bf->ab_re, 0, sizeof(bf->ab_re));
+    memset(bf->ab_im, 0, sizeof(bf->ab_im));
+    memset(bf->ab_den, 0, sizeof(bf->ab_den));
+    for (m = 0; m < bf->mic_count; ++m) {
+        unsigned int c = bf->mics[m];
+        if ((int)c >= channels)
+            return -1;
+        for (k = 0; k < LE_BEAM_FFT; ++k) {
+            t = reversed ? ntaps - 1 - k : k;
+            re[k] = (t >= 0 && t < ntaps) ? (float)taps[c * ntaps + t] / 32768.f
+                                        : 0.0f;
+            im[k] = 0.0f;
+        }
+        fft(bf, re, im);
+        for (k = 0; k < LE_BEAM_BINS; ++k) {
+            bf->ab_re[k][m] = re[k];
+            bf->ab_im[k][m] = im[k];
+            bf->ab_den[k] += re[k] * re[k] + im[k] * im[k];
+        }
+    }
+    bf->antibeam = 1;
+    return 0;
 }
