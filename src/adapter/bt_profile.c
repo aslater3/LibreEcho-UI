@@ -2023,13 +2023,71 @@ int le_profile_spp_connect(struct le_profiles *p, const uint8_t *address,
  * END time as local ISO-8601 (PROTOCOL.md: scheduledTime is the end, not a
  * duration).  A timer that disappeared gets DeleteAlert.
  */
+/*
+ * Alerts whose DeleteAlert is deferred until their finish pulse has run.  The
+ * clock pulses for about ten seconds and a DeleteAlert during that window
+ * cuts the pulse short (techo5, internal/feature/wallclock/bridge.go).
+ */
+#define LE_GADGET_DEFERRED_MAX 8
+#define LE_GADGET_PULSE_CLEAR_SECONDS 11
+
+struct le_deferred_delete {
+    char token[LE_GADGET_TOKEN_MAX];
+    time_t at;
+};
+
+static struct le_deferred_delete deferred_delete[LE_GADGET_DEFERRED_MAX];
+
+static void defer_delete(const char *token, time_t at)
+{
+    size_t i;
+
+    for (i = 0; i < LE_GADGET_DEFERRED_MAX; ++i) {
+        if (!deferred_delete[i].token[0] ||
+            !strcmp(deferred_delete[i].token, token)) {
+            snprintf(deferred_delete[i].token,
+                     sizeof(deferred_delete[i].token), "%s", token);
+            deferred_delete[i].at = at;
+            return;
+        }
+    }
+}
+
+/* Write the DeleteAlerts whose pulse window has passed. */
+static void flush_deferred_deletes(struct le_profile_sessions *sessions,
+                                  time_t now)
+{
+    size_t i;
+
+    for (i = 0; i < LE_GADGET_DEFERRED_MAX; ++i) {
+        int slot;
+
+        if (!deferred_delete[i].token[0] || now < deferred_delete[i].at)
+            continue;
+        for (slot = 0; slot < LE_MAX_SPP_SESSIONS; ++slot) {
+            uint8_t message[LE_AGT_FRAME_MAX];
+
+            if (sessions->spp[slot].fd < 0 || !sessions->spp[slot].offered)
+                continue;
+            (void)spp_send(&sessions->spp[slot], message,
+                           le_agt_build_delete_alert(
+                               message, sizeof(message),
+                               deferred_delete[i].token));
+        }
+        deferred_delete[i].token[0] = '\0';
+        deferred_delete[i].at = 0;
+    }
+}
+
 void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
 {
     struct le_profile_sessions *sessions = p->sessions;
     struct le_gadget *gadget = p->gadget;
     const char *cursor;
     char previous[LE_GADGET_MAX_ALERTS][LE_GADGET_TOKEN_MAX];
+    char previous_type[LE_GADGET_MAX_ALERTS];
     int had[LE_GADGET_MAX_ALERTS];
+    int reminder_spoke = 0;
     time_t now = time(NULL);
     int i;
 
@@ -2047,8 +2105,10 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
             if (gadget->alerts[k].in_use) {
                 memcpy(previous[k], gadget->alerts[k].token,
                        sizeof(previous[k]));
+                previous_type[k] = gadget->alerts[k].type[0];
                 had[k] = 1;
             } else {
+                previous_type[k] = 0;
                 had[k] = 0;
             }
         }
@@ -2123,8 +2183,8 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
 
             if (!due_at)
                 continue;
-            when_at = (time_t)strtoll(due_at + 13, &end, 10);
-            if (!end || end == due_at + 13)
+            when_at = (time_t)strtoll(due_at + 12, &end, 10);
+            if (!end || end == due_at + 12)
                 continue;
             if (!localtime_r(&when_at, &due))
                 continue;
@@ -2155,9 +2215,36 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
          * "Nothing at the scheduled time unless alarms/reminders = active is
          * sent".  A reminder is spoken by timerd; the clock still pulses.
          */
-        if (ringing > 0) {
+        /*
+         * timerd dismisses a reminder as it speaks it (announce_reminder ->
+         * le_timer_dismiss_at), so it never reports state=ringing.  A REMINDER
+         * that was in the previous set and is gone now has just spoken: that
+         * is the moment the clock should pulse.
+         */
+        {
+            size_t k;
+
+            for (k = 0; k < LE_GADGET_MAX_ALERTS; ++k) {
+                size_t j;
+                int still = 0;
+
+                if (!had[k] || previous_type[k] != 'R')
+                    continue;
+                for (j = 0; j < LE_GADGET_MAX_ALERTS; ++j)
+                    if (gadget->alerts[j].in_use &&
+                        !strcmp(gadget->alerts[j].token, previous[k])) {
+                        still = 1;
+                        break;
+                    }
+                if (!still)
+                    reminder_spoke = 1;
+            }
+        }
+        if (ringing > 0 || reminder_spoke) {
             char key[16];
             const char *state_at = NULL;
+            static time_t next_pulse;
+            time_t now_pulse = time(NULL);
 
             /* Find the alert that is actually ringing: its own "state". */
             {
@@ -2167,7 +2254,6 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                     const char *kind_at = NULL;
                     const char *back = scan;
 
-                    /* Walk back to the object's "kind". */
                     while (back > timers_json && *back != '{')
                         --back;
                     kind_at = strstr(back, "\"kind\":\"");
@@ -2178,22 +2264,27 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                     scan += 1;
                 }
             }
-            if (state_at && !strncmp(state_at, "reminder", 8))
-                strcpy(key, "reminders");
-            else if (state_at && !strncmp(state_at, "alarm", 5))
-                strcpy(key, "alarms");
-            else
-                strcpy(key, "timers");
-            if (le_gadget_set_timers_active(gadget, 1)) {
+            strcpy(key, "timers");
+
+            /*
+             * The clock pulses for ~10 s per `active` and then goes dark, so a
+             * ringing alert needs it re-sent about every 12 s (PROTOCOL.md).
+             * Repeating also covers a link that comes up mid-ring, which the
+             * old one-shot flag missed entirely.
+             */
+            if (now_pulse >= next_pulse) {
+                next_pulse = now_pulse + 12;
+                le_gadget_set_timers_active(gadget, 1);
                 for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
                     uint8_t message[LE_AGT_FRAME_MAX];
 
                     if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
                         continue;
-                    (void)spp_send(&sessions->spp[i], message,
-                                   le_agt_build_state_update(
-                                       message, sizeof(message), key,
-                                       "active"));
+                    if (spp_send(&sessions->spp[i], message,
+                                 le_agt_build_state_update(
+                                     message, sizeof(message), key,
+                                     "active")) == 0)
+                        le_log_info("btd-profiles: %s=active sent", key);
                 }
             }
         } else if (le_gadget_set_timers_active(gadget, 0)) {
@@ -2234,6 +2325,12 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                     }
                 if (still)
                     continue;
+                if (reminder_spoke) {
+                    /* Let the pulse finish before the alert goes away. */
+                    defer_delete(previous[k],
+                                 now + LE_GADGET_PULSE_CLEAR_SECONDS);
+                    continue;
+                }
                 (void)spp_send(&sessions->spp[i], message,
                                le_agt_build_delete_alert(message,
                                                          sizeof(message),
@@ -2275,6 +2372,7 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                             length);
         }
     }
+    flush_deferred_deletes(sessions, now);
 }
 
 /*

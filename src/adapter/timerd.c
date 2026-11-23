@@ -987,7 +987,12 @@ static int timers_json(struct context *ctx, char *out, size_t size)
                            hour, minute,
                            timer->kind == LE_TIMER_ALARM
                                ? timer->due_epoch
-                               : now_epoch + remaining);
+                               : timer->state == LE_TIMER_STATE_RINGING
+                                     /* Monotonic -> wall for a stable value:
+                                      * `remaining` is 0 while ringing. */
+                                     ? now_epoch +
+                                           (timer->due_monotonic_ms - now_ms) / 1000LL
+                                     : now_epoch + remaining);
         if (written < 0 || (size_t)written >= size - used)
             return -1;
         used += (size_t)written;
