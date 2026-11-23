@@ -33,6 +33,7 @@
 #define LE_ADAPTER_LED_SOCK      "/run/libreecho/led.sock"
 #define LE_ADAPTER_WAKEWORD_SOCK "/run/libreecho/wakeword.sock"
 #define LE_ADAPTER_BLUETOOTH_SOCK "/run/libreecho/bluetooth.sock"
+#define LE_ADAPTER_TIMER_SOCK     "/run/libreecho/timer.sock"
 #define LE_ADAPTER_AIRPLAY_SOCK   "/run/libreecho/airplay.sock"
 #define LE_ADAPTER_SPOTIFY_SOCK   "/run/libreecho/spotify.sock"
 #define LE_ADAPTER_MIC_SOCK       "/run/libreecho/mic.sock"

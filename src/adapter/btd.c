@@ -2498,6 +2498,41 @@ static void drain_mgmt(struct bt_context *context)
     } while (count > 0);
 }
 
+/*
+ * Pull timerd's timer list and mirror it onto the clock.  Cheap enough to run
+ * on a one-second cadence; timerd is the source of truth, so a timer set by
+ * voice, the web UI or Home Assistant all arrive here.
+ */
+static void sync_gadget_alerts(struct bt_context *context)
+{
+    struct le_adapter *timer;
+    char response[4096];
+
+    if (!context->profiles_opened || !context->profiles.gadget)
+        return;
+    timer = le_adapter_connect(LE_ADAPTER_TIMER_SOCK, 100);
+    if (!timer)
+        return;
+    response[0] = '\0';
+    {
+        static int last_rc = -99;
+        int rc = le_adapter_call(timer, "list", "{}", response,
+                                 sizeof(response));
+
+        if (rc != last_rc) {
+            le_log_info("btd: timerd list rc=%d %s", rc,
+                        rc ? response : "");
+            last_rc = rc;
+        }
+        /* le_adapter_call() copies only the value of `data` into the
+         * buffer, without the key, so `response` already is timerd's JSON. */
+        if (rc == LE_ADAPTER_OK)
+            le_profile_spp_sync_alerts(&context->profiles, response);
+    }
+    le_adapter_close(timer);
+}
+
+
 int main(int argc, char **argv)
 {
     const char *socket_path = DEFAULT_SOCKET;
@@ -2614,10 +2649,21 @@ int main(int argc, char **argv)
         }
         if (total == 2 && (pollfds[1].revents & POLLIN))
             drain_mgmt(&context);
-        if (profile_count)
+        if (profile_count) {
             le_profile_spp_refresh_time(&context.profiles, time(NULL));
             le_profile_poll_events(&context.profiles, pollfds + profile_base,
                                    fd_map, profile_count);
+        }
+        {
+            /* One timer refresh per second; the clock's ring lags the
+             * countdown by at most that, which the reference accepts. */
+            static time_t next_alert_sync;
+
+            if (time(NULL) >= next_alert_sync) {
+                next_alert_sync = time(NULL) + 1;
+                sync_gadget_alerts(&context);
+            }
+        }
         if (context.profiles_opened) {
             /* Buttons, web UI and AirPlay move the master; the loop wakes per
              * media packet, so sample the file at most every 250 ms. */

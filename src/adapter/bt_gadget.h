@@ -53,6 +53,9 @@ int le_gadget_set_alert(struct le_gadget *gadget, const char *token,
 /* Remove an alert.  Returns 0 when it existed. */
 int le_gadget_delete_alert(struct le_gadget *gadget, const char *token);
 
+/* Clear every alert, e.g. before replacing the set from timerd. */
+void le_gadget_clear_alerts(struct le_gadget *gadget);
+
 /* Mark the ringing state; returns 1 when a StateUpdate is due. */
 int le_gadget_set_timers_active(struct le_gadget *gadget, int active);
 

@@ -74,6 +74,13 @@ void le_profile_close(struct le_profiles *p);
 int le_profile_spp_connect(struct le_profiles *p, const uint8_t *address,
                            int type);
 
+/*
+ * Mirror timerd's timers onto the clock as SetAlert directives.  `timers_json`
+ * is timerd's "list" response; pass NULL to clear.  Called after connect and
+ * whenever the timer set changes.
+ */
+void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json);
+
 /* Re-send timeinfo on the half hour, like a real Echo. */
 void le_profile_spp_refresh_time(struct le_profiles *p, time_t now);
 

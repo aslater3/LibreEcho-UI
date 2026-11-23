@@ -6,6 +6,12 @@
 
 #include <string.h>
 
+void le_gadget_clear_alerts(struct le_gadget *gadget)
+{
+    if (gadget)
+        memset(gadget->alerts, 0, sizeof(gadget->alerts));
+}
+
 void le_gadget_init(struct le_gadget *gadget)
 {
     if (gadget)

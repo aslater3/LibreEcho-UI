@@ -238,6 +238,8 @@ struct le_spp_session {
     int offered;             /* Discover sent for this connection */
     uint8_t seq;             /* next frame sequence number */
     struct le_gadget *gadget; /* wall-clock state, NULL when not hosting */
+    uint8_t alert_sent[LE_AGT_FRAME_MAX * LE_GADGET_MAX_ALERTS];
+    size_t alert_bytes;        /* rendered alert frames last written */
 };
 
 struct le_profile_sessions {
@@ -1789,17 +1791,34 @@ static int spp_send_bootstrap(struct le_spp_session *session)
 
     if (!session->gadget)
         return -1;
-    spp_local_time(session->gadget->timeinfo, sizeof(session->gadget->timeinfo));
-    session->gadget->timeinfo_valid = session->gadget->timeinfo[0] != '\0';
+    /*
+     * The clock drives its hands from 12:00 to the given time on every
+     * timeinfo, which takes minutes.  So only send it when the time we would
+     * report differs from what the clock already has — otherwise every
+     * reconnect restarts the sweep.
+     */
+    {
+        char fresh[LE_GADGET_TIME_MAX];
+        int changed;
 
-    if (spp_send(session, message,
-                 le_agt_build_discover(message, sizeof(message))) < 0)
-        return -1;
-    if (session->gadget->timeinfo_valid &&
-        spp_send(session, message,
-                 le_agt_build_state_update(message, sizeof(message), "timeinfo",
-                                           session->gadget->timeinfo)) < 0)
-        return -1;
+        spp_local_time(fresh, sizeof(fresh));
+        changed = fresh[0] && strcmp(fresh, session->gadget->timeinfo) != 0;
+        if (fresh[0]) {
+            memcpy(session->gadget->timeinfo, fresh, sizeof(fresh));
+            session->gadget->timeinfo_valid = 1;
+        }
+        if (spp_send(session, message,
+                     le_agt_build_discover(message, sizeof(message))) < 0)
+            return -1;
+        if (!changed && session->gadget->timeinfo_valid)
+            le_log_info("btd-profiles: time unchanged, not re-sending timeinfo");
+        else if (session->gadget->timeinfo_valid &&
+                 spp_send(session, message,
+                          le_agt_build_state_update(message, sizeof(message),
+                                                    "timeinfo",
+                                                    session->gadget->timeinfo)) < 0)
+            return -1;
+    }
     if (spp_send(session, message,
                  le_agt_build_clear_indicator(message, sizeof(message))) < 0)
         return -1;
@@ -1836,6 +1855,7 @@ static int spp_open_session(struct le_profiles *p, const uint8_t *address,
     }
     if (session) {
         /* One gadget at a time; a fresh link supersedes the old one. */
+        le_log_info("btd-profiles: replacing open gadget channel");
         close(session->fd);
         session->fd = -1;
         session->used = 0;
@@ -1898,6 +1918,7 @@ static int spp_open_session(struct le_profiles *p, const uint8_t *address,
     session->offered = 0;
     session->seq = 0;
     session->gadget = p->gadget;
+    session->alert_bytes = 0;
     if (spp_send_bootstrap(session) != 0) {
         close(fd);
         session->fd = -1;
@@ -1913,6 +1934,114 @@ int le_profile_spp_connect(struct le_profiles *p, const uint8_t *address,
 {
     (void)type;
     return spp_open_session(p, address, 15000, NULL);
+}
+
+/*
+ * Mirrors the countdowns from timerd onto the clock.  Each alert carries its
+ * END time as local ISO-8601 (PROTOCOL.md: scheduledTime is the end, not a
+ * duration).  A timer that disappeared gets DeleteAlert.
+ */
+void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
+{
+    struct le_profile_sessions *sessions = p->sessions;
+    struct le_gadget *gadget = p->gadget;
+    const char *cursor;
+    time_t now = time(NULL);
+    int i;
+
+    if (!sessions || !gadget || !timers_json)
+        return;
+
+    /* The response is a flat list of small objects; read the three fields the
+     * clock needs rather than linking a JSON parser for this shape. */
+    le_gadget_clear_alerts(gadget);
+    cursor = timers_json;
+    while ((cursor = strstr(cursor, "\"id\":")) != NULL) {
+        char token[LE_GADGET_TOKEN_MAX];
+        char type[12];
+        char when[LE_GADGET_TIME_MAX];
+        char *end = NULL;
+        long id, seconds;
+        const char *kind;
+        const char *rem;
+        struct tm due;
+        char buffer[40];
+        size_t length;
+
+        cursor += 5;
+        id = strtol(cursor, &end, 10);
+        if (!end || end == cursor)
+            break;
+        cursor = end;
+
+        kind = strstr(cursor, "\"kind\":\"");
+        if (!kind)
+            break;
+        kind += 8;
+        if (!strncmp(kind, "countdown", 9))
+            strcpy(type, "TIMER");
+        else if (!strncmp(kind, "alarm", 5))
+            strcpy(type, "ALARM");
+        else if (!strncmp(kind, "reminder", 8))
+            strcpy(type, "REMINDER");
+        else
+            continue;               /* not an alert the clock draws */
+
+        rem = strstr(cursor, "\"seconds_remaining\":");
+        if (!rem)
+            break;
+        rem += 20;
+        seconds = strtol(rem, &end, 10);
+        if (!end || end == rem)
+            break;
+        cursor = end;
+        if (seconds <= 0)
+            continue;               /* already due; the ring is not ours */
+
+        if (!localtime_r(&(time_t){ now + (time_t)seconds }, &due))
+            continue;
+        if (strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &due) == 0)
+            continue;
+        length = strlen(buffer);
+        if (length < 5)
+            continue;
+        /* %z is +HHMM; AGT carries +HH:MM. */
+        snprintf(when, sizeof(when), "%.*s%c%.2s:%.2s", (int)(length - 5),
+                 buffer, buffer[length - 5], buffer + length - 4,
+                 buffer + length - 2);
+        snprintf(token, sizeof(token), "%ld", id);
+        (void)le_gadget_set_alert(gadget, token, type, when);
+    }
+
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        uint8_t frames[LE_AGT_FRAME_MAX * LE_GADGET_MAX_ALERTS];
+        size_t length;
+
+        if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+            continue;
+        length = le_gadget_build_alert_frames(gadget, frames, sizeof(frames));
+        if (!length)
+            continue;
+        /* The token and end time only move when a timer is added, removed or
+         * paused, so an unchanged set needs no write.  Two timers sharing a
+         * minute would otherwise re-send every second. */
+        if (length == sessions->spp[i].alert_bytes &&
+            !memcmp(frames, sessions->spp[i].alert_sent, length))
+            continue;
+        if (length > sizeof(sessions->spp[i].alert_sent))
+            length = sizeof(sessions->spp[i].alert_sent);
+        memcpy(sessions->spp[i].alert_sent, frames, length);
+        sessions->spp[i].alert_bytes = length;
+        {
+            ssize_t wrote = write(sessions->spp[i].fd, frames, length);
+            if (wrote != (ssize_t)length)
+                le_log_warn("btd-profiles: alert write %zd/%zu failed: %s",
+                            wrote, length, strerror(errno));
+            else
+                le_log_info("btd-profiles: %zu alert bytes to the clock",
+                            length);
+        }
+    }
 }
 
 /*
@@ -1980,6 +2109,7 @@ static void spp_session_read(struct le_profiles *p,
     received = read(session->fd, session->buf + session->used,
                     sizeof(session->buf) - session->used);
     if (received == 0) {
+        le_log_info("btd-profiles: gadget closed the channel");
         close(session->fd);
         session->fd = -1;
         session->used = 0;
@@ -2438,6 +2568,7 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
             sessions->spp[slot].offered = 0;
             sessions->spp[slot].seq = 0;
             sessions->spp[slot].gadget = p->gadget;
+            sessions->spp[slot].alert_bytes = 0;
             /*
              * A real Echo opens the session as soon as the gadget connects.
              * Waiting for the clock's Discover.Response deadlocks: it sends
