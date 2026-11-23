@@ -234,6 +234,14 @@ rate; it is deliberately not presented as genre recognition. Tests and
 owner-scoped notification patterns take priority. Non-per-pixel backends
 receive a uniform aggregate colour.
 
+Voice state indicators use transient, owner-scoped `pattern` requests rather
+than `animate`, so they never overwrite the saved idle colour. A pattern's
+optional `profile` selects the saved theme brightness. With the explicit
+boolean `profile_colour: true`, it also selects that theme's RGB (a valid
+profile is required). ESPHome listening/thinking/error indicators opt in;
+fixed-colour wake cues and the Home Assistant RGB light do not. Omitting the
+flag or passing `false` retains the caller's RGB for backward compatibility.
+
 ### 4. Central Log Daemon (`libreecho-logd`)
 
 **Role:** Aggregate logs from all services into a single rotated file.

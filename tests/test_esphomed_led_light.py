@@ -110,6 +110,9 @@ class LedLightPriority(Activity):
   time.sleep(.1);a.wake(4000)
   self.assertEqual(self.events(2),[(VOICE,'wake_word'),(VOICE,'listening')])
   self.assertTrue(self.wait_for(lambda:any(r['args'].get('owner')=='esphome' for r in self.led_calls())),'listening indicator not shown')
+  voice=[r['args'] for r in self.led_calls() if r['args'].get('owner')=='esphome' and r['args'].get('profile')=='listening']
+  self.assertTrue(voice,'listening theme not selected')
+  self.assertIs(voice[-1].get('profile_colour'),True,'voice indicator must use the saved theme RGB')
   mark=len(self.led_calls())
   self.s.sendall(command(state=False))
   time.sleep(.3)

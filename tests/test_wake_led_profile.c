@@ -135,5 +135,64 @@ int main(void)
     require_condition(ctx.pattern_colour.brightness == 70,
                       "a pattern without a profile must use its own brightness");
 
+    /* HA voice explicitly opts into the saved theme colour, not just level.
+     * This must not change the fixed red wake indicator tested above. */
+    {
+        const char *names[] = {"listening", "thinking", "error"};
+        const int ids[] = {PROFILE_LISTENING, PROFILE_THINKING, PROFILE_ERROR};
+        char request[384];
+        unsigned i;
+        for (i = 0; i < 3; ++i) {
+            reset(&ctx, 25);
+            ctx.state.profiles[ids[i]] = (struct colour){255,249,71,37};
+            snprintf(request, sizeof request,
+                "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{"
+                "\"name\":\"%s\",\"r\":72,\"g\":185,\"b\":255,"
+                "\"brightness\":100,\"repeats\":%u,\"profile\":\"%s\","
+                "\"profile_colour\":true,\"owner\":\"esphome\"}}",
+                i == 2 ? "flash" : "pulse", i == 2 ? 3U : 0U, names[i]);
+            fire(&ctx, request);
+            require_condition(ctx.pattern_active &&
+                              ctx.pattern_colour.r == 255 &&
+                              ctx.pattern_colour.g == 249 &&
+                              ctx.pattern_colour.b == 71 &&
+                              ctx.pattern_colour.brightness == 37,
+                              "HA state indicator ignored saved theme RGB or level");
+            require_condition(ctx.state.current.brightness == 0,
+                              "themed transient indicator changed idle state");
+        }
+        reset(&ctx, 0);
+        ctx.state.profiles[PROFILE_LISTENING] = (struct colour){1,2,3,0};
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{"
+             "\"name\":\"pulse\",\"r\":72,\"g\":185,\"b\":255,"
+             "\"brightness\":100,\"repeats\":0,\"profile\":\"listening\","
+             "\"profile_colour\":true,\"owner\":\"esphome\"}}");
+        require_condition(ctx.pattern_colour.r == 1 &&
+                          ctx.pattern_colour.g == 2 &&
+                          ctx.pattern_colour.b == 3 &&
+                          ctx.pattern_colour.brightness == 0,
+                          "theme RGB or intentional zero level was replaced");
+        reset(&ctx, 25);
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{"
+             "\"name\":\"pulse\",\"r\":255,\"g\":0,\"b\":0,"
+             "\"brightness\":70,\"repeats\":0,\"profile\":\"listening\","
+             "\"profile_colour\":false,\"owner\":\"other\"}}");
+        require_condition(ctx.pattern_colour.r == 255 &&
+                          ctx.pattern_colour.g == 0 && ctx.pattern_colour.b == 0,
+                          "explicit false must preserve the caller's RGB");
+        reset(&ctx, 25);
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{"
+             "\"name\":\"pulse\",\"r\":1,\"g\":2,\"b\":3,"
+             "\"brightness\":70,\"repeats\":0,\"profile_colour\":true}}");
+        require_condition(!ctx.pattern_active,
+                          "theme colour without a valid profile must be rejected");
+        fire(&ctx, "{\"v\":1,\"id\":1,\"cmd\":\"pattern\",\"args\":{"
+             "\"name\":\"pulse\",\"r\":1,\"g\":2,\"b\":3,"
+             "\"brightness\":70,\"repeats\":0,\"profile\":\"listening\","
+             "\"profile_colour\":\"true\"}}");
+        require_condition(!ctx.pattern_active,
+                          "theme colour requires an actual boolean");
+    }
+
     return 0;
 }
