@@ -36,7 +36,7 @@ window.LeI18n.register('de', 'Deutsch', {
  'desc.Wake Word': 'Lokale Wakeword-Erkennung einrichten',
  'desc.Simulation': 'Testsätze über den Mikrofonpfad sprechen',
  'desc.LED & Buttons': 'Lichtring und Bedienelemente anpassen',
- 'desc.Network': 'WLAN, Name und Verbindung',
+ 'desc.Network': 'WLAN, IP-Adresse und Verbindung',
  'desc.Bluetooth': 'Geräte in der Nähe suchen, koppeln und verwalten',
  'desc.Privacy': 'Lokale Verarbeitung und Datenaufbewahrung',
  'desc.Integrations': 'Dienste und Smart-Home verbinden',
