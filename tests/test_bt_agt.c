@@ -229,11 +229,35 @@ static int test_header_etx(void)
     return 0;
 }
 
+/*
+ * A crafted inner length near 2^32 used to wrap `offset + field_length` in
+ * pb_read_bytes on a 32-bit target, so the bounds check passed and the caller
+ * received a pointer with a bogus length.  A single malformed frame from the
+ * gadget then read out of bounds (SIGSEGV on the device).
+ */
+static int test_length_wrap(void)
+{
+    /* outer Message{1: bytes, len 8}; inner Event{1: bytes, len 0xFFFFFFFA} */
+    static const uint8_t crafted[] = {
+        0x0A, 0x08,
+        0x0A, 0xFA, 0xFF, 0xFF, 0xFF, 0x0F,
+        0x0A, 0x1D
+    };
+    char ns[32];
+    char name[32];
+
+    ns[0] = 'X';
+    name[0] = 'X';
+    CHECK(le_agt_read_event_header(crafted, sizeof(crafted), ns, sizeof(ns),
+                                   name, sizeof(name)) == -1);
+    return 0;
+}
+
 int main(void)
 {
     if (test_payloads() || test_framing() || test_escaped_bytes() ||
         test_corruption() || test_event_header() || test_bounds() ||
-        test_header_etx())
+        test_header_etx() || test_length_wrap())
         return 1;
     printf("bt agt codec contract: ok\n");
     return 0;

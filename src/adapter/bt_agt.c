@@ -105,7 +105,14 @@ static int pb_read_bytes(struct pb_reader *r, const uint8_t **value,
 
     if (pb_read_varint(r, &field_length) != 0)
         return -1;
-    if (r->offset + field_length > r->length)
+    /*
+     * Compare against the remaining length rather than adding: on a 32-bit
+     * target `offset + field_length` wraps for a crafted length near 2^32,
+     * the check passes, and the caller gets a pointer with a bogus length.
+     * A single malformed frame from the gadget reached this: see the
+     * regression test in tests/test_bt_agt.c.
+     */
+    if (field_length > r->length || r->offset > r->length - field_length)
         return -1;
     *value = r->data + r->offset;
     *length = field_length;
