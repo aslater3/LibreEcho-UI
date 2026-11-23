@@ -1799,25 +1799,34 @@ static int spp_send_bootstrap(struct le_spp_session *session)
      */
     {
         char fresh[LE_GADGET_TIME_MAX];
-        int changed;
+        int never_sent;
 
+        /*
+         * The clock answers every timeinfo by driving its hands from 12:00 to
+         * the given time — a full twelve-hour sweep, minutes of movement.  So
+         * it must NOT be re-sent on every reconnect: the clock keeps its own
+         * time and only needs the half-hour correction from
+         * le_profile_spp_refresh_time().  This sends the initial value once,
+         * the first time a gadget connects after btd started.
+         */
         spp_local_time(fresh, sizeof(fresh));
-        changed = fresh[0] && strcmp(fresh, session->gadget->timeinfo) != 0;
+        never_sent = fresh[0] && !session->gadget->timeinfo_valid;
         if (fresh[0]) {
-            memcpy(session->gadget->timeinfo, fresh, sizeof(fresh));
+            memcpy(session->gadget->timeinfo, fresh,
+                   sizeof(session->gadget->timeinfo));
             session->gadget->timeinfo_valid = 1;
         }
         if (spp_send(session, message,
                      le_agt_build_discover(message, sizeof(message))) < 0)
             return -1;
-        if (!changed && session->gadget->timeinfo_valid)
-            le_log_info("btd-profiles: time unchanged, not re-sending timeinfo");
-        else if (session->gadget->timeinfo_valid &&
-                 spp_send(session, message,
-                          le_agt_build_state_update(message, sizeof(message),
-                                                    "timeinfo",
-                                                    session->gadget->timeinfo)) < 0)
+        if (!never_sent) {
+            le_log_info("btd-profiles: clock keeps its own time, not sweeping");
+        } else if (spp_send(session, message,
+                            le_agt_build_state_update(message, sizeof(message),
+                                                      "timeinfo",
+                                                      session->gadget->timeinfo)) < 0) {
             return -1;
+        }
     }
     if (spp_send(session, message,
                  le_agt_build_clear_indicator(message, sizeof(message))) < 0)
