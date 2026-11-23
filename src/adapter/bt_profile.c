@@ -2133,7 +2133,35 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
 
         /* `timers=active` is what makes the clock pulse; it is sent once per
          * ring, not repeated, because the pulse self-terminates. */
-        if (le_gadget_set_timers_active(gadget, ringing > 0)) {
+        /*
+         * The key names what is ringing.  A clock draws a timer's arc from
+         * SetAlert alone, but an ALARM or REMINDER only pulses when the
+         * matching StateUpdate arrives: PROTOCOL.md section 5 lists
+         * "Nothing at the scheduled time unless alarms/reminders = active is
+         * sent".  A reminder is spoken by timerd; the clock still pulses.
+         */
+        if (ringing > 0) {
+            char key[16];
+
+            if (strstr(timers_json, "\"kind\":\"reminder\""))
+                strcpy(key, "reminders");
+            else if (strstr(timers_json, "\"kind\":\"alarm\""))
+                strcpy(key, "alarms");
+            else
+                strcpy(key, "timers");
+            if (le_gadget_set_timers_active(gadget, 1)) {
+                for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+                    uint8_t message[LE_AGT_FRAME_MAX];
+
+                    if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+                        continue;
+                    (void)spp_send(&sessions->spp[i], message,
+                                   le_agt_build_state_update(
+                                       message, sizeof(message), key,
+                                       "active"));
+                }
+            }
+        } else if (le_gadget_set_timers_active(gadget, 0)) {
             for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
                 uint8_t message[LE_AGT_FRAME_MAX];
 
@@ -2142,7 +2170,7 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                 (void)spp_send(&sessions->spp[i], message,
                                le_agt_build_state_update(
                                    message, sizeof(message), "timers",
-                                   ringing > 0 ? "active" : "cleared"));
+                                   "cleared"));
             }
         }
     }
