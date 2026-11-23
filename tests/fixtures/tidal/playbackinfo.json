@@ -1,0 +1,15 @@
+{
+  "trackId": 1550546,
+  "assetPresentation": "FULL",
+  "audioMode": "STEREO",
+  "audioQuality": "LOSSLESS",
+  "manifestMimeType": "application/vnd.tidal.bts",
+  "manifestHash": "Zml4dHVyZS1tYW5pZmVzdC1oYXNoLW5vdC1yZWFsLTAwMDA=",
+  "manifest": "eyJtaW1lVHlwZSI6ImF1ZGlvL2ZsYWMiLCJjb2RlY3MiOiJmbGFjIiwiZW5jcnlwdGlvblR5cGUiOiJOT05FIiwidXJscyI6WyJodHRwczovL21lZGlhLmV4YW1wbGUuaW52YWxpZC90cmFjay5mbGFjP3Rva2VuPWZpeHR1cmUiXX0=",
+  "albumReplayGain": -6.83,
+  "albumPeakAmplitude": 1.0,
+  "trackReplayGain": -5.83,
+  "trackPeakAmplitude": 0.979767,
+  "bitDepth": 16,
+  "sampleRate": 44100
+}

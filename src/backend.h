@@ -172,6 +172,8 @@ struct le_radio_status {
     /* True only when radiod was built with the Opus decoder. The API gates an
        Opus launch on this; a status that omits it reads as false. */
     int opus;
+    /* Position in radiod's TIDAL queue, or -1 when it is not playing one. */
+    long queue_index;
     char url[512];
     char title[LE_MEDIA_TEXT+1], station[LE_MEDIA_TEXT+1];
 };

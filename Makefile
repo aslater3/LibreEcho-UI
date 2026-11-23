@@ -42,7 +42,7 @@ LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
 BUTTOND_SOURCES = src/adapter/buttond.c src/adapter/buttond_timing.c src/adapter/buttond_gesture.c src/adapter/adapter_client.c src/json.c src/log.c
 WATCHDOGD_SOURCES = src/adapter/watchdogd.c src/adapter/watchdog_policy.c src/service_env.c src/adapter/adapter_client.c src/json.c src/log.c
 CAPTURE_MUX_SOURCES = src/adapter/capture_mux.c src/adapter/mic_array_render.c
-RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_opus.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
+RADIOD_SOURCES = src/adapter/radiod.c src/adapter/radio_resample.c src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_opus.c src/adapter/radio_flac.c src/tidal.c src/adapter/adapter_server.c src/log.c src/json.c $(TLS_SOURCES)
 # Optional Ogg Opus decode. The default build keeps radio_opus.c as its honest
 # stub and links nothing extra; supplying RADIOD_OPUS_PREFIX -- the pinned
 # static prefix built by the Platform tool build_opus.sh -- defines
@@ -100,7 +100,7 @@ LIVED_SOURCES = src/adapter/lived.c src/adapter/live_session.c \
 LOGD_SOURCES = src/logd.c src/log.c
 TLS_SOURCES = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),src/tls.c,src/tls_stub.c)
 TLS_AVAILABLE = $(if $(and $(strip $(WEB_TLS_LIBS)),$(strip $(RADIOD_TLS_LIBS))),1,0)
-SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c src/peer_settings.c src/peer_announce.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
+SOURCES = src/main.c src/http_server.c src/inherited_fds.c $(TLS_SOURCES) src/api.c src/tidal.c src/sound_store.c src/news.c src/provision.c src/update_identity.c src/diagnostic_export.c src/boot_control.c src/feature_provenance.c src/authority_provenance.c src/factory_reset.c src/auth.c src/backend.c src/backend_mock.c src/backend_linux.c src/config_store.c src/event_bus.c src/json.c src/log.c src/service_env.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/adapter/wyoming_client.c src/adapter/voice_stream.c src/wake_model.c src/wake_model_store.c src/peers.c src/adapter/mdns_client.c src/adapter/mdns_lease.c src/peer_auth.c src/peer_link.c src/peer_group.c src/peer_settings.c src/peer_announce.c src/adapter/timer_schedule.c src/adapter/voice_clip_store.c
 OBJECTS = $(SOURCES:src/%.c=$(BUILD)/%.o)
 NETWORKD_OBJECTS = $(NETWORKD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMED_OBJECTS = $(TIMED_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -111,8 +111,8 @@ BUTTOND_OBJECTS = $(BUTTOND_SOURCES:src/%.c=$(BUILD)/%.o)
 WATCHDOGD_OBJECTS = $(WATCHDOGD_SOURCES:src/%.c=$(BUILD)/%.o)
 TIMERD_OBJECTS = $(TIMERD_SOURCES:src/%.c=$(BUILD)/%.o)
 CAPTURE_MUX_OBJECTS = $(CAPTURE_MUX_SOURCES:src/%.c=$(BUILD)/%.o)
-RADIOD_CODEC_SOURCES = src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_resample.c
-RADIOD_OBJECTS = $(RADIOD_SOURCES:src/%.c=$(BUILD)/%.o) $(HELIX_AAC_OBJECTS)
+RADIOD_CODEC_SOURCES = src/adapter/radio_aac.c src/adapter/radio_ts.c src/adapter/radio_hls.c src/adapter/radio_resample.c src/adapter/radio_flac.c src/tidal.c
+RADIOD_OBJECTS = $(RADIOD_SOURCES:src/%.c=$(BUILD)/%.o) $(RADIOD_VENDOR_OBJECTS)
 # Vendored Helix fixed-point AAC decoder (third-party/helix-aac). Upstream code
 # is built as shipped with its warnings off; LibreEcho's own wrapper
 # (src/adapter/radio_aac.c) keeps the strict flags and sees the decoder headers
@@ -120,6 +120,13 @@ RADIOD_OBJECTS = $(RADIOD_SOURCES:src/%.c=$(BUILD)/%.o) $(HELIX_AAC_OBJECTS)
 HELIX_AAC_CPPFLAGS = -DARDUINO -Ithird-party/helix-aac/shim -Ithird-party/helix-aac
 HELIX_AAC_SOURCES = $(filter-out %/shim,$(wildcard third-party/helix-aac/*.c))
 HELIX_AAC_OBJECTS = $(HELIX_AAC_SOURCES:third-party/helix-aac/%.c=$(BUILD)/helix-aac/%.o)
+# Vendored dr_flac (third-party/dr_flac) for TIDAL's LOSSLESS FLAC streams; one
+# implementation unit built warnings-off like Helix. radio_flac.c, the strict
+# wrapper, sees the header through DR_FLAC_CPPFLAGS.
+DR_FLAC_CPPFLAGS = -Ithird-party/dr_flac
+DR_FLAC_OBJECTS = $(BUILD)/dr_flac/dr_flac.o
+RADIOD_VENDOR_OBJECTS = $(HELIX_AAC_OBJECTS) $(DR_FLAC_OBJECTS)
+RADIOD_VENDOR_CPPFLAGS = $(HELIX_AAC_CPPFLAGS) $(DR_FLAC_CPPFLAGS)
 BTD_OBJECTS = $(BTD_SOURCES:src/%.c=$(BUILD)/%.o)
 AIRPLAYD_OBJECTS = $(AIRPLAYD_SOURCES:src/%.c=$(BUILD)/%.o)
 TTSD_OBJECTS = $(TTSD_SOURCES:src/%.c=$(BUILD)/%.o)
@@ -408,10 +415,10 @@ test-ha-esphome:
 	ESPHOME_HA_PYTHON="$(ESPHOME_HA_PYTHON)" ESPHOME_TLS_PREFIX="$(ESPHOMED_TEST_TLS_PREFIX)" python3 tests/test_ha_esphome_integration.py
 
 $(BUILD)/test-esphome-radio-controls: tests/test_esphome_radio_controls.c src/adapter/radiod.c \
-		$(RADIOD_CODEC_SOURCES) src/adapter/adapter_server.c src/json.c src/log.c $(TLS_SOURCES) $(HELIX_AAC_OBJECTS)
+		$(RADIOD_CODEC_SOURCES) src/adapter/adapter_server.c src/json.c src/log.c $(TLS_SOURCES) $(RADIOD_VENDOR_OBJECTS)
 	@mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(CSTD) $(WARN) -Werror \
-		-ffunction-sections -fdata-sections $(GC_LDFLAGS) -Isrc -Isrc/adapter $(HELIX_AAC_CPPFLAGS) \
+		-ffunction-sections -fdata-sections $(GC_LDFLAGS) -Isrc -Isrc/adapter $(RADIOD_VENDOR_CPPFLAGS) \
 		$(filter-out src/adapter/radiod.c,$^) $(RADIOD_TLS_LIBS) -lm -o $@
 
 $(BUILD)/test-esphome-remote-timer: tests/test_esphome_remote_timer.c src/adapter/timerd.c \
@@ -815,17 +822,28 @@ $(BUILD)/test-diagnostic-export: tests/test_diagnostic_export.c src/json.c src/f
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections -Isrc $^ -o $@
 
-$(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS)
+# TIDAL client against the fake curl (tests/fake_tidal_curl.py), and radiod's
+# FLAC decode against a fixture checked bit-exact with ffmpeg.
+$(BUILD)/test-tidal: tests/test_tidal.c src/tidal.c src/tidal.h src/json.c
 	@mkdir -p $(BUILD)
-	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
-		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $(HELIX_AAC_CPPFLAGS) $< src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS) -lm -o $@
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc $< src/tidal.c src/json.c -o $@
 
-$(BUILD)/test-radiod-mp3-frames: tests/test_radiod_mp3_frames.c tests/radiod_mp3_fixture.h src/adapter/radiod.c src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS)
+$(BUILD)/test-radio-flac: tests/test_radio_flac.c src/adapter/radio_flac.c src/adapter/radio_flac.h $(DR_FLAC_OBJECTS)
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc/adapter $(DR_FLAC_CPPFLAGS) \
+		$< src/adapter/radio_flac.c $(DR_FLAC_OBJECTS) -o $@
+
+$(BUILD)/test-radiod-json: tests/test_radiod_json.c src/adapter/radiod.c src/json.c $(RADIOD_CODEC_SOURCES) $(RADIOD_VENDOR_OBJECTS)
 	@mkdir -p $(BUILD)
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
 		-ffunction-sections -fdata-sections -Wl,--gc-sections \
-		-Isrc -Isrc/adapter $(HELIX_AAC_CPPFLAGS) $< src/json.c $(RADIOD_CODEC_SOURCES) $(HELIX_AAC_OBJECTS) -lm -o $@
+		-Isrc -Isrc/adapter $(RADIOD_VENDOR_CPPFLAGS) $< src/json.c $(RADIOD_CODEC_SOURCES) $(RADIOD_VENDOR_OBJECTS) -lm -o $@
+
+$(BUILD)/test-radiod-mp3-frames: tests/test_radiod_mp3_frames.c tests/radiod_mp3_fixture.h src/adapter/radiod.c src/json.c $(RADIOD_CODEC_SOURCES) $(RADIOD_VENDOR_OBJECTS)
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror \
+		-ffunction-sections -fdata-sections -Wl,--gc-sections \
+		-Isrc -Isrc/adapter $(RADIOD_VENDOR_CPPFLAGS) $< src/json.c $(RADIOD_CODEC_SOURCES) $(RADIOD_VENDOR_OBJECTS) -lm -o $@
 
 $(BUILD)/test-factory-reset: tests/test_factory_reset.c src/factory_reset.c
 	@mkdir -p $(BUILD)
@@ -1419,6 +1437,12 @@ $(BUILD)/helix-aac/%.o: third-party/helix-aac/%.c
 
 $(BUILD)/adapter/radio_aac.o: CPPFLAGS += $(HELIX_AAC_CPPFLAGS)
 
+$(BUILD)/dr_flac/dr_flac.o: third-party/dr_flac/dr_flac.c third-party/dr_flac/dr_flac.h
+	@mkdir -p $(BUILD)/dr_flac
+	$(CROSS_COMPILE)$(CC) $(CSTD) $(CFLAGS) -w -MMD -MP -c $< -o $@
+
+$(BUILD)/adapter/radio_flac.o: CPPFLAGS += $(DR_FLAC_CPPFLAGS)
+
 # Opus flag stamp. radiod.c and radio_opus.c must always be compiled with the
 # same LE_RADIOD_ENABLE_OPUS state, and switching RADIOD_OPUS_PREFIX on or off
 # must rebuild both objects rather than reusing one built for the other state
@@ -1506,6 +1530,7 @@ clean:
 		$(BUILD)/test-thermal-zone-selection \
 		$(BUILD)/test-light-sensor \
 		$(BUILD)/test-auth-transport $(BUILD)/test-radiod-json \
+		$(BUILD)/test-tidal $(BUILD)/test-radio-flac $(DR_FLAC_OBJECTS) \
 		$(BUILD)/test-radiod-mp3-frames \
 		$(BUILD)/test-http-worker-registry $(BUILD)/test-http-client-state \
 		$(BUILD)/test-wake-decode \

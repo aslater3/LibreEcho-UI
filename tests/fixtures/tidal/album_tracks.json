@@ -1,0 +1,380 @@
+{
+  "limit": 100,
+  "offset": 0,
+  "totalNumberOfItems": 13,
+  "items": [
+    {
+      "id": 20115557,
+      "title": "Give Life Back to Music",
+      "version": null,
+      "duration": 275,
+      "trackNumber": 1,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115558,
+      "title": "The Game of Love",
+      "version": null,
+      "duration": 322,
+      "trackNumber": 2,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115559,
+      "title": "Giorgio by Moroder",
+      "version": null,
+      "duration": 545,
+      "trackNumber": 3,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115560,
+      "title": "Within",
+      "version": null,
+      "duration": 229,
+      "trackNumber": 4,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115561,
+      "title": "Instant Crush",
+      "version": "feat. Julian Casablancas",
+      "duration": 338,
+      "trackNumber": 5,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        },
+        {
+          "id": 3636357,
+          "name": "Julian Casablancas",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115562,
+      "title": "Lose Yourself to Dance",
+      "version": "feat. Pharrell Williams",
+      "duration": 354,
+      "trackNumber": 6,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        },
+        {
+          "id": 4900204,
+          "name": "Pharrell Williams",
+          "type": "FEATURED"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115563,
+      "title": "Touch",
+      "version": "feat. Paul Williams",
+      "duration": 499,
+      "trackNumber": 7,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        },
+        {
+          "id": 34544,
+          "name": "Paul Williams",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115564,
+      "title": "Get Lucky",
+      "version": "feat. Pharrell Williams and Nile Rodgers",
+      "duration": 370,
+      "trackNumber": 8,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        },
+        {
+          "id": 4900204,
+          "name": "Pharrell Williams",
+          "type": "MAIN"
+        },
+        {
+          "id": 30528,
+          "name": "Nile Rodgers",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115565,
+      "title": "Beyond",
+      "version": null,
+      "duration": 290,
+      "trackNumber": 9,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115566,
+      "title": "Motherboard",
+      "version": null,
+      "duration": 342,
+      "trackNumber": 10,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115567,
+      "title": "Fragments of Time",
+      "version": "feat. Todd Edwards",
+      "duration": 280,
+      "trackNumber": 11,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        },
+        {
+          "id": 3566370,
+          "name": "Todd Edwards",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115568,
+      "title": "Doin' it Right",
+      "version": "feat. Panda Bear",
+      "duration": 251,
+      "trackNumber": 12,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        },
+        {
+          "id": 3609536,
+          "name": "Panda Bear",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    },
+    {
+      "id": 20115569,
+      "title": "Contact",
+      "version": null,
+      "duration": 384,
+      "trackNumber": 13,
+      "streamReady": true,
+      "audioQuality": "LOSSLESS",
+      "artists": [
+        {
+          "id": 8847,
+          "name": "Daft Punk",
+          "type": "MAIN"
+        }
+      ],
+      "album": {
+        "id": 20115556,
+        "title": "Random Access Memories",
+        "cover": "b66a5c40-c34d-4507-a0dc-5f98e46fdd20"
+      },
+      "mediaMetadata": {
+        "tags": [
+          "LOSSLESS"
+        ]
+      }
+    }
+  ]
+}

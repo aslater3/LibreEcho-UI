@@ -288,6 +288,15 @@ make build/test-radiod-json
 ./build/test-radiod-json
 make build/test-radiod-mp3-frames
 ./build/test-radiod-mp3-frames
+# TIDAL: client (device-code sign-in, search, stream lookup) against a fake
+# curl, FLAC decode, radiod playing a queue, and the web routes end to end.
+make build/test-tidal build/test-radio-flac build/libreecho-web
+tidal_scratch=$(mktemp -d)
+./build/test-tidal "$PWD" "$tidal_scratch"
+rm -rf "$tidal_scratch"
+./build/test-radio-flac tests/fixtures/radio/flac-tone.flac
+python3 tests/test_radiod_tidal.py build/libreecho-radiod
+python3 tests/test_tidal_api.py
 # 0.14 feature batch: LED output/music core, sleep/nursery audio, private voice
 # history, recovery AP lifecycle, and the optional pinned Opus decoder. The
 # Opus arm needs a complete static prefix; tests/test_feature_batch_build.sh

@@ -1935,6 +1935,79 @@ async function radioPanel(host){
  host.insertAdjacentHTML('beforeend',collapsiblePanel('Internet radio',radioPanelBody(r),'radio-stations wide'));
  bindRadio(r);}
 /*
+ * TIDAL, played by this speaker itself (radiod streams LOSSLESS FLAC). Sign-in
+ * is TIDAL's device-code flow: the owner opens link.tidal.com, logs in there
+ * and approves the code shown here, and this card polls until it is done. The
+ * device keeps the tokens; nothing here ever sees them.
+ */
+function tidalItemLine(it){
+ const who=it.artist?' \u2014 '+esc(it.artist):'';
+ const extra=it.kind==='track'&&it.duration?' ('+Math.floor(it.duration/60)+':'+String(it.duration%60).padStart(2,'0')+')':
+  it.tracks?' ('+it.tracks+' tracks)':'';
+ return `<li class="tidal-item"><span><strong>${esc(it.title)}</strong>${who}${esc(extra)}</span>`+
+  `<button class="secondary-btn tidal-play" data-kind="${esc(it.kind)}" data-id="${esc(it.id)}">Play</button></li>`;}
+function tidalResultsHtml(res){
+ const group=(label,items)=>items&&items.length?`<h4>${label}</h4><ul class="tidal-results">${items.map(tidalItemLine).join('')}</ul>`:'';
+ const html=group('Tracks',res.tracks)+group('Albums',res.albums)+group('Playlists',res.playlists);
+ return html||'<p class="muted">Nothing found.</p>';}
+function tidalBodyHtml(t){
+ if(t.unsupported)return `<p class="muted">${esc(t.unsupported)}</p>`;
+ if(!t.available)return '<p class="muted">This image has no HTTPS client, so TIDAL cannot be used.</p>';
+ if(t.login)return `<p>Open <a href="${esc(t.login.link)}" target="_blank" rel="noopener noreferrer">${esc(t.login.link)}</a>, log in to TIDAL and approve this speaker. The code is <strong class="tidal-code">${esc(t.login.user_code)}</strong>.</p>`+
+  '<p class="muted tidal-wait">Waiting for approval\u2026</p><div class="actions"><button class="secondary-btn tidal-cancel">Cancel</button></div>';
+ if(!t.signed_in)return '<p>Play TIDAL on this speaker directly, in CD quality (16-bit FLAC). Needs a TIDAL subscription.</p>'+
+  '<div class="actions"><button class="primary-btn tidal-login">Sign in to TIDAL</button></div>';
+ return `<p>Signed in${t.username?' as <strong>'+esc(t.username)+'</strong>':''}. Plays in CD quality (16-bit FLAC).</p>`+
+  '<form class="tidal-search-form"><input class="tidal-query" type="search" maxlength="150" placeholder="Search TIDAL" aria-label="Search TIDAL"><button class="primary-btn" type="submit">Search</button></form>'+
+  '<div class="actions"><button class="secondary-btn tidal-previous">Previous</button><button class="secondary-btn tidal-next">Next</button><button class="secondary-btn tidal-stop">Stop</button><button class="secondary-btn tidal-logout">Sign out</button></div>'+
+  '<div class="tidal-found"></div>';}
+async function tidalRender(host){
+ const t=await api('/tidal').catch(e=>({unsupported:e.message}));
+ const body=$('.integration-section-body',host);
+ if(!body||!host.isConnected)return;
+ body.innerHTML=tidalBodyHtml(t);
+ clearTimeout(host.tidalPoll);
+ if(t.login)host.tidalPoll=setTimeout(()=>tidalPollOnce(host),Math.max(2,t.login.interval||5)*1000);}
+async function tidalPollOnce(host){
+ if(!host.isConnected)return;
+ try{const t=await api('/tidal/login/poll',{method:'POST',body:'{}'});
+  if(t.signed_in)toast('Signed in to TIDAL');
+  await tidalRender(host);}
+ catch(e){toast(e.message,true);await tidalRender(host)}}
+function bindTidal(host){
+ host.addEventListener('submit',async e=>{
+  if(!e.target.closest('.tidal-search-form'))return;
+  e.preventDefault();
+  const q=$('.tidal-query',host).value.trim(),out=$('.tidal-found',host);
+  if(!q||state.busy)return;
+  setBusy(true);
+  try{out.innerHTML=tidalResultsHtml(await api('/tidal/search',{method:'POST',body:JSON.stringify({query:q})}))}
+  catch(err){toast(err.message,true)}
+  finally{setBusy(false)}});
+ host.addEventListener('click',async e=>{
+  const b=e.target.closest('button');
+  if(!b||state.busy)return;
+  let path=null,body='{}',done=null;
+  if(b.classList.contains('tidal-login')){path='/tidal/login'}
+  else if(b.classList.contains('tidal-logout')||b.classList.contains('tidal-cancel')){path='/tidal/logout';done=b.classList.contains('tidal-logout')?'Signed out of TIDAL':null}
+  else if(b.classList.contains('tidal-play')){path='/tidal/play';body=JSON.stringify({kind:b.dataset.kind,id:b.dataset.id});done='Playing on this speaker'}
+  else if(b.classList.contains('tidal-next')){path='/tidal/next'}
+  else if(b.classList.contains('tidal-previous')){path='/tidal/previous'}
+  else if(b.classList.contains('tidal-stop')){path='/integrations/radio/stop'}
+  if(!path)return;
+  e.preventDefault();
+  setBusy(true);
+  try{await api(path,{method:'POST',body});if(done)toast(done);
+   if(/login|logout/.test(path))await tidalRender(host);}
+  catch(err){toast(err.message,true)}
+  finally{setBusy(false)}});}
+async function tidalPanel(host){
+ if($('.tidal-panel',host))return;
+ host.insertAdjacentHTML('beforeend',collapsiblePanel('TIDAL','<p class="muted">Loading\u2026</p>','tidal-panel wide'));
+ const panel=$('.tidal-panel',host);
+ bindTidal(panel);
+ await tidalRender(panel);}
+/*
  * integrations-ui.js renders the live Integrations page and never draws the
  * home-location card, so on the shipped UI there is nowhere to set a home
  * address at all. Add it here, high on the page, when the renderer that ran
@@ -1960,7 +2033,8 @@ async function integrationsExtras(){
  if(!host)return;
  if(grid){if(grid.dataset.extras)return;grid.dataset.extras='1'}
  await homeLocationPanel(host);
- await radioPanel(host);}
+ await radioPanel(host);
+ await tidalPanel(host);}
 /*
  * The Integrations page is rendered by integrations-ui.js, which loads after
  * this file and defines integrationsPage. Its own handlers
@@ -1982,8 +2056,8 @@ function installIntegrationsExtras(){
  *
  * Tidal is named here deliberately. It has no open Connect protocol -- it is
  * licensed to partner hardware and there is no public SDK -- so there is no
- * honest toggle to offer. Saying that plainly, next to the two transports that
- * do work for it, is more useful than a switch that could never function.
+ * Connect toggle to offer. The TIDAL card plays it on the speaker itself; the
+ * two casting transports below remain the way to play from the TIDAL app.
  */
 function integrationBlurb(x){
  if(x.id==='rest')return 'Versioned local device API.';

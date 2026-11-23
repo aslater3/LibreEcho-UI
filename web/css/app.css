@@ -223,3 +223,8 @@ body.light{--bg:#edf3f6;--bg2:#f7fafc;--panel:#fff;--panel2:#f4f8fa;--line:#c8d5
 .news-item a{color:var(--text);font-weight:700}
 /* Owner equaliser card (Audio page). */
 .eq-bands{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:4px 18px;margin:6px 0}.eq-band>span{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px}.eq-band output{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--text)}.eq-band input{padding:0;accent-color:#50d477}
+/* TIDAL card */
+.tidal-search-form{display:flex;gap:8px;margin:8px 0}.tidal-search-form input{flex:1;min-width:0;background:#0b1925;color:#f3f6f8;border:1px solid #2c4355;border-radius:9px;padding:9px 10px;font:inherit}
+.light .tidal-search-form input{background:#f8fbfc;color:#172a38;border-color:#b9cbd4}
+.tidal-results{list-style:none;margin:4px 0 12px;padding:0}.tidal-item{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:6px 0;border-bottom:1px solid rgba(127,127,127,.2)}
+.tidal-code{font-family:monospace;font-size:1.2em;letter-spacing:.1em}
