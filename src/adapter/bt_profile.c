@@ -1788,38 +1788,61 @@ static void spp_local_time(char *out, size_t size)
 /* Last timeinfo handed to a gadget, so a restart does not force a sweep. */
 #define LE_TIMEINFO_STATE "/data/libreecho/config/gadget.timeinfo"
 
+/* Last timeinfo handed to a gadget: "epoch ISO8601", so a restart is free
+ * and the half-hour rule survives one too. */
+#define LE_TIMEINFO_STATE "/data/libreecho/config/gadget.timeinfo"
+#define LE_TIMEINFO_MAX_AGE_SECONDS (30 * 60)
+
+static time_t last_timeinfo_epoch;
+
 static int read_timeinfo_state(char *out, size_t size)
 {
     FILE *file = fopen(LE_TIMEINFO_STATE, "r");
-    size_t used;
+    char line[96];
+    long long epoch = 0;
+    const char *iso;
 
-    if (!file) {
-        out[0] = '\0';
+    out[0] = '\0';
+    last_timeinfo_epoch = 0;
+    if (!file)
         return -1;
-    }
-    if (!fgets(out, (int)size, file)) {
+    if (!fgets(line, sizeof(line), file)) {
         fclose(file);
-        out[0] = '\0';
         return -1;
     }
     fclose(file);
-    used = strlen(out);
-    while (used && (out[used - 1] == '\n' || out[used - 1] == '\r'))
-        out[--used] = '\0';
+    {
+        size_t used = strlen(line);
+
+        while (used && (line[used - 1] == '\n' || line[used - 1] == '\r'))
+            line[--used] = '\0';
+    }
+    iso = strchr(line, ' ');
+    if (!iso) {
+        /* Older file held only the ISO value; treat it as stale. */
+        snprintf(out, size, "%s", line);
+        return out[0] ? 0 : -1;
+    }
+    epoch = strtoll(line, NULL, 10);
+    last_timeinfo_epoch = (time_t)epoch;
+    snprintf(out, size, "%s", iso + 1);
     return out[0] ? 0 : -1;
 }
 
-static int write_timeinfo_state(const char *value)
+static int write_timeinfo_state(const char *value, time_t when)
 {
     FILE *file = fopen(LE_TIMEINFO_STATE, "w");
 
     if (!file)
         return -1;
-    if (fprintf(file, "%s\n", value) < 0) {
+    if (fprintf(file, "%lld %s\n", (long long)when, value) < 0) {
         fclose(file);
         return -1;
     }
-    return fclose(file) == 0 ? 0 : -1;
+    if (fclose(file) != 0)
+        return -1;
+    last_timeinfo_epoch = when;
+    return 0;
 }
 
 static int spp_send_bootstrap(struct le_spp_session *session)
@@ -1841,7 +1864,14 @@ static int spp_send_bootstrap(struct le_spp_session *session)
     spp_local_time(fresh, sizeof(fresh));
     last[0] = '\0';
     (void)read_timeinfo_state(last, sizeof(last));
-    changed = fresh[0] && strncmp(fresh, last, 16) != 0;
+    /*
+     * The clock keeps its own time, so a reconnect is not a reason to sweep.
+     * A real Echo sends timeinfo every 30 minutes; older than that (or a
+     * clock that was never told) is worth the 204 s of movement.
+     */
+    changed = fresh[0] &&
+              (!last[0] || last_timeinfo_epoch == 0 ||
+               time(NULL) - last_timeinfo_epoch >= LE_TIMEINFO_MAX_AGE_SECONDS);
 
     if (fresh[0]) {
         memcpy(session->gadget->timeinfo, fresh,
@@ -1867,7 +1897,7 @@ static int spp_send_bootstrap(struct le_spp_session *session)
                                                   session->gadget->timeinfo)) < 0) {
         return -1;
     } else {
-        (void)write_timeinfo_state(session->gadget->timeinfo);
+        (void)write_timeinfo_state(session->gadget->timeinfo, time(NULL));
         le_log_info("btd-profiles: timeinfo %s sent, clock sweeps 204 s",
                     session->gadget->timeinfo);
     }
@@ -2214,6 +2244,7 @@ void le_profile_spp_refresh_time(struct le_profiles *p, time_t now)
         last_sent = now;
         memcpy(p->gadget->timeinfo, iso, sizeof(p->gadget->timeinfo));
         p->gadget->timeinfo[sizeof(p->gadget->timeinfo) - 1] = '\0';
+        (void)write_timeinfo_state(p->gadget->timeinfo, now);
     }
     for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
         uint8_t message[LE_AGT_FRAME_MAX];
