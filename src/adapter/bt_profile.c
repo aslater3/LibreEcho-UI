@@ -505,7 +505,8 @@ static void build_record_set(struct le_profile_sessions *sessions,
     record->searchable_uuid16[0] = 0x110b;
     record->searchable_uuid16[1] = 0x0100;
     record->searchable_uuid16[2] = 0x0019;
-    record->searchable_uuid16_count = 3;
+    record->searchable_uuid16[3] = 0x110d;
+    record->searchable_uuid16_count = 4;
     record->public_browse = 1;
     {
         size_t offset = 0;
@@ -519,16 +520,17 @@ static void build_record_set(struct le_profile_sessions *sessions,
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
                               LE_SDP_ATTR_RECORD_STATE);
         offset = sdp_put_uint32(record->data, sizeof(record->data), offset, 1);
+        /* SDP response attributes must be in ascending attribute-ID order. */
+        offset = sdp_put_protocol_list(record->data, sizeof(record->data),
+                                       offset, 0x0019, 0x0103); /* AVDTP 1.3 */
+        offset = sdp_put_browse_list(record->data, sizeof(record->data),
+                                     offset);
+        offset = sdp_put_profile_list(record->data, sizeof(record->data),
+                                      offset, 0x110d, 0x0103); /* A2DP 1.3 */
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
                               LE_SDP_ATTR_SERVICE_NAME);
         offset = sdp_put_text(record->data, sizeof(record->data), offset,
                               service_name[0] ? service_name : "LibreEcho");
-        offset = sdp_put_browse_list(record->data, sizeof(record->data),
-                                     offset);
-        offset = sdp_put_protocol_list(record->data, sizeof(record->data),
-                                       offset, 0x0019, 0x0103); /* AVDTP 1.3 */
-        offset = sdp_put_profile_list(record->data, sizeof(record->data),
-                                      offset, 0x110b, 0x0103); /* A2DP SINK */
         offset = sdp_put_attr(record->data, sizeof(record->data), offset,
                               LE_SDP_ATTR_FEATURES);
         offset = sdp_put_uint16(record->data, sizeof(record->data), offset,

@@ -66,6 +66,94 @@ static int contains_bytes(const uint8_t *haystack, size_t haystack_length,
     return 0;
 }
 
+/* Decode only within the caller's bounded SDP buffer. */
+static size_t element_length(const uint8_t *p, size_t size,
+                             size_t *header, size_t *payload)
+{
+    unsigned index;
+    if (!size) return 0;
+    index = p[0] & 7;
+    *header = 1;
+    if (index <= 4) {
+        *payload = (size_t)1 << index;
+    } else if (index == 5 && size >= 2) {
+        *header = 2;
+        *payload = p[1];
+    } else if (index == 6 && size >= 3) {
+        *header = 3;
+        *payload = be16(p + 1);
+    } else {
+        return 0;
+    }
+    if (*header > size || *payload > size - *header) return 0;
+    return *header + *payload;
+}
+
+static void check_a2dp_record(const uint8_t *p, size_t size)
+{
+    static const uint8_t service_class[] = {0x35,0x03,0x19,0x11,0x0b};
+    static const uint8_t profile[] = {
+        0x35,0x08,0x35,0x06,0x19,0x11,0x0d,0x09,0x01,0x03
+    };
+    static const uint8_t protocols[] = {
+        0x35,0x10,0x35,0x06,0x19,0x01,0x00,0x09,0x00,0x19,
+        0x35,0x06,0x19,0x00,0x19,0x09,0x01,0x03
+    };
+    size_t header, payload, total, offset, end;
+    int previous = -1, ordered = 1, have_class = 0, have_profile = 0;
+    int have_protocols = 0, valid = 1;
+    total = element_length(p, size, &header, &payload);
+    check(total == size && total && (p[0] >> 3) == 6,
+          "A2DP record is one bounded data-element sequence");
+    if (!total || total != size || (p[0] >> 3) != 6) return;
+    offset = header;
+    end = total;
+    while (offset < end) {
+        uint16_t id;
+        size_t value_size, value_header, value_payload;
+        if (end - offset < 3 || p[offset] != 0x09) {valid = 0; break;}
+        id = be16(p + offset + 1);
+        if ((int)id <= previous) ordered = 0;
+        previous = id;
+        offset += 3;
+        value_size = element_length(p + offset, end - offset,
+                                    &value_header, &value_payload);
+        if (!value_size) {valid = 0; break;}
+        if (id == 0x0001)
+            have_class = value_size == sizeof(service_class) &&
+                !memcmp(p + offset, service_class, sizeof(service_class));
+        if (id == 0x0004)
+            have_protocols = value_size == sizeof(protocols) &&
+                !memcmp(p + offset, protocols, sizeof(protocols));
+        if (id == 0x0009)
+            have_profile = value_size == sizeof(profile) &&
+                !memcmp(p + offset, profile, sizeof(profile));
+        offset += value_size;
+    }
+    check(valid && offset == end, "A2DP attribute/value pairs are bounded");
+    check(ordered, "A2DP response attribute IDs are strictly increasing");
+    check(have_class, "A2DP service class remains AudioSink 0x110b");
+    check(have_profile, "A2DP profile is AdvancedAudioDistribution 0x110d v1.3");
+    check(have_protocols, "A2DP transport remains L2CAP/AVDTP v1.3 on PSM 0x0019");
+}
+
+static void check_a2dp_search_response(const uint8_t *response, ssize_t n)
+{
+    size_t header, payload, total, child_header, child_payload, child;
+    check(n >= 10 && response[0] == SDP_PDU_SERVICE_SEARCH_ATTR_RSP,
+          "A2DP search returns a service-search-attribute response");
+    if (n < 10 || response[0] != SDP_PDU_SERVICE_SEARCH_ATTR_RSP) return;
+    total = element_length(response + 7, (size_t)n - 8, &header, &payload);
+    check(total == (size_t)n - 8 && total && (response[7] >> 3) == 6,
+          "A2DP search outer list is bounded");
+    if (!total || total != (size_t)n - 8 || (response[7] >> 3) != 6) return;
+    child = element_length(response + 7 + header, payload,
+                           &child_header, &child_payload);
+    check(child && child == payload, "A2DP search matches exactly one service");
+    if (child && child == payload)
+        check_a2dp_record(response + 7 + header, child);
+}
+
 /* Build a ServiceSearchAttribute request: PDU 0x06, ServiceSearchPattern is
  * a DES of one UUID16 (class id), MaximumAttributeByteCount, AttributeIDList
  * wildcard, null continuation. */
@@ -82,9 +170,9 @@ static size_t build_search_attr(uint8_t *out, uint16_t tid, uint16_t uuid)
     out[offset++] = 0x19; /* UUID16 */
     out[offset++] = (uint8_t)(uuid >> 8);
     out[offset++] = (uint8_t)uuid;
-    /* MaximumServiceRecordCount */
-    out[offset++] = 0x00;
-    out[offset++] = 0x0c;
+    /* MaximumAttributeByteCount: request the complete bounded record. */
+    out[offset++] = 0xff;
+    out[offset++] = 0xff;
     /* AttributeIDList: DES{ uint32 0x0000ffff } */
     out[offset++] = 0x35;
     out[offset++] = 0x05;
@@ -155,6 +243,43 @@ int main(void)
     if (le_profile_test_init(&profiles, "LibreEcho") != 0) {
         printf("FAIL: test init\n");
         return 1;
+    }
+
+    /* Class and profile UUIDs are different; both must find the same sink. */
+    {
+        size_t len = build_search_attr(request, 0x0201, 0x110b);
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check_a2dp_search_response(response, n);
+        len = build_search_attr(request, 0x0202, 0x110d);
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check_a2dp_search_response(response, n);
+        len = build_search_attr(request, 0x0203, 0x110b);
+        memmove(request + 13, request + 10, len - 10);
+        request[6] = 6;
+        request[10] = 0x19;
+        request[11] = 0x11;
+        request[12] = 0x0d;
+        len += 3;
+        request[3] = (uint8_t)((len - 5) >> 8);
+        request[4] = (uint8_t)(len - 5);
+        n = le_profile_test_sdp_exchange(&profiles, request, len, response,
+                                         sizeof(response));
+        check_a2dp_search_response(response, n);
+    }
+    /* Direct ServiceAttribute must emit the same standards-compliant record. */
+    {
+        static const uint8_t direct[] = {
+            0x04,0x02,0x04,0x00,0x0e,0x00,0x01,0x00,0x01,
+            0xff,0xff,0x35,0x05,0x0a,0x00,0x00,0xff,0xff,0x00
+        };
+        n = le_profile_test_sdp_exchange(&profiles, direct, sizeof(direct),
+                                         response, sizeof(response));
+        check(n > 8 && response[0] == SDP_PDU_SERVICE_ATTR_RSP,
+              "A2DP direct attributes return a success response");
+        if (n > 8 && response[0] == SDP_PDU_SERVICE_ATTR_RSP)
+            check_a2dp_record(response + 7, (size_t)n - 8);
     }
 
     /* --- 1. ServiceSearchAttribute for Audio Sink (0x110b) --- */
