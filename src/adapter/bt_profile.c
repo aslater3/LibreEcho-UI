@@ -12,6 +12,8 @@
 
 #include "adapter.h"
 #include "bt_profile.h"
+#include "bt_agt.h"
+#include "bt_gadget.h"
 #include "bt-sbc/sbc.h"
 #include "log.h"
 #include "radio_resample.h"
@@ -23,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -122,6 +125,10 @@
 #define LE_SDP_RECORD_A2DP_SINK 0x00010001u
 #define LE_SDP_RECORD_AVRCP 0x00010002u
 #define LE_SDP_RECORD_PNP 0x00010004u
+#define LE_SDP_RECORD_SPP 0x00010005u
+
+/* RFCOMM channel the Alexa Gadget transport uses (Amazon AGT: channel 4). */
+#define LE_SPP_RFCOMM_CHANNEL 4
 
 #define LE_SDP_ATTR_HANDLE 0x0000
 #define LE_SDP_ATTR_CLASS_ID_LIST 0x0001
@@ -157,6 +164,15 @@ struct sockaddr_l2_local {
     uint8_t l2_bdaddr_type;
 };
 
+/* RFCOMM (BTPROTO_RFCOMM = 3): the kernel serves the protocol. */
+#define LE_BTPROTO_RFCOMM 3
+
+struct sockaddr_rc_local {
+    sa_family_t rc_family;
+    uint8_t rc_bdaddr[6];
+    uint8_t rc_channel;
+};
+
 struct l2cap_options_local {
     uint16_t omtu;
     uint16_t imtu;
@@ -170,6 +186,7 @@ struct l2cap_options_local {
 #define LE_MAX_SDP_SESSIONS 2
 #define LE_MAX_AVDTP_SESSIONS 2
 #define LE_MAX_AVRCP_SESSIONS 2
+#define LE_MAX_SPP_SESSIONS 2
 
 struct le_sdp_record {
     int in_use;
@@ -210,10 +227,30 @@ struct le_avrcp_session {
     uint8_t volume_transaction;
 };
 
+/*
+ * One Alexa Gadget (e.g. an Echo Wall Clock) on SPP/RFCOMM 4.  `buf` holds
+ * partial AGT frames until a complete one arrives.
+ */
+#define LE_GADGET_HANDSHAKE_TIMEOUT_SECONDS 15
+
+struct le_spp_session {
+    int fd;
+    uint8_t buf[1024];
+    size_t used;
+    int offered;             /* Discover sent for this connection */
+    int answered;            /* Discover.Response received for this connection */
+    time_t opened_at;        /* when Discover was sent (handshake timeout) */
+    uint8_t seq;             /* next frame sequence number */
+    struct le_gadget *gadget; /* wall-clock state, NULL when not hosting */
+    struct le_gadget_alert alert_sent[LE_GADGET_MAX_ALERTS];
+    size_t alert_bytes;        /* alert set size when last written */
+};
+
 struct le_profile_sessions {
     struct le_sdp_session sdp[LE_MAX_SDP_SESSIONS];
     struct le_avdtp_session avdtp[LE_MAX_AVDTP_SESSIONS];
     struct le_avrcp_session avrcp[LE_MAX_AVRCP_SESSIONS];
+    struct le_spp_session spp[LE_MAX_SPP_SESSIONS];
     struct le_sdp_record records[8];
 };
 
@@ -233,6 +270,31 @@ static int l2cap_seqpacket_listen(unsigned short psm)
     memset(&addr, 0, sizeof(addr));
     addr.l2_family = AF_BLUETOOTH;
     addr.l2_psm = psm;
+    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
+        listen(fd, 2) < 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/*
+ * Bind and listen on an RFCOMM channel.  The kernel serves the protocol
+ * (CONFIG_BT_RFCOMM), so this is the standard BTPROTO_RFCOMM socket; a
+ * connected fd carries the byte stream Amazon's AGT framing sits on.
+ */
+static int rfcomm_channel_listen(unsigned char channel)
+{
+    struct sockaddr_rc_local addr;
+    int fd;
+
+    fd = socket(AF_BLUETOOTH, SOCK_STREAM, LE_BTPROTO_RFCOMM);
+    if (fd < 0)
+        return -1;
+    memset(&addr, 0, sizeof(addr));
+    addr.rc_family = AF_BLUETOOTH;
+    memset(addr.rc_bdaddr, 0, sizeof(addr.rc_bdaddr));
+    addr.rc_channel = channel;
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0 ||
         listen(fd, 2) < 0) {
         close(fd);
@@ -613,6 +675,45 @@ static void build_record_set(struct le_profile_sessions *sessions,
                                 LE_DID_VENDOR_ID_SOURCE_USB);
         record->length = offset;
     }
+
+    /*
+     * Serial Port (SPP) on RFCOMM channel 4.  An Alexa Gadget such as the
+     * Echo Wall Clock searches for SPP 0x1101 when it calls its partner back
+     * after pairing, and then opens this channel.  The protocol UUID carries
+     * the channel number, so the record must advertise RFCOMM 0x0003 with
+     * channel 4 rather than a bare L2CAP entry.
+     */
+    record = &sessions->records[5];
+    record->in_use = 1;
+    record->handle = LE_SDP_RECORD_SPP;
+    record->searchable_uuid16[0] = 0x1101;
+    record->searchable_uuid16_count = 1;
+    record->public_browse = 1;
+    {
+        size_t offset = 0;
+        uint16_t spp_classes[1] = { 0x1101 };
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_HANDLE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset,
+                                record->handle);
+        offset = sdp_put_uuid_list_attr(record->data, sizeof(record->data),
+                                        offset, LE_SDP_ATTR_CLASS_ID_LIST,
+                                        spp_classes, 1);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_RECORD_STATE);
+        offset = sdp_put_uint32(record->data, sizeof(record->data), offset, 1);
+        offset = sdp_put_attr(record->data, sizeof(record->data), offset,
+                              LE_SDP_ATTR_SERVICE_NAME);
+        offset = sdp_put_text(record->data, sizeof(record->data), offset,
+                              "Serial Port");
+        offset = sdp_put_browse_list(record->data, sizeof(record->data),
+                                     offset);
+        offset = sdp_put_protocol_list(record->data, sizeof(record->data),
+                                       offset, 0x0003, LE_SPP_RFCOMM_CHANNEL);
+        offset = sdp_put_profile_list(record->data, sizeof(record->data),
+                                      offset, 0x1101, 0x0102); /* SPP 1.2 */
+        record->length = offset;
+    }
 }
 
 /* ---- SDP request handling --------------------------------------------- */
@@ -775,7 +876,6 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
     size_t total_list_bytes = 0;
     size_t outer_header;
     size_t outer_content;
-    int record_matches = 0;
     size_t pattern_size;
     size_t consumed;
     int i;
@@ -841,7 +941,6 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
                                              response_offset, record->length);
         memcpy(response + response_offset, record->data, record->length);
         response_offset += record->length;
-        record_matches++;
         total_list_bytes += record_header + record->length;
     }
 
@@ -1636,6 +1735,866 @@ static void avrcp_send_volume_changed(struct le_avrcp_session *session,
                    status, payload, sizeof(payload));
 }
 
+static void spp_close_session(struct le_spp_session *session,
+                              const char *reason)
+{
+    if (!session || session->fd < 0)
+        return;
+    if (reason)
+        le_log_info("btd-profiles: gadget channel closed (%s)", reason);
+    close(session->fd);
+    session->fd = -1;
+    session->used = 0;
+    session->offered = 0;
+    session->answered = 0;
+    session->opened_at = 0;
+    session->seq = 0;
+    session->alert_bytes = 0;
+    memset(session->alert_sent, 0, sizeof(session->alert_sent));
+}
+
+/*
+ * Write framed bytes to a gadget session with a short POLLOUT / POLLHUP
+ * liveness check so a dead or stalled peer is reaped immediately rather than
+ * blocking btd or silently absorbing writes into a hung-up socket.
+ */
+static int spp_write_raw(struct le_spp_session *session, const uint8_t *data,
+                         size_t length)
+{
+    size_t sent = 0;
+
+    if (!session || session->fd < 0 || !data || length == 0)
+        return -1;
+    while (sent < length) {
+        struct pollfd pfd;
+        int ready;
+        ssize_t written;
+
+        pfd.fd = session->fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        do {
+            ready = poll(&pfd, 1, 100);
+        } while (ready < 0 && errno == EINTR);
+        if (ready <= 0) {
+            spp_close_session(session, ready == 0 ? "write timeout"
+                                                  : strerror(errno));
+            return -1;
+        }
+        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+            spp_close_session(session, "peer hangup/error before write");
+            return -1;
+        }
+        do {
+            written = send(session->fd, data + sent, length - sent,
+                           MSG_NOSIGNAL);
+        } while (written < 0 && errno == EINTR);
+        if (written <= 0) {
+            spp_close_session(session, written < 0 ? strerror(errno)
+                                                   : "zero write");
+            return -1;
+        }
+        sent += (size_t)written;
+    }
+    return 0;
+}
+
+/*
+ * Send one AGT directive to a gadget.  The sequence number skips the
+ * framing's reserved bytes, and a failed write reaps the session immediately.
+ */
+static int spp_send(struct le_spp_session *session, const uint8_t *message,
+                    size_t message_length)
+{
+    uint8_t frame[LE_AGT_FRAME_MAX];
+    size_t frame_length;
+
+    if (!session || session->fd < 0 || message_length == 0)
+        return -1;
+    if (++session->seq > 0xEF)
+        session->seq = 1;
+    if (session->gadget)
+        session->gadget->seq = session->seq;
+    frame_length = le_agt_encode(frame, sizeof(frame), session->seq, message,
+                                message_length);
+    if (!frame_length)
+        return -1;
+    return spp_write_raw(session, frame, frame_length);
+}
+
+/* Local wall-clock time as ISO-8601 with a colon in the offset. */
+static void spp_local_time(char *out, size_t size)
+{
+    char buffer[40];
+    time_t now = time(NULL);
+    struct tm tm;
+    size_t length;
+
+    out[0] = '\0';
+    if (!localtime_r(&now, &tm) ||
+        strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &tm) == 0) {
+        return;
+    }
+    length = strlen(buffer);
+    if (length < 5 || (buffer[length - 5] != '+' && buffer[length - 5] != '-'))
+        return;
+    /* %z is +HHMM; AGT messages carry +HH:MM. */
+    snprintf(out, size, "%.*s%c%.2s:%.2s", (int)(length - 5), buffer,
+             buffer[length - 5], buffer + length - 4, buffer + length - 2);
+}
+
+/*
+ * The link is up.  A real Echo opens the session by itself: Discover, then
+ * timeinfo, then ClearIndicator (PROTOCOL.md, "Order on connect").  The clock
+ * does not start talking until it hears Discover, so the partner must send it.
+ */
+/* Last timeinfo handed to a gadget: "epoch ISO8601", so a restart is free
+ * and the half-hour rule survives one too. */
+#define LE_TIMEINFO_STATE "/data/libreecho/config/gadget.timeinfo"
+#define LE_TIMEINFO_MAX_AGE_SECONDS (30 * 60)
+
+static time_t last_timeinfo_epoch;
+
+static int read_timeinfo_state(char *out, size_t size)
+{
+    FILE *file = fopen(LE_TIMEINFO_STATE, "r");
+    char line[96];
+    long long epoch = 0;
+    const char *iso;
+
+    out[0] = '\0';
+    last_timeinfo_epoch = 0;
+    if (!file)
+        return -1;
+    if (!fgets(line, sizeof(line), file)) {
+        fclose(file);
+        return -1;
+    }
+    fclose(file);
+    {
+        size_t used = strlen(line);
+
+        while (used && (line[used - 1] == '\n' || line[used - 1] == '\r'))
+            line[--used] = '\0';
+    }
+    iso = strchr(line, ' ');
+    if (!iso) {
+        /* Older file held only the ISO value; treat it as stale. */
+        snprintf(out, size, "%s", line);
+        return out[0] ? 0 : -1;
+    }
+    epoch = strtoll(line, NULL, 10);
+    last_timeinfo_epoch = (time_t)epoch;
+    /* Only the ISO prefix matters.  A longer value in the file (a hand edit,
+     * a truncated write) must not make every comparison look "changed". */
+    {
+        size_t iso_length = strcspn(iso + 1, "\n\r");
+
+        if (iso_length > 32)
+            iso_length = 32;
+        if (iso_length >= size)
+            iso_length = size - 1;
+        memcpy(out, iso + 1, iso_length);
+        out[iso_length] = '\0';
+    }
+    return out[0] ? 0 : -1;
+}
+
+static int write_timeinfo_state(const char *value, time_t when)
+{
+    FILE *file = fopen(LE_TIMEINFO_STATE, "w");
+
+    if (!file)
+        return -1;
+    if (fprintf(file, "%lld %s\n", (long long)when, value) < 0) {
+        fclose(file);
+        return -1;
+    }
+    if (fclose(file) != 0)
+        return -1;
+    last_timeinfo_epoch = when;
+    return 0;
+}
+
+static int spp_send_bootstrap(struct le_spp_session *session)
+{
+    uint8_t message[LE_AGT_FRAME_MAX];
+    char fresh[LE_GADGET_TIME_MAX];
+    char last[LE_GADGET_TIME_MAX];
+    int changed;
+
+    if (!session->gadget)
+        return -1;
+    /*
+     * A timeinfo makes the clock sweep twelve hours: 12 x 17 s = 204 s,
+     * measured on the hardware.  So it is sent only when the clock would
+     * display a different minute than the last value it was told, compared
+     * against a persisted copy so a btd restart does not buy another sweep.
+     * Sub-minute drift is invisible on a wall clock.
+     */
+    spp_local_time(fresh, sizeof(fresh));
+    last[0] = '\0';
+    (void)read_timeinfo_state(last, sizeof(last));
+    /*
+     * The clock keeps its own time, so a reconnect is not a reason to sweep.
+     * A real Echo sends timeinfo every 30 minutes; older than that (or a
+     * clock that was never told) is worth the 204 s of movement.
+     */
+    changed = fresh[0] &&
+              (!last[0] || last_timeinfo_epoch == 0 ||
+               time(NULL) - last_timeinfo_epoch >= LE_TIMEINFO_MAX_AGE_SECONDS);
+
+    if (fresh[0]) {
+        memcpy(session->gadget->timeinfo, fresh,
+               sizeof(session->gadget->timeinfo));
+        session->gadget->timeinfo_valid = 1;
+    } else if (last[0]) {
+        memcpy(session->gadget->timeinfo, last,
+               sizeof(session->gadget->timeinfo));
+        session->gadget->timeinfo_valid = 1;
+    }
+
+    if (spp_send(session, message,
+                 le_agt_build_discover(message, sizeof(message))) < 0)
+        return -1;
+    if (!session->gadget->timeinfo_valid) {
+        le_log_info("btd-profiles: no time known, clock keeps its own");
+    } else if (!changed) {
+        le_log_info("btd-profiles: clock already has %s, no sweep",
+                    session->gadget->timeinfo);
+    } else if (spp_send(session, message,
+                        le_agt_build_state_update(message, sizeof(message),
+                                                  "timeinfo",
+                                                  session->gadget->timeinfo)) < 0) {
+        return -1;
+    } else {
+        (void)write_timeinfo_state(session->gadget->timeinfo, time(NULL));
+        le_log_info("btd-profiles: timeinfo %s sent, clock sweeps 204 s",
+                    session->gadget->timeinfo);
+    }
+    if (spp_send(session, message,
+                 le_agt_build_clear_indicator(message, sizeof(message))) < 0)
+        return -1;
+    session->offered = 1;
+    session->answered = 0;
+    session->opened_at = time(NULL);
+    return 0;
+}
+
+/* The sockaddr_rc we need, without pulling in BlueZ headers. */
+struct le_sockaddr_rc {
+    unsigned short rc_family;
+    unsigned char rc_bdaddr[6];
+    unsigned char rc_channel;
+};
+
+/*
+ * Open RFCOMM 4 to the clock.  It does not open the data channel itself: it
+ * becomes connectable after pairing, waits to be called, and only answers once
+ * Discover arrives (PROTOCOL.md section 2).  block=1 waits for the link.
+ */
+static int spp_open_session(struct le_profiles *p, const uint8_t *address,
+                            int wait_ms, struct le_spp_session **out)
+{
+    struct le_profile_sessions *sessions = p->sessions;
+    struct le_sockaddr_rc addr;
+    struct le_spp_session *session = NULL;
+    int fd, i, error = 0;
+    socklen_t error_size = sizeof(error);
+
+    if (!sessions || !address || !p->gadget)
+        return -1;
+    /* One gadget at a time; a fresh link supersedes any open one. */
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        if (sessions->spp[i].fd >= 0)
+            spp_close_session(&sessions->spp[i], "replaced");
+    }
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i)
+        if (sessions->spp[i].fd < 0) {
+            session = &sessions->spp[i];
+            break;
+        }
+    if (!session)
+        return -1;
+
+    fd = socket(AF_BLUETOOTH, SOCK_STREAM, LE_BTPROTO_RFCOMM);
+    if (fd < 0)
+        return -1;
+    memset(&addr, 0, sizeof(addr));
+    addr.rc_family = AF_BLUETOOTH;
+    memcpy(addr.rc_bdaddr, address, 6);
+    addr.rc_channel = LE_SPP_RFCOMM_CHANNEL;
+
+    {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        if (errno != EINPROGRESS) {
+            close(fd);
+            return -1;
+        }
+        {
+            struct pollfd wait_fd;
+            int ready;
+
+            wait_fd.fd = fd;
+            wait_fd.events = POLLOUT;
+            wait_fd.revents = 0;
+            ready = poll(&wait_fd, 1, wait_ms > 0 ? wait_ms : 15000);
+            if (ready <= 0) {
+                close(fd);
+                return -1;
+            }
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_size) < 0 ||
+                error) {
+                close(fd);
+                return -1;
+            }
+        }
+    }
+    {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+    session->fd = fd;
+    session->used = 0;
+    session->offered = 0;
+    session->answered = 0;
+    session->opened_at = 0;
+    session->seq = 0;
+    session->gadget = p->gadget;
+    session->alert_bytes = 0;
+    memset(session->alert_sent, 0, sizeof(session->alert_sent));
+    if (spp_send_bootstrap(session) != 0) {
+        spp_close_session(session, "bootstrap failed");
+        return -1;
+    }
+    if (out)
+        *out = session;
+    return 0;
+}
+
+int le_profile_spp_connect(struct le_profiles *p, const uint8_t *address,
+                           int type)
+{
+    (void)type;
+    return spp_open_session(p, address, 15000, NULL);
+}
+
+/*
+ * Mirrors the countdowns from timerd onto the clock.  Each alert carries its
+ * END time as local ISO-8601 (PROTOCOL.md: scheduledTime is the end, not a
+ * duration).  A timer that disappeared gets DeleteAlert.
+ */
+/*
+ * Alerts whose DeleteAlert is deferred until their finish pulse has run.  The
+ * clock pulses for about ten seconds and a DeleteAlert during that window
+ * cuts the pulse short (techo5, internal/feature/wallclock/bridge.go).
+ */
+#define LE_GADGET_DEFERRED_MAX 8
+#define LE_GADGET_PULSE_CLEAR_SECONDS 11
+
+struct le_deferred_delete {
+    char token[LE_GADGET_TOKEN_MAX];
+    time_t at;
+};
+
+static struct le_deferred_delete deferred_delete[LE_GADGET_DEFERRED_MAX];
+
+static void defer_delete(const char *token, time_t at)
+{
+    size_t i;
+
+    for (i = 0; i < LE_GADGET_DEFERRED_MAX; ++i) {
+        if (!deferred_delete[i].token[0] ||
+            !strcmp(deferred_delete[i].token, token)) {
+            snprintf(deferred_delete[i].token,
+                     sizeof(deferred_delete[i].token), "%.15s", token);
+            deferred_delete[i].at = at;
+            return;
+        }
+    }
+}
+
+/* Write the DeleteAlerts whose pulse window has passed. */
+static void flush_deferred_deletes(struct le_profile_sessions *sessions,
+                                  time_t now)
+{
+    size_t i;
+
+    for (i = 0; i < LE_GADGET_DEFERRED_MAX; ++i) {
+        int slot;
+
+        if (!deferred_delete[i].token[0] || now < deferred_delete[i].at)
+            continue;
+        for (slot = 0; slot < LE_MAX_SPP_SESSIONS; ++slot) {
+            uint8_t message[LE_AGT_FRAME_MAX];
+
+            if (sessions->spp[slot].fd < 0 || !sessions->spp[slot].offered)
+                continue;
+            if (spp_send(&sessions->spp[slot], message,
+                         le_agt_build_delete_alert(
+                             message, sizeof(message),
+                             deferred_delete[i].token)) == 0)
+                le_log_info("btd-profiles: deferred DeleteAlert for %s",
+                            deferred_delete[i].token);
+        }
+        deferred_delete[i].token[0] = '\0';
+        deferred_delete[i].at = 0;
+    }
+}
+
+static void spp_sync_alerts_at(struct le_profiles *p, const char *timers_json,
+                               time_t now)
+{
+    struct le_profile_sessions *sessions = p->sessions;
+    struct le_gadget *gadget = p->gadget;
+    const char *cursor;
+    char previous[LE_GADGET_MAX_ALERTS][LE_GADGET_TOKEN_MAX];
+    char previous_type[LE_GADGET_MAX_ALERTS];
+    int had[LE_GADGET_MAX_ALERTS];
+    int reminder_spoke = 0;
+    static int was_pulsing;
+    static time_t next_pulse;
+    static time_t pulse_clear_at;
+    int i;
+
+    if (!sessions || !gadget || !timers_json)
+        return;
+
+    /* Reap any gadget channel that never answered Discover within 15 s. */
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        struct le_spp_session *s = &sessions->spp[i];
+        if (s->fd >= 0 && s->offered && !s->answered && s->opened_at > 0 &&
+            now - s->opened_at >= LE_GADGET_HANDSHAKE_TIMEOUT_SECONDS)
+            spp_close_session(s, "Discover.Response timeout");
+    }
+
+    /* The response is a flat list of small objects; read the three fields the
+     * clock needs rather than linking a JSON parser for this shape. */
+    {
+        /* Tokens the clock currently shows, so a timer that leaves the set
+         * gets an explicit DeleteAlert; without it the segment stays lit. */
+        size_t k;
+
+        for (k = 0; k < LE_GADGET_MAX_ALERTS; ++k) {
+            if (gadget->alerts[k].in_use) {
+                memcpy(previous[k], gadget->alerts[k].token,
+                       sizeof(previous[k]));
+                previous_type[k] = gadget->alerts[k].type[0];
+                had[k] = 1;
+            } else {
+                previous_type[k] = 0;
+                had[k] = 0;
+            }
+        }
+    }
+    le_gadget_clear_alerts(gadget);
+    {
+        static size_t last_len;
+        size_t len = strlen(timers_json);
+
+        if (len != last_len) {
+            last_len = len;
+            le_log_info("btd-profiles: timerd JSON %zu bytes, first id at %s",
+                        len, strstr(timers_json, "\"id\":") ? "yes" : "NO");
+        }
+    }
+    cursor = timers_json;
+    while ((cursor = strstr(cursor, "\"id\":")) != NULL) {
+        char token[LE_GADGET_TOKEN_MAX];
+        char type[12];
+        char when[LE_GADGET_TIME_MAX];
+        char *end = NULL;
+        long id, seconds;
+        const char *kind;
+        const char *rem;
+        struct tm due;
+        char buffer[40];
+        size_t length;
+
+        cursor += 5;
+        id = strtol(cursor, &end, 10);
+        if (!end || end == cursor)
+            break;
+        cursor = end;
+
+        kind = strstr(cursor, "\"kind\":\"");
+        if (!kind)
+            break;
+        kind += 8;
+        if (!strncmp(kind, "countdown", 9))
+            strcpy(type, "TIMER");
+        else if (!strncmp(kind, "alarm", 5))
+            strcpy(type, "ALARM");
+        else if (!strncmp(kind, "reminder", 8))
+            strcpy(type, "REMINDER");
+        else
+            continue;               /* not an alert the clock draws */
+
+        rem = strstr(cursor, "\"seconds_remaining\":");
+        if (!rem)
+            break;
+        rem += 20;
+        seconds = strtol(rem, &end, 10);
+        if (!end || end == rem)
+            break;
+        cursor = end;
+        /*
+         * A ringing alert stays in the set: the clock needs its SetAlert for
+         * the token, and the pulse comes from the matching StateUpdate.
+         * Only a long-expired one is skipped.
+         */
+        if (seconds < -60)
+            continue;
+
+        /*
+         * timerd reports the end as an epoch (due_epoch).  Use it: it is
+         * zone-independent, and hour/minute is rendered in the daemon's
+         * local zone, which need not match ours.
+         */
+        {
+            const char *due_at = strstr(cursor, "\"due_epoch\":");
+            time_t when_at;
+
+            if (!due_at)
+                continue;
+            when_at = (time_t)strtoll(due_at + 12, &end, 10);
+            if (!end || end == due_at + 12)
+                continue;
+            if (!localtime_r(&when_at, &due))
+                continue;
+        }
+        if (strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &due) == 0)
+            continue;
+        length = strlen(buffer);
+        if (length < 5)
+            continue;
+        /* %z is +HHMM; AGT carries +HH:MM. */
+        snprintf(when, sizeof(when), "%.*s%c%.2s:%.2s", (int)(length - 5),
+                 buffer, buffer[length - 5], buffer + length - 4,
+                 buffer + length - 2);
+        snprintf(token, sizeof(token), "%ld", id);
+        (void)le_gadget_set_alert(gadget, token, type, when);
+    }
+
+    {
+        const char *ringing_at = strstr(timers_json, "\"ringing\":");
+        int ringing = ringing_at ? (int)strtol(ringing_at + 10, NULL, 10) : 0;
+
+        /* `timers=active` is what makes the clock pulse; it is sent once per
+         * ring, not repeated, because the pulse self-terminates. */
+        /*
+         * The key names what is ringing.  A clock draws a timer's arc from
+         * SetAlert alone, but an ALARM or REMINDER only pulses when the
+         * matching StateUpdate arrives: PROTOCOL.md section 5 lists
+         * "Nothing at the scheduled time unless alarms/reminders = active is
+         * sent".  A reminder is spoken by timerd; the clock still pulses.
+         */
+        /*
+         * timerd dismisses a reminder as it speaks it (announce_reminder ->
+         * le_timer_dismiss_at), so it never reports state=ringing.  A REMINDER
+         * that was in the previous set and is gone now has just spoken: that
+         * is the moment the clock should pulse.
+         */
+        {
+            size_t k;
+
+            for (k = 0; k < LE_GADGET_MAX_ALERTS; ++k) {
+                size_t j;
+                int still = 0;
+
+                if (!had[k] || previous_type[k] != 'R')
+                    continue;
+                for (j = 0; j < LE_GADGET_MAX_ALERTS; ++j)
+                    if (gadget->alerts[j].in_use &&
+                        !strcmp(gadget->alerts[j].token, previous[k])) {
+                        still = 1;
+                        break;
+                    }
+                if (!still)
+                    reminder_spoke = 1;
+            }
+        }
+        if (ringing > 0 || reminder_spoke) {
+            time_t now_pulse = now;
+
+            /*
+             * The clock pulses for ~10 s per `active` and then goes dark, so a
+             * ringing alert needs it re-sent about every 12 s (PROTOCOL.md).
+             * A reminder is dismissed immediately by timerd as it speaks, so
+             * hold `timers=cleared` for LE_GADGET_PULSE_CLEAR_SECONDS (11 s);
+             * a countdown/alarm stays `ringing > 0` until stopped, so it
+             * clears immediately once `ringing` drops back to 0.
+             */
+            if (reminder_spoke)
+                pulse_clear_at = now_pulse + LE_GADGET_PULSE_CLEAR_SECONDS;
+            else
+                pulse_clear_at = 0;
+
+            if (reminder_spoke || now_pulse >= next_pulse) {
+                next_pulse = now_pulse + 12;
+                le_gadget_set_timers_active(gadget, 1);
+                was_pulsing = 1;
+                for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+                    uint8_t message[LE_AGT_FRAME_MAX];
+
+                    if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+                        continue;
+                    if (spp_send(&sessions->spp[i], message,
+                                 le_agt_build_state_update(
+                                     message, sizeof(message), "timers",
+                                     "active")) == 0)
+                        le_log_info("btd-profiles: timers=active sent");
+                }
+            }
+        } else if (was_pulsing && now >= pulse_clear_at) {
+            /*
+             * Send the clear once ringing stops and any reminder pulse window
+             * has finished.  Reset `next_pulse` so an immediate new ring is
+             * never suppressed by the previous throttle window.
+             */
+            was_pulsing = 0;
+            next_pulse = 0;
+            pulse_clear_at = 0;
+            le_gadget_set_timers_active(gadget, 0);
+            for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+                uint8_t message[LE_AGT_FRAME_MAX];
+
+                if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+                    continue;
+                if (spp_send(&sessions->spp[i], message,
+                             le_agt_build_state_update(
+                                 message, sizeof(message), "timers",
+                                 "cleared")) == 0)
+                    le_log_info("btd-profiles: timers=cleared sent");
+            }
+        }
+    }
+
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        uint8_t frames[LE_AGT_FRAME_MAX * LE_GADGET_MAX_ALERTS];
+        size_t length;
+
+        if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+            continue;
+        {
+            size_t k;
+
+            for (k = 0; k < LE_GADGET_MAX_ALERTS; ++k) {
+                uint8_t message[LE_AGT_FRAME_MAX];
+                size_t j;
+                int still = 0;
+
+                if (!had[k])
+                    continue;
+                for (j = 0; j < LE_GADGET_MAX_ALERTS; ++j)
+                    if (gadget->alerts[j].in_use &&
+                        !strcmp(gadget->alerts[j].token, previous[k])) {
+                        still = 1;
+                        break;
+                    }
+                if (still)
+                    continue;
+                if (previous_type[k] == 'R') {
+                    /* Let the pulse finish before the alert goes away. */
+                    defer_delete(previous[k],
+                                 now + LE_GADGET_PULSE_CLEAR_SECONDS);
+                    le_log_info("btd-profiles: DeleteAlert for %s deferred "
+                                "%ds", previous[k],
+                                LE_GADGET_PULSE_CLEAR_SECONDS);
+                    continue;
+                }
+                (void)spp_send(&sessions->spp[i], message,
+                               le_agt_build_delete_alert(message,
+                                                         sizeof(message),
+                                                         previous[k]));
+                if (sessions->spp[i].fd < 0)
+                    break;
+            }
+        }
+        if (sessions->spp[i].fd < 0)
+            continue;
+        length = le_gadget_build_alert_frames(gadget, frames, sizeof(frames));
+        if (!length) {
+            static int warned;
+            /* Clear dedup cache so a later alert with the same token/time
+             * is not mistakenly suppressed. */
+            sessions->spp[i].alert_bytes = 0;
+            memset(sessions->spp[i].alert_sent, 0,
+                   sizeof(sessions->spp[i].alert_sent));
+            if (!warned) {
+                warned = 1;
+                le_log_warn("btd-profiles: no alert frames built (in_use scanning)");
+            }
+            continue;
+        }
+        /*
+         * Compare the alert set, not the framed bytes: append_frame bumps the
+         * gadget sequence number on every encode, so identical content still
+         * produces different frames.  The token and the end time are what the
+         * clock draws, and they only move when a timer is added, removed,
+         * paused or re-armed.
+         */
+        if (length == sessions->spp[i].alert_bytes &&
+            !memcmp(gadget->alerts, sessions->spp[i].alert_sent,
+                    sizeof(gadget->alerts)))
+            continue;
+        if (spp_write_raw(&sessions->spp[i], frames, length) != 0) {
+            le_log_warn("btd-profiles: alert write %zu bytes failed", length);
+            continue;
+        }
+        memcpy(sessions->spp[i].alert_sent, gadget->alerts,
+               sizeof(gadget->alerts));
+        sessions->spp[i].alert_bytes = length;
+        le_log_info("btd-profiles: %zu alert bytes to the clock", length);
+    }
+    flush_deferred_deletes(sessions, now);
+}
+
+void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
+{
+    spp_sync_alerts_at(p, timers_json, time(NULL));
+}
+
+/*
+ * A real Echo re-sends timeinfo every 30 minutes (PROTOCOL.md 5b).  Without
+ * it the clock runs on its own quartz and drifts.  This is cheap: one compare
+ * per poll, a write only when the minute has changed on the half hour.
+ */
+void le_profile_spp_refresh_time(struct le_profiles *p, time_t now)
+{
+    struct le_profile_sessions *sessions = p->sessions;
+    char iso[LE_GADGET_TIME_MAX];
+    struct tm tm;
+    int i;
+
+    if (!sessions || !p->gadget || !p->gadget->timeinfo_valid)
+        return;
+    if (!localtime_r(&now, &tm) || (tm.tm_min != 0 && tm.tm_min != 30))
+        return;
+    {
+        static time_t last_sent;
+        char buffer[40];
+        size_t length;
+
+        if (last_sent == now)
+            return;
+        if (strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &tm) == 0)
+            return;
+        length = strlen(buffer);
+        if (length < 5)
+            return;
+        snprintf(iso, sizeof(iso), "%.*s%c%.2s:%.2s", (int)(length - 5),
+                 buffer, buffer[length - 5], buffer + length - 4,
+                 buffer + length - 2);
+        if (!strcmp(iso, p->gadget->timeinfo))
+            return;                 /* nothing changed since the last send */
+        last_sent = now;
+        memcpy(p->gadget->timeinfo, iso, sizeof(p->gadget->timeinfo));
+        p->gadget->timeinfo[sizeof(p->gadget->timeinfo) - 1] = '\0';
+        (void)write_timeinfo_state(p->gadget->timeinfo, now);
+    }
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        uint8_t message[LE_AGT_FRAME_MAX];
+
+        if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+            continue;
+        (void)spp_send(&sessions->spp[i], message,
+                       le_agt_build_state_update(message, sizeof(message),
+                                                 "timeinfo",
+                                                 p->gadget->timeinfo));
+    }
+}
+
+static void spp_session_read(struct le_profiles *p,
+                             struct le_spp_session *session, short revents)
+{
+    ssize_t received;
+    size_t consumed;
+    int payload_length;
+    uint8_t payload[LE_AGT_PAYLOAD_MAX];
+    char namespace_out[48];
+    char name_out[48];
+
+    (void)p;
+    if (!session || session->fd < 0)
+        return;
+    if (revents & POLLIN) {
+        if (session->used >= sizeof(session->buf))
+            session->used = 0;
+        received = read(session->fd, session->buf + session->used,
+                        sizeof(session->buf) - session->used);
+        if (received == 0) {
+            spp_close_session(session, "peer closed");
+            return;
+        }
+        if (received < 0) {
+            if ((errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) &&
+                !(revents & (POLLHUP | POLLERR | POLLNVAL)))
+                return;
+            spp_close_session(session, strerror(errno));
+            return;
+        }
+        session->used += (size_t)received;
+
+        /* Drain every complete frame the buffer holds. */
+        for (;;) {
+            consumed = 0;
+            payload_length = le_agt_decode(session->buf, session->used, payload,
+                                           sizeof(payload), &consumed);
+            if (payload_length < 0) {
+                /*
+                 * Either a partial frame or a corrupt one.  A partial frame is
+                 * normal on a stream, so only drop the buffer when it cannot
+                 * contain a frame start at all.
+                 */
+                if (session->used && session->buf[0] != LE_AGT_STX) {
+                    size_t i;
+                    for (i = 1; i < session->used; ++i)
+                        if (session->buf[i] == LE_AGT_STX)
+                            break;
+                    if (i == session->used) {
+                        session->used = 0;
+                    } else {
+                        memmove(session->buf, session->buf + i,
+                                session->used - i);
+                        session->used -= i;
+                    }
+                }
+                break;
+            }
+            if (consumed && session->used > consumed)
+                memmove(session->buf, session->buf + consumed,
+                        session->used - consumed);
+            if (consumed)
+                session->used -= consumed;
+
+            if (le_agt_read_event_header(payload, (size_t)payload_length,
+                                         namespace_out, sizeof(namespace_out),
+                                         name_out, sizeof(name_out)) == 0 &&
+                strcmp(namespace_out, "Alexa.Discovery") == 0 &&
+                strcmp(name_out, "Discover.Response") == 0) {
+                /* The connect sequence already went out on accept; the clock's
+                 * own answer is only an acknowledgement. */
+                session->answered = 1;
+                le_log_info("btd-profiles: gadget %s discovered",
+                            session->offered ? "answered" : "unexpected");
+            }
+        }
+    }
+    if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        char reason[48];
+
+        snprintf(reason, sizeof(reason), "peer hangup/error revents=0x%x",
+                 (unsigned)revents);
+        spp_close_session(session, reason);
+    }
+}
+
 static void avrcp_session_read(struct le_profiles *p,
                                struct le_avrcp_session *session)
 {
@@ -1816,13 +2775,27 @@ int le_profile_open(struct le_profiles *p, const char *service_name)
     } else {
         le_log_warn("btd-profiles: AVRCP listener failed: %s", strerror(errno));
     }
+    /*
+     * SPP on RFCOMM channel 4 for Alexa Gadgets.  The protocol is served by
+     * the kernel (CONFIG_BT_RFCOMM), so userspace only binds the channel and
+     * accepts connections; the gadget speaks Amazon's AGT framing on top.
+     */
+    fd = rfcomm_channel_listen(LE_SPP_RFCOMM_CHANNEL);
+    if (fd >= 0) {
+        p->spp_listener = fd;
+        p->registered_spp = 1;
+    } else {
+        le_log_warn("btd-profiles: SPP channel %d listener failed: %s",
+                    LE_SPP_RFCOMM_CHANNEL, strerror(errno));
+    }
 
-    le_log_info("btd-profiles: sdp=%s avdtp=%s avrcp=%s",
+    le_log_info("btd-profiles: sdp=%s avdtp=%s avrcp=%s spp=%s",
                 p->registered_sdp ? "listening" : "unavailable",
                 p->registered_a2dp_sink ? "listening" : "unavailable",
-                p->registered_avrcp ? "listening" : "unavailable");
+                p->registered_avrcp ? "listening" : "unavailable",
+                p->registered_spp ? "listening" : "unavailable");
     return p->registered_sdp || p->registered_a2dp_sink || p->registered_avrcp
-        ? 0 : -1;
+        || p->registered_spp ? 0 : -1;
 }
 
 void le_profile_close(struct le_profiles *p)
@@ -1833,6 +2806,7 @@ void le_profile_close(struct le_profiles *p)
     if (p->sdp_listener >= 0) close(p->sdp_listener);
     if (p->avdtp_listener >= 0) close(p->avdtp_listener);
     if (p->avrcp_listener >= 0) close(p->avrcp_listener);
+    if (p->spp_listener >= 0) close(p->spp_listener);
     if (p->media_bus_fd >= 0) close(p->media_bus_fd);
     if (sessions) {
         for (i = 0; i < LE_MAX_SDP_SESSIONS; ++i)
@@ -1844,12 +2818,15 @@ void le_profile_close(struct le_profiles *p)
         }
         for (i = 0; i < LE_MAX_AVRCP_SESSIONS; ++i)
             if (sessions->avrcp[i].fd >= 0) close(sessions->avrcp[i].fd);
+        for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i)
+            if (sessions->spp[i].fd >= 0) close(sessions->spp[i].fd);
         free(sessions);
     }
     memset(p, 0, sizeof(*p));
     p->sdp_listener = -1;
     p->avdtp_listener = -1;
     p->avrcp_listener = -1;
+    p->spp_listener = -1;
     p->media_bus_fd = -1;
 }
 
@@ -1910,6 +2887,20 @@ int le_profile_poll_setup(struct le_profiles *p, struct pollfd *pollfds,
             count++;
         }
     }
+    if (p->spp_listener >= 0 && count < max_fds) {
+        pollfds[count].fd = p->spp_listener;
+        pollfds[count].events = POLLIN;
+        fd_map[count] = 4;
+        count++;
+    }
+    for (i = 0; i < LE_MAX_SPP_SESSIONS && count < max_fds; ++i) {
+        if (sessions->spp[i].fd >= 0) {
+            pollfds[count].fd = sessions->spp[i].fd;
+            pollfds[count].events = POLLIN;
+            fd_map[count] = 50 + i;
+            count++;
+        }
+    }
     return count;
 }
 
@@ -1922,7 +2913,7 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
     if (!sessions)
         return;
     for (i = 0; i < count; ++i) {
-        if (!(pollfds[i].revents & (POLLIN | POLLHUP | POLLERR)))
+        if (!(pollfds[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
             continue;
         switch (fd_map[i]) {
         case 1: {
@@ -1991,6 +2982,42 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
             sessions->avrcp[slot].volume_registered = 0;
             break;
         }
+        case 4: {
+            int client = accept(p->spp_listener, NULL, NULL);
+            int slot;
+            if (client < 0)
+                break;
+            for (slot = 0; slot < LE_MAX_SPP_SESSIONS; ++slot)
+                if (sessions->spp[slot].fd < 0)
+                    break;
+            if (slot == LE_MAX_SPP_SESSIONS) {
+                /* Supersede the oldest slot rather than refusing a fresh clock. */
+                spp_close_session(&sessions->spp[0], "replaced by incoming");
+                slot = 0;
+            }
+            sessions->spp[slot].fd = client;
+            sessions->spp[slot].used = 0;
+            sessions->spp[slot].offered = 0;
+            sessions->spp[slot].answered = 0;
+            sessions->spp[slot].opened_at = 0;
+            sessions->spp[slot].seq = 0;
+            sessions->spp[slot].gadget = p->gadget;
+            sessions->spp[slot].alert_bytes = 0;
+            memset(sessions->spp[slot].alert_sent, 0,
+                   sizeof(sessions->spp[slot].alert_sent));
+            /*
+             * A real Echo opens the session as soon as the gadget connects.
+             * Waiting for the clock's Discover.Response deadlocks: it sends
+             * nothing until it has heard Discover, then drops the link after
+             * ~58 s (PROTOCOL.md section 2).
+             */
+            if (sessions->spp[slot].gadget &&
+                spp_send_bootstrap(&sessions->spp[slot]) != 0) {
+                spp_close_session(&sessions->spp[slot], "bootstrap failed");
+                le_log_warn("btd-profiles: SPP bootstrap failed");
+            }
+            break;
+        }
         default:
             if (fd_map[i] >= 10 && fd_map[i] < 10 + LE_MAX_SDP_SESSIONS) {
                 sdp_session_read(sessions,
@@ -2001,6 +3028,9 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
                 avdtp_media_read(p, &sessions->avdtp[fd_map[i] - 30]);
             } else if (fd_map[i] >= 40 && fd_map[i] < 40 + LE_MAX_AVRCP_SESSIONS) {
                 avrcp_session_read(p, &sessions->avrcp[fd_map[i] - 40]);
+            } else if (fd_map[i] >= 50 && fd_map[i] < 50 + LE_MAX_SPP_SESSIONS) {
+                spp_session_read(p, &sessions->spp[fd_map[i] - 50],
+                                 pollfds[i].revents);
             }
             break;
         }
@@ -2030,6 +3060,11 @@ int le_profile_registered_avrcp(const struct le_profiles *p)
     return p->registered_avrcp;
 }
 
+int le_profile_registered_spp(const struct le_profiles *p)
+{
+    return p->registered_spp;
+}
+
 int le_profile_stream_active(const struct le_profiles *p)
 {
     return p->stream_active;
@@ -2051,6 +3086,7 @@ int le_profile_test_init(struct le_profiles *p, const char *service_name)
     p->sdp_listener = -1;
     p->avdtp_listener = -1;
     p->avrcp_listener = -1;
+    p->spp_listener = -1;
     p->media_bus_fd = -1;
     p->volume_percent = -1;
     snprintf(p->service_name, sizeof(p->service_name), "%s",
@@ -2066,6 +3102,8 @@ int le_profile_test_init(struct le_profiles *p, const char *service_name)
     }
     for (i = 0; i < LE_MAX_AVRCP_SESSIONS; ++i)
         sessions->avrcp[i].fd = -1;
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i)
+        sessions->spp[i].fd = -1;
     p->sessions = sessions;
     build_record_set(sessions, p->service_name);
     return 0;

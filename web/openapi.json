@@ -1278,6 +1278,28 @@
     }
    }
   },
+  "/bluetooth/clock-resync": {
+   "post": {
+    "tags": [
+     "Bluetooth"
+    ],
+    "summary": "Force the wall clock to re-set its time",
+    "description": "Clears the stored timeinfo so the next gadget connection sends it. The clock answers a timeinfo by driving its hands from 12:00 to the given time, which takes about 204 seconds (12 x 17 s, measured), so use this after a daylight-saving change, a battery swap or a long power loss rather than routinely.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/bluetooth/scan": {
    "post": {
     "tags": [

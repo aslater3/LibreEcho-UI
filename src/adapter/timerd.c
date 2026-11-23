@@ -975,7 +975,8 @@ static int timers_json(struct context *ctx, char *out, size_t size)
         written = snprintf(out + used, size - used,
                            "%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\","
                            "\"seconds_remaining\":%lld,\"label\":\"%s\","
-                           "\"repeat_days\":%u,\"hour\":%d,\"minute\":%d}",
+                           "\"repeat_days\":%u,\"hour\":%d,\"minute\":%d,"
+                           "\"due_epoch\":%lld}",
                            first ? "" : ",", timer->id,
                            timer->kind != LE_TIMER_ALARM ? "countdown"
                            : timer->reminder ? "reminder" : "alarm",
@@ -983,7 +984,15 @@ static int timers_json(struct context *ctx, char *out, size_t size)
                                ? "ringing" : "pending",
                            remaining, label,
                            timer->kind == LE_TIMER_ALARM ? timer->repeat_days : 0U,
-                           hour, minute);
+                           hour, minute,
+                           timer->kind == LE_TIMER_ALARM
+                               ? timer->due_epoch
+                               : timer->state == LE_TIMER_STATE_RINGING
+                                     /* Monotonic -> wall for a stable value:
+                                      * `remaining` is 0 while ringing. */
+                                     ? now_epoch +
+                                           (timer->due_monotonic_ms - now_ms) / 1000LL
+                                     : now_epoch + remaining);
         if (written < 0 || (size_t)written >= size - used)
             return -1;
         used += (size_t)written;
@@ -1132,6 +1141,18 @@ static int kind_matches(const struct le_timer *timer, const char *kind)
     return !strcmp(kind, timer->reminder ? "reminder" : "alarm");
 }
 
+/*
+ * Persist right after a mutating request.  The poll loop would do it on its
+ * next pass, but a client that has just been told "id: N" can reasonably
+ * expect a restart to keep it, and reading the state file right after the
+ * response should not race the loop.
+ */
+static void save_now(struct context *ctx)
+{
+    ctx->dirty = 1;
+    save_if_dirty(ctx, monotonic_ms(), wall_epoch());
+}
+
 static int dispatch(struct context *ctx, const char *cmd, const char *args,
                     unsigned long id, char *out, size_t size)
 {
@@ -1200,7 +1221,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                                         monotonic_ms(), &created);
         if (result != LE_TIMER_OK)
             return le_adapter_respond_err(out, size, id, add_error(result));
-        ctx->dirty = 1;
+        save_now(ctx);
         snprintf(data, sizeof(data), "{\"id\":%u}", created);
         le_log_info("timerd: countdown %u for %lld s", created, wide_value);
         return le_adapter_respond_ok(out, size, id, data);
@@ -1223,7 +1244,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                                            wall_epoch(), &created);
         if (result != LE_TIMER_OK)
             return le_adapter_respond_err(out, size, id, add_error(result));
-        ctx->dirty = 1;
+        save_now(ctx);
         snprintf(data, sizeof(data), "{\"id\":%u}", created);
         le_log_info("timerd: repeating alarm %u at %02d:%02d days 0x%02x",
                     created, hour, minute, days);
@@ -1257,7 +1278,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                                        &created);
         if (result != LE_TIMER_OK)
             return le_adapter_respond_err(out, size, id, add_error(result));
-        ctx->dirty = 1;
+        save_now(ctx);
         snprintf(data, sizeof(data), "{\"id\":%u}", created);
         le_log_info("timerd: reminder %u at %02d:%02d days 0x%02x",
                     created, hour, minute, days);
@@ -1275,7 +1296,7 @@ static int dispatch(struct context *ctx, const char *cmd, const char *args,
                                     &created);
         if (result != LE_TIMER_OK)
             return le_adapter_respond_err(out, size, id, add_error(result));
-        ctx->dirty = 1;
+        save_now(ctx);
         snprintf(data, sizeof(data), "{\"id\":%u}", created);
         le_log_info("timerd: alarm %u at %d", created, value);
         return le_adapter_respond_ok(out, size, id, data);

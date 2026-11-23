@@ -22,6 +22,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <sys/types.h>
+#include <time.h>
 
 /* Maximum file descriptors the profile layer can poll on. */
 #define LE_PROFILE_MAX_FDS 24
@@ -32,16 +33,23 @@ struct le_profiles {
     int sdp_listener;
     int avdtp_listener;
     int avrcp_listener;
+    int spp_listener;
     int media_bus_fd;
     int registered_sdp;
     int registered_a2dp_sink;
     int registered_avrcp;
+    int registered_spp;
     int stream_active;
     uint64_t media_frames_written;
     int volume_percent;                 /* speaker master 0..100, -1 unknown */
     int (*volume_set)(void *context, int percent);
     void *volume_context;
     void *sessions;
+    /*
+     * Wall-clock state for Alexa Gadgets on SPP.  btd owns the instance and
+     * sets this before the profile poll runs; NULL when gadget hosting is off.
+     */
+    struct le_gadget *gadget;
     char service_name[64];
 };
 
@@ -57,6 +65,25 @@ void le_profile_close(struct le_profiles *p);
  * the number added.  fd_map receives opaque indices consumed by
  * le_profile_poll_events.
  */
+/*
+ * Open RFCOMM channel 4 to `address` and push the connect sequence.  The
+ * clock never opens the data channel itself: it becomes connectable, waits to
+ * be called, and only answers once Discover arrives (PROTOCOL.md section 2).
+ * Safe to call repeatedly; an existing session to the same address is reused.
+ */
+int le_profile_spp_connect(struct le_profiles *p, const uint8_t *address,
+                           int type);
+
+/*
+ * Mirror timerd's timers onto the clock as SetAlert directives.  `timers_json`
+ * is timerd's "list" response; pass NULL to clear.  Called after connect and
+ * whenever the timer set changes.
+ */
+void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json);
+
+/* Re-send timeinfo on the half hour, like a real Echo. */
+void le_profile_spp_refresh_time(struct le_profiles *p, time_t now);
+
 int le_profile_poll_setup(struct le_profiles *p, struct pollfd *pollfds,
                           int max_fds, int *fd_map);
 void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
@@ -76,6 +103,8 @@ void le_profile_set_local_volume(struct le_profiles *p, int percent);
 int le_profile_registered_sdp(const struct le_profiles *p);
 int le_profile_registered_a2dp_sink(const struct le_profiles *p);
 int le_profile_registered_avrcp(const struct le_profiles *p);
+/* True when the SPP record is registered and RFCOMM channel 4 is served. */
+int le_profile_registered_spp(const struct le_profiles *p);
 int le_profile_stream_active(const struct le_profiles *p);
 
 /*

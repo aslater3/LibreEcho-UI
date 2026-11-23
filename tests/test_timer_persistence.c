@@ -7,8 +7,21 @@
 #include <assert.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+
+/*
+ * The scheduled times below are written as UTC offsets from SYNCED_EPOCH
+ * (`+ 7 * 3600 + 1800` for 07:30), while the scheduler resolves a wall-clock
+ * hour with mktime() in the host's zone.  Pinning TZ makes the two agree; on a
+ * host set to Europe/Zurich the same test failed by exactly one hour.
+ */
+static void pin_utc_zone(void)
+{
+    if (setenv("TZ", "UTC", 1) == 0)
+        tzset();
+}
 
 #define BOOT_EPOCH 10LL
 #define SYNCED_EPOCH 1767225600LL
@@ -108,6 +121,8 @@ static void assert_post_commit_retry(const char *path, const char *backup,
 int main(void)
 {
     const char *path = "/tmp/libreecho-timer-persistence-test";
+
+    pin_utc_zone();
     char backup[128];
     char text[256];
     struct context context;

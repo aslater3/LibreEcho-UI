@@ -13,11 +13,13 @@
 
 #include "adapter.h"
 #include "log.h"
+#include "../timezone.h"
 
 #include "bt_adv_proxy.h"
 #include "bt_mgmt_events.h"
 #include "bt_pairing_events.h"
 #include "bt_profile.h"
+#include "bt_gadget.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -290,6 +292,8 @@ struct bt_context {
     struct bt_pairing pairing;
     struct le_profiles profiles;
     int profiles_opened;
+    /* Wall-clock state pushed to Alexa Gadgets on SPP (bt_gadget.c). */
+    struct le_gadget gadget;
     /* Passive LE advertisement relay for esphomed (bt_adv_proxy.c). */
     struct bt_adv_ring adv;
     int proxy_started;
@@ -1236,6 +1240,14 @@ static void process_event(struct bt_context *context, uint16_t event,
             address_text(payload, address, sizeof(address));
             le_log_info("btd: MGMT device connected: address=%s type=%u",
                         address, payload[6]);
+            /*
+             * The wall clock becomes connectable but never opens the data
+             * channel: it waits to be called on RFCOMM 4 and answers once
+             * Discover arrives.  So the partner opens the channel.
+             */
+            if (context->profiles_opened && context->profiles.gadget &&
+                le_profile_spp_connect(&context->profiles, payload, payload[6]) == 0)
+                le_log_info("btd: gadget channel open to %s", address);
         }
         return;
     case MGMT_EV_DEVICE_DISCONNECTED: {
@@ -1680,7 +1692,7 @@ static int status_json(struct bt_context *context, char *data, size_t size)
     char local_name[BT_NAME_MAX * 2];
     const char *profile_state;
     const char *profile_error;
-    int sdp = 0, a2dp = 0, avrcp = 0;
+    int sdp = 0, a2dp = 0, avrcp = 0, spp = 0;
     bonded[0] = '\0';
 
     if (hci_present() && (time(NULL) - context->last_info > 2))
@@ -1693,10 +1705,11 @@ static int status_json(struct bt_context *context, char *data, size_t size)
         sdp = le_profile_registered_sdp(&context->profiles);
         a2dp = le_profile_registered_a2dp_sink(&context->profiles);
         avrcp = le_profile_registered_avrcp(&context->profiles);
+        spp = le_profile_registered_spp(&context->profiles);
     }
-    if (sdp && a2dp && avrcp) {
+    if (sdp && a2dp && avrcp && spp) {
         profile_state = "ready";
-        profile_error = "SDP, A2DP sink, and AVRCP profile services registered";
+        profile_error = "SDP, A2DP sink, AVRCP and SPP profile services registered";
     } else if (sdp || a2dp || avrcp) {
         profile_state = "partial";
         profile_error = "Some Bluetooth profile services could not register";
@@ -1741,7 +1754,7 @@ static int status_json(struct bt_context *context, char *data, size_t size)
                     profile_state, profile_error,
                     sdp ? "true" : "false", a2dp ? "true" : "false",
                     avrcp ? "true" : "false",
-                    "false", "false", "false") != 0)
+                    spp ? "true" : "false", "false", "false") != 0)
         return -1;
     if (!context->pairing.active) {
         if (append_text(data, size, &used, "null,\"known_devices\":[") != 0)
@@ -2313,6 +2326,17 @@ static int handle_request(struct bt_context *context, char *message,
                                            "advertisement batch too large");
         return le_adapter_respond_ok(response, response_size, id, batch);
     }
+    if (!strcmp(command, "clock_resync")) {
+        /*
+         * Force the next connect to send timeinfo.  Exposed as a button in
+         * the control centre so the owner can re-set the clock after a DST
+         * change or a battery swap without waiting for the half hour.
+         */
+        (void)unlink("/data/libreecho/config/gadget.timeinfo");
+        context->gadget.timeinfo_valid = 0;
+        return le_adapter_respond_ok(response, response_size, id,
+                                     "{\"resync\":true}");
+    }
     if (!strcmp(command, "scan") || !strcmp(command, "scan_stop")) {
         if (!strcmp(command, "scan") && context->proxy_started) {
             /* Hand the radio from the relay to the UI scan. */
@@ -2486,6 +2510,41 @@ static void drain_mgmt(struct bt_context *context)
     } while (count > 0);
 }
 
+/*
+ * Pull timerd's timer list and mirror it onto the clock.  Cheap enough to run
+ * on a one-second cadence; timerd is the source of truth, so a timer set by
+ * voice, the web UI or Home Assistant all arrive here.
+ */
+static void sync_gadget_alerts(struct bt_context *context)
+{
+    struct le_adapter *timer;
+    char response[4096];
+
+    if (!context->profiles_opened || !context->profiles.gadget)
+        return;
+    timer = le_adapter_connect(LE_ADAPTER_TIMER_SOCK, 100);
+    if (!timer)
+        return;
+    response[0] = '\0';
+    {
+        static int last_rc = -99;
+        int rc = le_adapter_call(timer, "list", "{}", response,
+                                 sizeof(response));
+
+        if (rc != last_rc) {
+            le_log_info("btd: timerd list rc=%d %s", rc,
+                        rc ? response : "");
+            last_rc = rc;
+        }
+        /* le_adapter_call() copies only the value of `data` into the
+         * buffer, without the key, so `response` already is timerd's JSON. */
+        if (rc == LE_ADAPTER_OK)
+            le_profile_spp_sync_alerts(&context->profiles, response);
+    }
+    le_adapter_close(timer);
+}
+
+
 int main(int argc, char **argv)
 {
     const char *socket_path = DEFAULT_SOCKET;
@@ -2555,8 +2614,10 @@ int main(int argc, char **argv)
         set_controller_ready(1);
     }
     (void)load_keys_into_controller(&context);
+    le_gadget_init(&context.gadget);
     if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {
         context.profiles_opened = 1;
+        context.profiles.gadget = &context.gadget;
         le_profile_set_volume_handler(&context.profiles, apply_phone_volume,
                                       NULL);
         le_profile_set_local_volume(&context.profiles, read_master_volume());
@@ -2576,7 +2637,6 @@ int main(int argc, char **argv)
         int profile_count = 0;
         int profile_base = 2;
         int total;
-        int i;
 
         pollfds[0].fd = listener;
         pollfds[0].events = POLLIN;
@@ -2600,9 +2660,22 @@ int main(int argc, char **argv)
         }
         if (total == 2 && (pollfds[1].revents & POLLIN))
             drain_mgmt(&context);
-        if (profile_count)
+        (void)le_timezone_follow(NULL);
+        if (profile_count) {
+            le_profile_spp_refresh_time(&context.profiles, time(NULL));
             le_profile_poll_events(&context.profiles, pollfds + profile_base,
                                    fd_map, profile_count);
+        }
+        {
+            /* One timer refresh per second; the clock's ring lags the
+             * countdown by at most that, which the reference accepts. */
+            static time_t next_alert_sync;
+
+            if (time(NULL) >= next_alert_sync) {
+                next_alert_sync = time(NULL) + 1;
+                sync_gadget_alerts(&context);
+            }
+        }
         if (context.profiles_opened) {
             /* Buttons, web UI and AirPlay move the master; the loop wakes per
              * media packet, so sample the file at most every 250 ms. */

@@ -126,6 +126,7 @@ static int bluetooth_disconnect_mock(struct le_backend*b,const char*a,int type){
 static int bluetooth_pairing_response_mock(struct le_backend*b,const char*a,int type,const char*m,unsigned int v,const char*p){(void)a;(void)type;(void)m;(void)v;(void)p;M(b)->bluetooth.pairing=0;return LE_OK;}
 static int bluetooth_discoverable_mock(struct le_backend*b,int enabled){if(enabled!=0&&enabled!=1)return LE_INVALID;M(b)->bluetooth.discoverable=enabled;return LE_OK;}
 static int bluetooth_connectable_mock(struct le_backend*b,int enabled){if(enabled!=0&&enabled!=1)return LE_INVALID;M(b)->bluetooth.connectable=enabled;return LE_OK;}
+static int bluetooth_clock_resync_mock(struct le_backend*b){(void)b;return LE_OK;}
 static int bluetooth_pairing_mode_mock(struct le_backend*b,int enabled){if(enabled!=0&&enabled!=1)return LE_INVALID;M(b)->bluetooth.pairing_mode=enabled;M(b)->bluetooth.connectable=enabled;M(b)->bluetooth.discoverable=enabled;M(b)->bluetooth.bondable=enabled;return LE_OK;}
 /* Sendspin: installed, follows its own toggle, and reports a connected,
    synchronized player while enabled. The token is a fixed fake. */
@@ -298,7 +299,7 @@ static int timer_dismiss_mock(struct le_backend*b,int*stopped){struct mock_state
 static int owner_eq_mock(struct le_backend*b,const char*preset,const int*h){if(fail(M(b),"owner-eq"))return LE_IO;memcpy(M(b)->audio.eq_halves,h,sizeof(M(b)->audio.eq_halves));snprintf(M(b)->audio.eq_preset,sizeof(M(b)->audio.eq_preset),"%s",preset);return save(M(b));}
 static int speaker_boost_mock(struct le_backend*b,int db){if(fail(M(b),"speaker-boost"))return LE_IO;M(b)->audio.boost_db=db;return save(M(b));}
 static int do_not_disturb_mock(struct le_backend*b,int enabled){(void)b;(void)enabled;return LE_OK;}
-static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,mute,tone,tts_voice,0,0,noise_start_mock,noise_stop_mock,simulate_audio_mock,radio_play_mock,radio_stop_mock,radio_playing_mock,led,colour,brightness,visualizer_enabled,boot_led,led_profile,night_mock,led_test,network,scan,connect_wifi,disconnect_wifi,hostname,wake,wake_set,sensitivity,wake_test,bluetooth,bluetooth_set,bluetooth_scan_mock,bluetooth_pair_mock,bluetooth_unpair_mock,bluetooth_disconnect_mock,bluetooth_pairing_response_mock,bluetooth_discoverable_mock,bluetooth_connectable_mock,bluetooth_pairing_mode_mock,airplay,airplay_set,playback,reboot,shutdown,reset,tick,control,
+static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,mute,tone,tts_voice,0,0,noise_start_mock,noise_stop_mock,simulate_audio_mock,radio_play_mock,radio_stop_mock,radio_playing_mock,led,colour,brightness,visualizer_enabled,boot_led,led_profile,night_mock,led_test,network,scan,connect_wifi,disconnect_wifi,hostname,wake,wake_set,sensitivity,wake_test,bluetooth,bluetooth_set,bluetooth_scan_mock,bluetooth_pair_mock,bluetooth_unpair_mock,bluetooth_disconnect_mock,bluetooth_pairing_response_mock,bluetooth_discoverable_mock,bluetooth_connectable_mock,bluetooth_pairing_mode_mock,bluetooth_clock_resync_mock,airplay,airplay_set,playback,reboot,shutdown,reset,tick,control,
  spotify_mock, spotify_set_mock,
  /* light: the mock has no sensor; the dispatcher reports unsupported. */
  0,
