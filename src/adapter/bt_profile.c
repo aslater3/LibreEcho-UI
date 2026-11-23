@@ -1785,48 +1785,91 @@ static void spp_local_time(char *out, size_t size)
  * timeinfo, then ClearIndicator (PROTOCOL.md, "Order on connect").  The clock
  * does not start talking until it hears Discover, so the partner must send it.
  */
+/* Last timeinfo handed to a gadget, so a restart does not force a sweep. */
+#define LE_TIMEINFO_STATE "/data/libreecho/config/gadget.timeinfo"
+
+static int read_timeinfo_state(char *out, size_t size)
+{
+    FILE *file = fopen(LE_TIMEINFO_STATE, "r");
+    size_t used;
+
+    if (!file) {
+        out[0] = '\0';
+        return -1;
+    }
+    if (!fgets(out, (int)size, file)) {
+        fclose(file);
+        out[0] = '\0';
+        return -1;
+    }
+    fclose(file);
+    used = strlen(out);
+    while (used && (out[used - 1] == '\n' || out[used - 1] == '\r'))
+        out[--used] = '\0';
+    return out[0] ? 0 : -1;
+}
+
+static int write_timeinfo_state(const char *value)
+{
+    FILE *file = fopen(LE_TIMEINFO_STATE, "w");
+
+    if (!file)
+        return -1;
+    if (fprintf(file, "%s\n", value) < 0) {
+        fclose(file);
+        return -1;
+    }
+    return fclose(file) == 0 ? 0 : -1;
+}
+
 static int spp_send_bootstrap(struct le_spp_session *session)
 {
     uint8_t message[LE_AGT_FRAME_MAX];
+    char fresh[LE_GADGET_TIME_MAX];
+    char last[LE_GADGET_TIME_MAX];
+    int changed;
 
     if (!session->gadget)
         return -1;
     /*
-     * The clock drives its hands from 12:00 to the given time on every
-     * timeinfo, which takes minutes.  So only send it when the time we would
-     * report differs from what the clock already has — otherwise every
-     * reconnect restarts the sweep.
+     * A timeinfo makes the clock sweep twelve hours: 12 x 17 s = 204 s,
+     * measured on the hardware.  So it is sent only when the clock would
+     * display a different minute than the last value it was told, compared
+     * against a persisted copy so a btd restart does not buy another sweep.
+     * Sub-minute drift is invisible on a wall clock.
      */
-    {
-        char fresh[LE_GADGET_TIME_MAX];
-        int never_sent;
+    spp_local_time(fresh, sizeof(fresh));
+    last[0] = '\0';
+    (void)read_timeinfo_state(last, sizeof(last));
+    changed = fresh[0] && strncmp(fresh, last, 16) != 0;
 
-        /*
-         * The clock answers every timeinfo by driving its hands from 12:00 to
-         * the given time — a full twelve-hour sweep, minutes of movement.  So
-         * it must NOT be re-sent on every reconnect: the clock keeps its own
-         * time and only needs the half-hour correction from
-         * le_profile_spp_refresh_time().  This sends the initial value once,
-         * the first time a gadget connects after btd started.
-         */
-        spp_local_time(fresh, sizeof(fresh));
-        never_sent = fresh[0] && !session->gadget->timeinfo_valid;
-        if (fresh[0]) {
-            memcpy(session->gadget->timeinfo, fresh,
-                   sizeof(session->gadget->timeinfo));
-            session->gadget->timeinfo_valid = 1;
-        }
-        if (spp_send(session, message,
-                     le_agt_build_discover(message, sizeof(message))) < 0)
-            return -1;
-        if (!never_sent) {
-            le_log_info("btd-profiles: clock keeps its own time, not sweeping");
-        } else if (spp_send(session, message,
-                            le_agt_build_state_update(message, sizeof(message),
-                                                      "timeinfo",
-                                                      session->gadget->timeinfo)) < 0) {
-            return -1;
-        }
+    if (fresh[0]) {
+        memcpy(session->gadget->timeinfo, fresh,
+               sizeof(session->gadget->timeinfo));
+        session->gadget->timeinfo_valid = 1;
+    } else if (last[0]) {
+        memcpy(session->gadget->timeinfo, last,
+               sizeof(session->gadget->timeinfo));
+        session->gadget->timeinfo_valid = 1;
+    }
+
+    if (spp_send(session, message,
+                 le_agt_build_discover(message, sizeof(message))) < 0)
+        return -1;
+    if (!session->gadget->timeinfo_valid) {
+        le_log_info("btd-profiles: no time known, clock keeps its own");
+    } else if (!changed) {
+        le_log_info("btd-profiles: clock already has %s, no sweep",
+                    session->gadget->timeinfo);
+    } else if (spp_send(session, message,
+                        le_agt_build_state_update(message, sizeof(message),
+                                                  "timeinfo",
+                                                  session->gadget->timeinfo)) < 0) {
+        return -1;
+    } else {
+        (void)write_timeinfo_state(session->gadget->timeinfo);
+        le_log_info("btd-profiles: timeinfo %s sent, clock sweeps 204 s",
+                    session->gadget->timeinfo);
     }
     if (spp_send(session, message,
                  le_agt_build_clear_indicator(message, sizeof(message))) < 0)
