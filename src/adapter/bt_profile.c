@@ -2088,6 +2088,7 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
     char previous_type[LE_GADGET_MAX_ALERTS];
     int had[LE_GADGET_MAX_ALERTS];
     int reminder_spoke = 0;
+    static int was_pulsing;
     time_t now = time(NULL);
     int i;
 
@@ -2275,6 +2276,7 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
             if (now_pulse >= next_pulse) {
                 next_pulse = now_pulse + 12;
                 le_gadget_set_timers_active(gadget, 1);
+                was_pulsing = 1;
                 for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
                     uint8_t message[LE_AGT_FRAME_MAX];
 
@@ -2287,7 +2289,13 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                         le_log_info("btd-profiles: %s=active sent", key);
                 }
             }
-        } else if (le_gadget_set_timers_active(gadget, 0)) {
+        } else if (was_pulsing) {
+            /*
+             * Send the clear on the transition out of ringing.  Using the
+             * gadget's own flag here lost the clear when a reminder spoke and
+             * the alert set was rebuilt in the same poll.
+             */
+            was_pulsing = 0;
             for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
                 uint8_t message[LE_AGT_FRAME_MAX];
 
