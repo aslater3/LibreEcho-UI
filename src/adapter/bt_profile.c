@@ -238,8 +238,8 @@ struct le_spp_session {
     int offered;             /* Discover sent for this connection */
     uint8_t seq;             /* next frame sequence number */
     struct le_gadget *gadget; /* wall-clock state, NULL when not hosting */
-    uint8_t alert_sent[LE_AGT_FRAME_MAX * LE_GADGET_MAX_ALERTS];
-    size_t alert_bytes;        /* rendered alert frames last written */
+    struct le_gadget_alert alert_sent[LE_GADGET_MAX_ALERTS];
+    size_t alert_bytes;        /* alert set size when last written */
 };
 
 struct le_profile_sessions {
@@ -1946,6 +1946,8 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
     struct le_profile_sessions *sessions = p->sessions;
     struct le_gadget *gadget = p->gadget;
     const char *cursor;
+    char previous[LE_GADGET_MAX_ALERTS][LE_GADGET_TOKEN_MAX];
+    int had[LE_GADGET_MAX_ALERTS];
     time_t now = time(NULL);
     int i;
 
@@ -1954,6 +1956,21 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
 
     /* The response is a flat list of small objects; read the three fields the
      * clock needs rather than linking a JSON parser for this shape. */
+    {
+        /* Tokens the clock currently shows, so a timer that leaves the set
+         * gets an explicit DeleteAlert; without it the segment stays lit. */
+        size_t k;
+
+        for (k = 0; k < LE_GADGET_MAX_ALERTS; ++k) {
+            if (gadget->alerts[k].in_use) {
+                memcpy(previous[k], gadget->alerts[k].token,
+                       sizeof(previous[k]));
+                had[k] = 1;
+            } else {
+                had[k] = 0;
+            }
+        }
+    }
     le_gadget_clear_alerts(gadget);
     cursor = timers_json;
     while ((cursor = strstr(cursor, "\"id\":")) != NULL) {
@@ -1998,8 +2015,23 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
         if (seconds <= 0)
             continue;               /* already due; the ring is not ours */
 
-        if (!localtime_r(&(time_t){ now + (time_t)seconds }, &due))
-            continue;
+        /*
+         * timerd reports the end as an epoch (due_epoch).  Use it: it is
+         * zone-independent, and hour/minute is rendered in the daemon's
+         * local zone, which need not match ours.
+         */
+        {
+            const char *due_at = strstr(cursor, "\"due_epoch\":");
+            time_t when_at;
+
+            if (!due_at)
+                continue;
+            when_at = (time_t)strtoll(due_at + 13, &end, 10);
+            if (!end || end == due_at + 13)
+                continue;
+            if (!localtime_r(&when_at, &due))
+                continue;
+        }
         if (strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &due) == 0)
             continue;
         length = strlen(buffer);
@@ -2013,24 +2045,74 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
         (void)le_gadget_set_alert(gadget, token, type, when);
     }
 
+    {
+        const char *ringing_at = strstr(timers_json, "\"ringing\":");
+        int ringing = ringing_at ? (int)strtol(ringing_at + 10, NULL, 10) : 0;
+
+        /* `timers=active` is what makes the clock pulse; it is sent once per
+         * ring, not repeated, because the pulse self-terminates. */
+        if (le_gadget_set_timers_active(gadget, ringing > 0)) {
+            for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+                uint8_t message[LE_AGT_FRAME_MAX];
+
+                if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+                    continue;
+                (void)spp_send(&sessions->spp[i], message,
+                               le_agt_build_state_update(
+                                   message, sizeof(message), "timers",
+                                   ringing > 0 ? "active" : "cleared"));
+            }
+        }
+    }
+
     for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
         uint8_t frames[LE_AGT_FRAME_MAX * LE_GADGET_MAX_ALERTS];
         size_t length;
 
         if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
             continue;
+        {
+            size_t k;
+
+            for (k = 0; k < LE_GADGET_MAX_ALERTS; ++k) {
+                uint8_t message[LE_AGT_FRAME_MAX];
+                size_t j;
+                int still = 0;
+
+                if (!had[k])
+                    continue;
+                for (j = 0; j < LE_GADGET_MAX_ALERTS; ++j)
+                    if (gadget->alerts[j].in_use &&
+                        !strcmp(gadget->alerts[j].token, previous[k])) {
+                        still = 1;
+                        break;
+                    }
+                if (still)
+                    continue;
+                (void)spp_send(&sessions->spp[i], message,
+                               le_agt_build_delete_alert(message,
+                                                         sizeof(message),
+                                                         previous[k]));
+            }
+        }
         length = le_gadget_build_alert_frames(gadget, frames, sizeof(frames));
         if (!length)
             continue;
-        /* The token and end time only move when a timer is added, removed or
-         * paused, so an unchanged set needs no write.  Two timers sharing a
-         * minute would otherwise re-send every second. */
+        /*
+         * Compare the alert set, not the framed bytes: append_frame bumps the
+         * gadget sequence number on every encode, so identical content still
+         * produces different frames.  The token and the end time are what the
+         * clock draws, and they only move when a timer is added, removed,
+         * paused or re-armed.
+         */
         if (length == sessions->spp[i].alert_bytes &&
-            !memcmp(frames, sessions->spp[i].alert_sent, length))
+            !memcmp(gadget->alerts, sessions->spp[i].alert_sent,
+                    sizeof(gadget->alerts)))
             continue;
         if (length > sizeof(sessions->spp[i].alert_sent))
             length = sizeof(sessions->spp[i].alert_sent);
-        memcpy(sessions->spp[i].alert_sent, frames, length);
+        memcpy(sessions->spp[i].alert_sent, gadget->alerts,
+               sizeof(gadget->alerts));
         sessions->spp[i].alert_bytes = length;
         {
             ssize_t wrote = write(sessions->spp[i].fd, frames, length);

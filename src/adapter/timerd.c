@@ -975,7 +975,8 @@ static int timers_json(struct context *ctx, char *out, size_t size)
         written = snprintf(out + used, size - used,
                            "%s{\"id\":%u,\"kind\":\"%s\",\"state\":\"%s\","
                            "\"seconds_remaining\":%lld,\"label\":\"%s\","
-                           "\"repeat_days\":%u,\"hour\":%d,\"minute\":%d}",
+                           "\"repeat_days\":%u,\"hour\":%d,\"minute\":%d,"
+                           "\"due_epoch\":%lld}",
                            first ? "" : ",", timer->id,
                            timer->kind != LE_TIMER_ALARM ? "countdown"
                            : timer->reminder ? "reminder" : "alarm",
@@ -983,7 +984,10 @@ static int timers_json(struct context *ctx, char *out, size_t size)
                                ? "ringing" : "pending",
                            remaining, label,
                            timer->kind == LE_TIMER_ALARM ? timer->repeat_days : 0U,
-                           hour, minute);
+                           hour, minute,
+                           timer->kind == LE_TIMER_ALARM
+                               ? timer->due_epoch
+                               : now_epoch + remaining);
         if (written < 0 || (size_t)written >= size - used)
             return -1;
         used += (size_t)written;
