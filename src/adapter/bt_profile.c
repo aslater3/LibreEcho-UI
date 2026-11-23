@@ -2147,7 +2147,8 @@ static void flush_deferred_deletes(struct le_profile_sessions *sessions,
     }
 }
 
-void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
+static void spp_sync_alerts_at(struct le_profiles *p, const char *timers_json,
+                               time_t now)
 {
     struct le_profile_sessions *sessions = p->sessions;
     struct le_gadget *gadget = p->gadget;
@@ -2159,7 +2160,6 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
     static int was_pulsing;
     static time_t next_pulse;
     static time_t pulse_clear_at;
-    time_t now = time(NULL);
     int i;
 
     if (!sessions || !gadget || !timers_json)
@@ -2453,6 +2453,11 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
         le_log_info("btd-profiles: %zu alert bytes to the clock", length);
     }
     flush_deferred_deletes(sessions, now);
+}
+
+void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
+{
+    spp_sync_alerts_at(p, timers_json, time(NULL));
 }
 
 /*

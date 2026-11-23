@@ -48,7 +48,7 @@ sh tests/test_timezone_setup.sh
 sh tests/test_pycache_untracked.sh
 python3 tests/test_pr244_review_contract.py
 python3 tests/test_pr245_review_contract.py
-make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-nl80211-scan-transport build/test-bt-mgmt-events build/test-bt-agt build/test-bt-gadget build/test-bt-pairing-events build/test-factory-reset
+make build/test-network-health build/test-adapter-client-events build/test-gateway-probe build/test-networkd-health build/test-networkd-scan-security build/test-networkd-ap-scan build/test-nl80211-scan-transport build/test-bt-mgmt-events build/test-bt-agt build/test-bt-gadget build/test-bt-spp-liveness build/test-bt-pairing-events build/test-factory-reset
 ./build/test-networkd-scan-security
 ./build/test-networkd-ap-scan
 ./build/test-nl80211-scan-transport
@@ -88,6 +88,7 @@ make build/test-backend-linux-wifi-emission build/test-thermal-zone-selection bu
 ./build/test-bt-mgmt-events
 ./build/test-bt-agt
 ./build/test-bt-gadget
+./build/test-bt-spp-liveness
 ./build/test-bt-pairing-events
 python3 tests/test_networkd_health_integration.py
 python3 tests/test_backend_linux_wifi_contract.py

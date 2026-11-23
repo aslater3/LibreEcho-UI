@@ -702,6 +702,18 @@ $(BUILD)/test-bt-gadget: tests/test_bt_gadget.c \
 		src/adapter/bt_gadget.c src/adapter/bt_agt.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
 
+$(BUILD)/test-bt-spp-liveness: tests/test_bt_spp_liveness.c \
+		src/adapter/bt_agt.c src/adapter/bt_gadget.c src/log.c \
+		src/adapter/radio_resample.c \
+		src/adapter/bt-sbc/sbc.c src/adapter/bt-sbc/sbc_primitives.c \
+		src/adapter/bt-sbc/sbc_primitives_neon.c \
+		src/adapter/bt-sbc/sbc_primitives_armv6.c \
+		src/adapter/bt-sbc/sbc_primitives_sse.c \
+		src/adapter/bt-sbc/sbc_primitives_mmx.c \
+		src/adapter/bt-sbc/sbc_primitives_iwmmxt.c
+	$(CC) $(CSTD) -D_POSIX_C_SOURCE=200809L -O2 -Wall -Wextra \
+		-Isrc -Isrc/adapter $^ -lm -o $@
+
 $(BUILD)/test-bt-adv-proxy: tests/test_bt_adv_proxy.c \
 		src/adapter/bt_adv_proxy.c
 	$(CC) $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $^ -o $@
