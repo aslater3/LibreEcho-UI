@@ -13,6 +13,7 @@
 #include "adapter.h"
 #include "bt_profile.h"
 #include "bt_agt.h"
+#include "bt_gadget.h"
 #include "bt-sbc/sbc.h"
 #include "log.h"
 #include "radio_resample.h"
@@ -24,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -235,6 +237,7 @@ struct le_spp_session {
     size_t used;
     int offered;             /* Discover sent for this connection */
     uint8_t seq;             /* next frame sequence number */
+    struct le_gadget *gadget; /* wall-clock state, NULL when not hosting */
 };
 
 struct le_profile_sessions {
@@ -1744,6 +1747,8 @@ static int spp_send(struct le_spp_session *session, const uint8_t *message,
         return -1;
     if (++session->seq > 0xEF)
         session->seq = 1;
+    if (session->gadget)
+        session->gadget->seq = session->seq;
     frame_length = le_agt_encode(frame, sizeof(frame), session->seq, message,
                                 message_length);
     if (!frame_length)
@@ -1752,21 +1757,211 @@ static int spp_send(struct le_spp_session *session, const uint8_t *message,
     return written == (ssize_t)frame_length ? 0 : -1;
 }
 
+/* Local wall-clock time as ISO-8601 with a colon in the offset. */
+static void spp_local_time(char *out, size_t size)
+{
+    char buffer[40];
+    time_t now = time(NULL);
+    struct tm tm;
+    size_t length;
+
+    out[0] = '\0';
+    if (!localtime_r(&now, &tm) ||
+        strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &tm) == 0) {
+        return;
+    }
+    length = strlen(buffer);
+    if (length < 5 || (buffer[length - 5] != '+' && buffer[length - 5] != '-'))
+        return;
+    /* %z is +HHMM; AGT messages carry +HH:MM. */
+    snprintf(out, size, "%.*s%c%.2s:%.2s", (int)(length - 5), buffer,
+             buffer[length - 5], buffer + length - 4, buffer + length - 2);
+}
+
 /*
- * A gadget has connected and its first frame (Discover) has arrived.  A real
- * Echo answers by opening the session; the clock needs the state a moment
- * later, so this replies with the directives it accepts and remembers that
- * the session was offered.
+ * The link is up.  A real Echo opens the session by itself: Discover, then
+ * timeinfo, then ClearIndicator (PROTOCOL.md, "Order on connect").  The clock
+ * does not start talking until it hears Discover, so the partner must send it.
  */
 static int spp_send_bootstrap(struct le_spp_session *session)
 {
     uint8_t message[LE_AGT_FRAME_MAX];
 
+    if (!session->gadget)
+        return -1;
+    spp_local_time(session->gadget->timeinfo, sizeof(session->gadget->timeinfo));
+    session->gadget->timeinfo_valid = session->gadget->timeinfo[0] != '\0';
+
+    if (spp_send(session, message,
+                 le_agt_build_discover(message, sizeof(message))) < 0)
+        return -1;
+    if (session->gadget->timeinfo_valid &&
+        spp_send(session, message,
+                 le_agt_build_state_update(message, sizeof(message), "timeinfo",
+                                           session->gadget->timeinfo)) < 0)
+        return -1;
     if (spp_send(session, message,
                  le_agt_build_clear_indicator(message, sizeof(message))) < 0)
         return -1;
     session->offered = 1;
     return 0;
+}
+
+/* The sockaddr_rc we need, without pulling in BlueZ headers. */
+struct le_sockaddr_rc {
+    unsigned short rc_family;
+    unsigned char rc_bdaddr[6];
+    unsigned char rc_channel;
+};
+
+/*
+ * Open RFCOMM 4 to the clock.  It does not open the data channel itself: it
+ * becomes connectable after pairing, waits to be called, and only answers once
+ * Discover arrives (PROTOCOL.md section 2).  block=1 waits for the link.
+ */
+static int spp_open_session(struct le_profiles *p, const uint8_t *address,
+                            int wait_ms, struct le_spp_session **out)
+{
+    struct le_profile_sessions *sessions = p->sessions;
+    struct le_sockaddr_rc addr;
+    struct le_spp_session *session = NULL;
+    int fd, i, error = 0;
+    socklen_t error_size = sizeof(error);
+
+    if (!sessions || !address || !p->gadget)
+        return -1;
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        if (sessions->spp[i].fd >= 0)
+            session = &sessions->spp[i];
+    }
+    if (session) {
+        /* One gadget at a time; a fresh link supersedes the old one. */
+        close(session->fd);
+        session->fd = -1;
+        session->used = 0;
+        session->offered = 0;
+        session->seq = 0;
+        session = NULL;
+    }
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i)
+        if (sessions->spp[i].fd < 0) {
+            session = &sessions->spp[i];
+            break;
+        }
+    if (!session)
+        return -1;
+
+    fd = socket(AF_BLUETOOTH, SOCK_STREAM, LE_BTPROTO_RFCOMM);
+    if (fd < 0)
+        return -1;
+    memset(&addr, 0, sizeof(addr));
+    addr.rc_family = AF_BLUETOOTH;
+    memcpy(addr.rc_bdaddr, address, 6);
+    addr.rc_channel = LE_SPP_RFCOMM_CHANNEL;
+
+    {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+        if (errno != EINPROGRESS) {
+            close(fd);
+            return -1;
+        }
+        {
+            struct pollfd wait_fd;
+            int ready;
+
+            wait_fd.fd = fd;
+            wait_fd.events = POLLOUT;
+            wait_fd.revents = 0;
+            ready = poll(&wait_fd, 1, wait_ms > 0 ? wait_ms : 15000);
+            if (ready <= 0) {
+                close(fd);
+                return -1;
+            }
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &error, &error_size) < 0 ||
+                error) {
+                close(fd);
+                return -1;
+            }
+        }
+    }
+    {
+        int flags = fcntl(fd, F_GETFL, 0);
+        if (flags >= 0)
+            (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+    }
+    session->fd = fd;
+    session->used = 0;
+    session->offered = 0;
+    session->seq = 0;
+    session->gadget = p->gadget;
+    if (spp_send_bootstrap(session) != 0) {
+        close(fd);
+        session->fd = -1;
+        return -1;
+    }
+    if (out)
+        *out = session;
+    return 0;
+}
+
+int le_profile_spp_connect(struct le_profiles *p, const uint8_t *address,
+                           int type)
+{
+    (void)type;
+    return spp_open_session(p, address, 15000, NULL);
+}
+
+/*
+ * A real Echo re-sends timeinfo every 30 minutes (PROTOCOL.md 5b).  Without
+ * it the clock runs on its own quartz and drifts.  This is cheap: one compare
+ * per poll, a write only when the minute has changed on the half hour.
+ */
+void le_profile_spp_refresh_time(struct le_profiles *p, time_t now)
+{
+    struct le_profile_sessions *sessions = p->sessions;
+    char iso[LE_GADGET_TIME_MAX];
+    struct tm tm;
+    int i;
+
+    if (!sessions || !p->gadget || !p->gadget->timeinfo_valid)
+        return;
+    if (!localtime_r(&now, &tm) || (tm.tm_min != 0 && tm.tm_min != 30))
+        return;
+    {
+        static time_t last_sent;
+        char buffer[40];
+        size_t length;
+
+        if (last_sent == now)
+            return;
+        if (strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%S%z", &tm) == 0)
+            return;
+        length = strlen(buffer);
+        if (length < 5)
+            return;
+        snprintf(iso, sizeof(iso), "%.*s%c%.2s:%.2s", (int)(length - 5),
+                 buffer, buffer[length - 5], buffer + length - 4,
+                 buffer + length - 2);
+        if (!strcmp(iso, p->gadget->timeinfo))
+            return;                 /* nothing changed since the last send */
+        last_sent = now;
+        memcpy(p->gadget->timeinfo, iso, sizeof(p->gadget->timeinfo));
+        p->gadget->timeinfo[sizeof(p->gadget->timeinfo) - 1] = '\0';
+    }
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        uint8_t message[LE_AGT_FRAME_MAX];
+
+        if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
+            continue;
+        (void)spp_send(&sessions->spp[i], message,
+                       le_agt_build_state_update(message, sizeof(message),
+                                                 "timeinfo",
+                                                 p->gadget->timeinfo));
+    }
 }
 
 static void spp_session_read(struct le_profiles *p,
@@ -1831,7 +2026,10 @@ static void spp_session_read(struct le_profiles *p,
                                      name_out, sizeof(name_out)) == 0 &&
             strcmp(namespace_out, "Alexa.Discovery") == 0 &&
             strcmp(name_out, "Discover.Response") == 0) {
-            (void)spp_send_bootstrap(session);
+            /* The connect sequence already went out on accept; the clock's
+             * own answer is only an acknowledgement. */
+            le_log_info("btd-profiles: gadget %s discovered",
+                        session->offered ? "answered" : "unexpected");
         }
     }
 }
@@ -2239,6 +2437,19 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
             sessions->spp[slot].used = 0;
             sessions->spp[slot].offered = 0;
             sessions->spp[slot].seq = 0;
+            sessions->spp[slot].gadget = p->gadget;
+            /*
+             * A real Echo opens the session as soon as the gadget connects.
+             * Waiting for the clock's Discover.Response deadlocks: it sends
+             * nothing until it has heard Discover, then drops the link after
+             * ~58 s (PROTOCOL.md section 2).
+             */
+            if (sessions->spp[slot].gadget &&
+                spp_send_bootstrap(&sessions->spp[slot]) != 0) {
+                close(client);
+                sessions->spp[slot].fd = -1;
+                le_log_warn("btd-profiles: SPP bootstrap failed");
+            }
             break;
         }
         default:

@@ -21,6 +21,7 @@
 #include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <time.h>
 #include <sys/types.h>
 
 /* Maximum file descriptors the profile layer can poll on. */
@@ -44,6 +45,11 @@ struct le_profiles {
     int (*volume_set)(void *context, int percent);
     void *volume_context;
     void *sessions;
+    /*
+     * Wall-clock state for Alexa Gadgets on SPP.  btd owns the instance and
+     * sets this before the profile poll runs; NULL when gadget hosting is off.
+     */
+    struct le_gadget *gadget;
     char service_name[64];
 };
 
@@ -59,6 +65,18 @@ void le_profile_close(struct le_profiles *p);
  * the number added.  fd_map receives opaque indices consumed by
  * le_profile_poll_events.
  */
+/*
+ * Open RFCOMM channel 4 to `address` and push the connect sequence.  The
+ * clock never opens the data channel itself: it becomes connectable, waits to
+ * be called, and only answers once Discover arrives (PROTOCOL.md section 2).
+ * Safe to call repeatedly; an existing session to the same address is reused.
+ */
+int le_profile_spp_connect(struct le_profiles *p, const uint8_t *address,
+                           int type);
+
+/* Re-send timeinfo on the half hour, like a real Echo. */
+void le_profile_spp_refresh_time(struct le_profiles *p, time_t now);
+
 int le_profile_poll_setup(struct le_profiles *p, struct pollfd *pollfds,
                           int max_fds, int *fd_map);
 void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,

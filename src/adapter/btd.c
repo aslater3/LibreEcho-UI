@@ -18,6 +18,7 @@
 #include "bt_mgmt_events.h"
 #include "bt_pairing_events.h"
 #include "bt_profile.h"
+#include "bt_gadget.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -290,6 +291,8 @@ struct bt_context {
     struct bt_pairing pairing;
     struct le_profiles profiles;
     int profiles_opened;
+    /* Wall-clock state pushed to Alexa Gadgets on SPP (bt_gadget.c). */
+    struct le_gadget gadget;
     /* Passive LE advertisement relay for esphomed (bt_adv_proxy.c). */
     struct bt_adv_ring adv;
     int proxy_started;
@@ -1236,6 +1239,14 @@ static void process_event(struct bt_context *context, uint16_t event,
             address_text(payload, address, sizeof(address));
             le_log_info("btd: MGMT device connected: address=%s type=%u",
                         address, payload[6]);
+            /*
+             * The wall clock becomes connectable but never opens the data
+             * channel: it waits to be called on RFCOMM 4 and answers once
+             * Discover arrives.  So the partner opens the channel.
+             */
+            if (context->profiles_opened && context->profiles.gadget &&
+                le_profile_spp_connect(&context->profiles, payload, payload[6]) == 0)
+                le_log_info("btd: gadget channel open to %s", address);
         }
         return;
     case MGMT_EV_DEVICE_DISCONNECTED: {
@@ -2556,8 +2567,10 @@ int main(int argc, char **argv)
         set_controller_ready(1);
     }
     (void)load_keys_into_controller(&context);
+    le_gadget_init(&context.gadget);
     if (le_profile_open(&context.profiles, LIBREECHO_BT_NAME) == 0) {
         context.profiles_opened = 1;
+        context.profiles.gadget = &context.gadget;
         le_profile_set_volume_handler(&context.profiles, apply_phone_volume,
                                       NULL);
         le_profile_set_local_volume(&context.profiles, read_master_volume());
@@ -2602,6 +2615,7 @@ int main(int argc, char **argv)
         if (total == 2 && (pollfds[1].revents & POLLIN))
             drain_mgmt(&context);
         if (profile_count)
+            le_profile_spp_refresh_time(&context.profiles, time(NULL));
             le_profile_poll_events(&context.profiles, pollfds + profile_base,
                                    fd_map, profile_count);
         if (context.profiles_opened) {
