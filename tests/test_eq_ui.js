@@ -146,8 +146,8 @@ const sliders = () => ['bass','low_mid','high_mid','treble'].map(id => Number($(
   localStorage.setItem('libreecho-lang', 'de');
   html = await render(vocal);
   assert(/<h3>Equalizer<\/h3>/.test(html), 'German card title');
-  for (const text of ['Voreinstellung', 'Untere Mitten', 'Obere Mitten', 'Höhen', 'Benutzerdefiniert',
-                      'Lautsprecher-Verstärkung', '>Aus</option>', 'Lautsprecherschutz'])
+  for (const text of ['Presets', 'Untere Mitten', 'Obere Mitten', 'Höhen', 'Benutzerdefiniert',
+                      'Lautsprecher-Verstärkung', '>Aus</option>', 'Schutz des Lautsprechers'])
     assert(html.includes(text), `German: ${text}`);
   localStorage.removeItem('libreecho-lang');
   console.log('equaliser UI: ok');
