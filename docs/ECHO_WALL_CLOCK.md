@@ -57,26 +57,45 @@ it away from LibreEcho.
 
 Reproduced from the real-Echo capture (`PROTOCOL.md` section 5b):
 
+The partner opens the data channel. The clock becomes connectable, runs an SDP
+search for `0x1101`, then **waits to be called** on RFCOMM 4 and drops the link
+after ~58 s. Listening alone deadlocks: both sides wait.
+
 | Event | What LibreEcho sends |
 |---|---|
-| connect | `Discover`, then `StateUpdate timeinfo`, then `ClearIndicator` |
-| clock replies `Discover.Response` | the session is live; re-send active alerts |
+| connect | `Discover`, then `ClearIndicator`, then the alerts it holds |
+| connect, no time known or last sync ≥ 30 min ago | also `StateUpdate timeinfo` |
 | timer started / resumed | `SetAlert(token, TIMER, end-time)` |
 | timer paused / cancelled | `DeleteAlert(token)` |
-| timer ringing | `StateUpdate timers=active`, **once** |
-| ringing stopped | `StateUpdate timers=cleared`, then `DeleteAlert(token)` |
-| DST change / hourly | `StateUpdate timeinfo` |
+| countdown, alarm or reminder fires | `StateUpdate timers=active`, re-sent every 12 s while it rings |
+| ringing stopped | `StateUpdate timers=cleared` |
+| half hour, value changed | `StateUpdate timeinfo` |
+| `POST /api/v1/bluetooth/clock-resync` | clears the stored timeinfo so the next connect sends it |
 
 `scheduledTime` is the alert's **end time**, local ISO-8601 with offset, not a
-duration.
+duration. `timeinfo` carries **local** time: the clock ignores the offset and
+shows the digits as written.
+
+Three details matter and are easy to get wrong:
+
+- The state key is always `timers`. A real Echo never sends `alarms` or
+  `reminders` there, even when a reminder finished.
+- `SetAlert` alone only plays the "set" animation. The pulse needs the
+  matching `StateUpdate`.
+- A `DeleteAlert` during a pulse cuts it short, so removing a finished alert is
+  deferred by 11 s.
+
+A `timeinfo` costs the clock a full twelve-hour sweep of its hands. One
+revolution of the minute hand measures ~17 s, so a sweep is ~204 s. It is
+therefore sent on the half hour, not on every reconnect; the clock keeps its
+own time in between.
 
 ## Known gaps
 
-- The match is on the protocol capture; the **Disney Mickey Mouse Edition is
-  untested on hardware** (see the table above). Its EIR name differs, which is
-  the only known difference.
-- Alert mirroring is wired into the SPP session but not yet driven from
-  `timerd`; until that lands the clock shows the correct time and clears a
-  stale indicator on connect, and timers reach it only through the gadget state
-  API.
-- `timeinfo` is not yet refreshed on the half hour.
+- The **Disney Mickey Mouse Edition is what was tested on hardware**; the
+  `EchoWallClk10U` variant in the protocol capture has not been. Its EIR name
+  differs, which is the only known difference.
+- Reminders are spoken by `timerd` through `ttsd`, not by the clock. The clock
+  pulses at the same moment.
+- Whether a real Echo holds the link for hours is unmeasured; `btd` keeps it
+  open for as long as the clock stays connected.

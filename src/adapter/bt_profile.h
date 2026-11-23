@@ -21,8 +21,8 @@
 #include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <time.h>
 #include <sys/types.h>
+#include <time.h>
 
 /* Maximum file descriptors the profile layer can poll on. */
 #define LE_PROFILE_MAX_FDS 24

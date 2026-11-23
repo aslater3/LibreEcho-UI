@@ -2637,7 +2637,6 @@ int main(int argc, char **argv)
         int profile_count = 0;
         int profile_base = 2;
         int total;
-        int i;
 
         pollfds[0].fd = listener;
         pollfds[0].events = POLLIN;

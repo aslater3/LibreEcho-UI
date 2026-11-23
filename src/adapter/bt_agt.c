@@ -212,6 +212,10 @@ int le_agt_decode(const uint8_t *in, size_t in_length, uint8_t *payload,
         return -1;
     if (in[1] != LE_AGT_CMD || in[2] != LE_AGT_ERR)
         return -1;
+    /* The header is STX CMD ERR seq; an ETX inside it (a malformed or
+     * truncated frame) would make this subtraction wrap. */
+    if (end < 4)
+        return -1;
 
     escaped_length = end - 4;
     decoded_length = agt_unescape(in + 4, escaped_length, decoded,

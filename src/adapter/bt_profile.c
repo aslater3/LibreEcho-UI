@@ -872,7 +872,6 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
     size_t total_list_bytes = 0;
     size_t outer_header;
     size_t outer_content;
-    int record_matches = 0;
     size_t pattern_size;
     size_t consumed;
     int i;
@@ -938,7 +937,6 @@ static void sdp_handle_service_search_attr(struct le_profile_sessions *sessions,
                                              response_offset, record->length);
         memcpy(response + response_offset, record->data, record->length);
         response_offset += record->length;
-        record_matches++;
         total_list_bytes += record_header + record->length;
     }
 
@@ -1785,9 +1783,6 @@ static void spp_local_time(char *out, size_t size)
  * timeinfo, then ClearIndicator (PROTOCOL.md, "Order on connect").  The clock
  * does not start talking until it hears Discover, so the partner must send it.
  */
-/* Last timeinfo handed to a gadget, so a restart does not force a sweep. */
-#define LE_TIMEINFO_STATE "/data/libreecho/config/gadget.timeinfo"
-
 /* Last timeinfo handed to a gadget: "epoch ISO8601", so a restart is free
  * and the half-hour rule survives one too. */
 #define LE_TIMEINFO_STATE "/data/libreecho/config/gadget.timeinfo"
@@ -1825,7 +1820,18 @@ static int read_timeinfo_state(char *out, size_t size)
     }
     epoch = strtoll(line, NULL, 10);
     last_timeinfo_epoch = (time_t)epoch;
-    snprintf(out, size, "%s", iso + 1);
+    /* Only the ISO prefix matters.  A longer value in the file (a hand edit,
+     * a truncated write) must not make every comparison look "changed". */
+    {
+        size_t iso_length = strcspn(iso + 1, "\n\r");
+
+        if (iso_length > 32)
+            iso_length = 32;
+        if (iso_length >= size)
+            iso_length = size - 1;
+        memcpy(out, iso + 1, iso_length);
+        out[iso_length] = '\0';
+    }
     return out[0] ? 0 : -1;
 }
 
@@ -2046,7 +2052,7 @@ static void defer_delete(const char *token, time_t at)
         if (!deferred_delete[i].token[0] ||
             !strcmp(deferred_delete[i].token, token)) {
             snprintf(deferred_delete[i].token,
-                     sizeof(deferred_delete[i].token), "%s", token);
+                     sizeof(deferred_delete[i].token), "%.15s", token);
             deferred_delete[i].at = at;
             return;
         }
@@ -2089,6 +2095,7 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
     int had[LE_GADGET_MAX_ALERTS];
     int reminder_spoke = 0;
     static int was_pulsing;
+    static time_t next_pulse;
     time_t now = time(NULL);
     int i;
 
@@ -2242,30 +2249,7 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
             }
         }
         if (ringing > 0 || reminder_spoke) {
-            char key[16];
-            const char *state_at = NULL;
-            static time_t next_pulse;
             time_t now_pulse = time(NULL);
-
-            /* Find the alert that is actually ringing: its own "state". */
-            {
-                const char *scan = timers_json;
-
-                while ((scan = strstr(scan, "\"state\":\"ringing\"")) != NULL) {
-                    const char *kind_at = NULL;
-                    const char *back = scan;
-
-                    while (back > timers_json && *back != '{')
-                        --back;
-                    kind_at = strstr(back, "\"kind\":\"");
-                    if (kind_at && kind_at < scan) {
-                        state_at = kind_at + 8;
-                        break;
-                    }
-                    scan += 1;
-                }
-            }
-            strcpy(key, "timers");
 
             /*
              * The clock pulses for ~10 s per `active` and then goes dark, so a
@@ -2284,9 +2268,9 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                         continue;
                     if (spp_send(&sessions->spp[i], message,
                                  le_agt_build_state_update(
-                                     message, sizeof(message), key,
+                                     message, sizeof(message), "timers",
                                      "active")) == 0)
-                        le_log_info("btd-profiles: %s=active sent", key);
+                        le_log_info("btd-profiles: timers=active sent");
                 }
             }
         } else if (was_pulsing) {

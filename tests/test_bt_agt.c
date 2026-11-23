@@ -208,10 +208,32 @@ static int test_bounds(void)
     return 0;
 }
 
+/*
+ * A frame whose ETX sits inside the four-byte header used to make
+ * `end - 4` wrap and sent agt_unescape past its buffer (found with
+ * AddressSanitizer).  A malformed frame from the gadget is enough.
+ */
+static int test_header_etx(void)
+{
+    uint8_t payload[LE_AGT_PAYLOAD_MAX];
+    static const uint8_t inside_end[]   = { 0xF0, 0x02, 0x00, 0xF1, 0x00 };
+    static const uint8_t inside_start[] = { 0xF0, 0xF1, 0x00, 0x00, 0x00 };
+    static const uint8_t inside_cmd[]   = { 0xF0, 0x02, 0xF1, 0x00, 0x00 };
+
+    CHECK(le_agt_decode(inside_end, sizeof(inside_end), payload,
+                        sizeof(payload), NULL) == -1);
+    CHECK(le_agt_decode(inside_start, sizeof(inside_start), payload,
+                        sizeof(payload), NULL) == -1);
+    CHECK(le_agt_decode(inside_cmd, sizeof(inside_cmd), payload,
+                        sizeof(payload), NULL) == -1);
+    return 0;
+}
+
 int main(void)
 {
     if (test_payloads() || test_framing() || test_escaped_bytes() ||
-        test_corruption() || test_event_header() || test_bounds())
+        test_corruption() || test_event_header() || test_bounds() ||
+        test_header_etx())
         return 1;
     printf("bt agt codec contract: ok\n");
     return 0;
