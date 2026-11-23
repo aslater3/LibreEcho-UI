@@ -2054,6 +2054,16 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
         }
     }
     le_gadget_clear_alerts(gadget);
+    {
+        static size_t last_len;
+        size_t len = strlen(timers_json);
+
+        if (len != last_len) {
+            last_len = len;
+            le_log_info("btd-profiles: timerd JSON %zu bytes, first id at %s",
+                        len, strstr(timers_json, "\"id\":") ? "yes" : "NO");
+        }
+    }
     cursor = timers_json;
     while ((cursor = strstr(cursor, "\"id\":")) != NULL) {
         char token[LE_GADGET_TOKEN_MAX];
@@ -2094,8 +2104,13 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
         if (!end || end == rem)
             break;
         cursor = end;
-        if (seconds <= 0)
-            continue;               /* already due; the ring is not ours */
+        /*
+         * A ringing alert stays in the set: the clock needs its SetAlert for
+         * the token, and the pulse comes from the matching StateUpdate.
+         * Only a long-expired one is skipped.
+         */
+        if (seconds < -60)
+            continue;
 
         /*
          * timerd reports the end as an epoch (due_epoch).  Use it: it is
@@ -2142,10 +2157,30 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
          */
         if (ringing > 0) {
             char key[16];
+            const char *state_at = NULL;
 
-            if (strstr(timers_json, "\"kind\":\"reminder\""))
+            /* Find the alert that is actually ringing: its own "state". */
+            {
+                const char *scan = timers_json;
+
+                while ((scan = strstr(scan, "\"state\":\"ringing\"")) != NULL) {
+                    const char *kind_at = NULL;
+                    const char *back = scan;
+
+                    /* Walk back to the object's "kind". */
+                    while (back > timers_json && *back != '{')
+                        --back;
+                    kind_at = strstr(back, "\"kind\":\"");
+                    if (kind_at && kind_at < scan) {
+                        state_at = kind_at + 8;
+                        break;
+                    }
+                    scan += 1;
+                }
+            }
+            if (state_at && !strncmp(state_at, "reminder", 8))
                 strcpy(key, "reminders");
-            else if (strstr(timers_json, "\"kind\":\"alarm\""))
+            else if (state_at && !strncmp(state_at, "alarm", 5))
                 strcpy(key, "alarms");
             else
                 strcpy(key, "timers");
@@ -2206,8 +2241,14 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
             }
         }
         length = le_gadget_build_alert_frames(gadget, frames, sizeof(frames));
-        if (!length)
+        if (!length) {
+            static int warned;
+            if (!warned) {
+                warned = 1;
+                le_log_warn("btd-profiles: no alert frames built (in_use scanning)");
+            }
             continue;
+        }
         /*
          * Compare the alert set, not the framed bytes: append_frame bumps the
          * gadget sequence number on every encode, so identical content still
