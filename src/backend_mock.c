@@ -7,6 +7,7 @@
 #include "owner_eq.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <string.h>
 #include <time.h>
 
@@ -167,7 +168,16 @@ static int noise_stop_mock(struct le_backend*b){
  return LE_OK;}
 static int simulate_audio_mock(struct le_backend*b,const char*text){
  (void)b; if(!text||!text[0])return LE_INVALID; return LE_OK;}
-static char mock_radio_url[512]; static int mock_radio_playing_flag;
+/* The real player is radiod, a separate process, so its state outlives the
+   API worker that started it. The mock keeps it in shared memory for the
+   same reason: a route run in a forked worker (TIDAL play) must leave the
+   stream playing for the next request. Falls back to private memory. */
+struct mock_radio{char url[512];int playing;};
+static struct mock_radio mock_radio_private,*mock_radio=&mock_radio_private;
+static void mock_radio_share(void){void*shared=mmap(NULL,sizeof(*mock_radio),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
+ if(shared!=MAP_FAILED){memset(shared,0,sizeof(*mock_radio));mock_radio=shared;}}
+#define mock_radio_url (mock_radio->url)
+#define mock_radio_playing_flag (mock_radio->playing)
 /* The simulated stream reports ICY fields because a real one does; a station
    that sends nothing is simulated by the empty strings this leaves behind
    when the mock stream is stopped. */
@@ -186,6 +196,10 @@ static int radio_stop_mock(struct le_backend*b){
  M(b)->playback.title[0]='\0';M(b)->playback.artist[0]='\0';M(b)->playback.album[0]='\0';
  return LE_OK;}
 static int radio_playing_mock(struct le_backend*b,struct le_radio_status*o){(void)b;
+ o->queue_index=-1;
+ /* A simulated TIDAL queue reports the entry its URL asked for. */
+ if(mock_radio_playing_flag&&!strncmp(mock_radio_url,"tidal:queue",11))
+  o->queue_index=mock_radio_url[11]=='#'?strtol(mock_radio_url+12,NULL,10):0;
  o->playing=mock_radio_playing_flag;snprintf(o->url,sizeof(o->url),"%s",mock_radio_url);
  if(mock_radio_playing_flag){snprintf(o->title,sizeof(o->title),"Simulated Artist - Simulated Track");
   snprintf(o->station,sizeof(o->station),"Simulated ICY station name");}
@@ -321,4 +335,4 @@ static const struct le_backend_ops ops={destroy,status,device,audio,volume,gain,
  sendspin_set_unpaired_mock,
  do_not_disturb_mock,
  owner_eq_mock, speaker_boost_mock};
-int le_mock_create(struct le_backend*b,const char*mock,const char*cfg,unsigned seed){struct mock_state*m=calloc(1,sizeof(*m));if(!m)return LE_IO;defaults(m,seed);load_profile(m,mock,seed);if(cfg){strncpy(m->config_path,cfg,sizeof(m->config_path)-1);load(m,cfg);}b->data=m;b->ops=&ops;return LE_OK;}
+int le_mock_create(struct le_backend*b,const char*mock,const char*cfg,unsigned seed){struct mock_state*m=calloc(1,sizeof(*m));if(!m)return LE_IO;if(mock_radio==&mock_radio_private)mock_radio_share();defaults(m,seed);load_profile(m,mock,seed);if(cfg){strncpy(m->config_path,cfg,sizeof(m->config_path)-1);load(m,cfg);}b->data=m;b->ops=&ops;return LE_OK;}

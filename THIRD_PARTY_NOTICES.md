@@ -62,6 +62,24 @@ so the static link into the MIT `radiod` is permitted. The Helix decoder is not
 MIT-licensed; do not describe it as such. AAC patent licensing is a
 distribution-time matter and is noted as an open item in the README only.
 
+## Vendored dr_flac decoder
+
+[`third-party/dr_flac/dr_flac.h`](third-party/dr_flac/dr_flac.h) is David Reid's
+single-file FLAC decoder, v0.13.4 from `mackron/dr_libs` commit
+`806ee9ada8ca9827b22f76827f739c290f37ba48`, copied unmodified. It is compiled
+into `libreecho-radiod` (through `third-party/dr_flac/dr_flac.c`) to decode the
+LOSSLESS FLAC that TIDAL serves. Its licence is the upstream choice of public
+domain (Unlicense) or **MIT No Attribution**; the text is in
+`third-party/dr_flac/LICENSE`. Provenance, the build flags and the SHA-256 are
+in `third-party/dr_flac/README.libreecho.md`.
+
+## TIDAL
+
+`src/tidal.c` talks to TIDAL's web API in the way the open-source clients
+`tidalapi` and `tiddl` do, using the client identity of TIDAL's own
+device-code apps. No TIDAL code is included, and LibreEcho is not affiliated
+with or endorsed by TIDAL.
+
 ## Pinned Ogg Opus decode stack
 
 `libreecho-radiod` can decode Ogg Opus local files via

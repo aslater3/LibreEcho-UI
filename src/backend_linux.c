@@ -2058,6 +2058,9 @@ static int radio_playing(struct le_backend *b, struct le_radio_status *o)
                           sizeof(o->station));
     if (json_get_bool(response, "opus", &v) > 0)
         o->opus = v;
+    o->queue_index = -1;
+    if (json_get_int(response, "queue_index", &v) > 0)
+        o->queue_index = v;
     return LE_OK;
 }
 

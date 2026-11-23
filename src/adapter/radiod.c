@@ -14,6 +14,9 @@
  *     (what BBC radio serves); fMP4, encrypted HLS and HE-AAC v2 are refused.
  *   - ICY (Shoutcast) stream metadata is read when the station sends it.
  *     Stations that do not send it have no track title and none is invented.
+ *   - TIDAL: the URL "tidal:queue" plays the track ids the web server wrote
+ *     to the TIDAL queue file, one LOSSLESS FLAC file at a time, fetched
+ *     through curl with the certificate verified (see play_tidal_queue).
  *
  * Playback runs in a forked child so a stalled or hostile server cannot block
  * the control socket, and so "stop" is a signal rather than cooperative
@@ -41,8 +44,10 @@
 #include "adapter.h"
 #include "../json.h"
 #include "../log.h"
+#include "../tidal.h"
 #include "../tls.h"
 #include "radio_aac.h"
+#include "radio_flac.h"
 #include "radio_hls.h"
 #include "radio_opus.h"
 #include "radio_resample.h"
@@ -90,6 +95,7 @@ static char playing_url[URL_MAX];
  */
 static char playing_title[TITLE_MAX];
 static char playing_station[TITLE_MAX];
+static long playing_index = -1;        /* position in the TIDAL queue */
 static int meta_fd = -1;               /* parent: read end of that pipe */
 static int meta_out = -1;              /* child: write end of that pipe */
 
@@ -1202,6 +1208,174 @@ done:
 }
 
 /*
+ * ---- TIDAL -------------------------------------------------------------
+ *
+ * The web server resolves what the owner picked (a track, album or playlist)
+ * to track ids and writes them to the queue file; "tidal:queue#N" starts at
+ * entry N. For each track the player asks TIDAL for a fresh signed URL --
+ * they last about an hour, so one is never reused across tracks -- and
+ * streams the FLAC through curl into dr_flac.
+ *
+ * A transfer that breaks mid-track (Wi-Fi drop, expired URL, a long pause
+ * tripping curl's stall floor) resumes from the byte it stopped at with a
+ * newly signed URL, so the decoder sees one continuous file. A track that
+ * cannot be played at all is skipped; three in a row, or a revoked sign-in,
+ * end the queue rather than spinning through it.
+ */
+#define TIDAL_RESUME_TRIES 5
+#define TIDAL_SKIP_LIMIT 3
+
+struct tidal_media {
+    struct le_tidal_paths paths;
+    const char *track_id;
+    char url[LE_TIDAL_URL_MAX];
+    long long offset;                   /* bytes of the file delivered */
+    int fd, pid;
+    int failures;                       /* consecutive, reset by progress */
+    int finished;                       /* the whole file has arrived */
+};
+
+static int is_tidal_url(const char *url)
+{
+    size_t n = strlen(LE_TIDAL_QUEUE_URL);
+
+    return url && !strncmp(url, LE_TIDAL_QUEUE_URL, n) &&
+           (url[n] == '\0' || url[n] == '#');
+}
+
+static long tidal_read(void *ctx, unsigned char *dst, size_t want)
+{
+    struct tidal_media *m = ctx;
+
+    if (m->finished)
+        return 0;                       /* the decoder may ask again */
+    for (;;) {
+        ssize_t n;
+        int rc;
+
+        if (m->fd < 0) {
+            if (m->failures >= TIDAL_RESUME_TRIES)
+                return -1;
+            if (m->failures) {
+                unsigned delay = 1000u << (m->failures - 1);
+
+                delay_ms(delay > 8000u ? 8000u : delay);
+                /* The old URL may simply have expired: sign a new one. */
+                if (le_tidal_stream(&m->paths, m->track_id, m->url,
+                                    sizeof(m->url), NULL) != LE_TIDAL_OK) {
+                    ++m->failures;
+                    continue;
+                }
+                le_log_info("radiod: tidal %s resuming at byte %lld",
+                            m->track_id, m->offset);
+            }
+            if (le_tidal_media_open(&m->paths, m->url, m->offset, &m->fd,
+                                    &m->pid) != LE_TIDAL_OK) {
+                ++m->failures;
+                continue;
+            }
+        }
+        do
+            n = read(m->fd, dst, want);
+        while (n < 0 && errno == EINTR);
+        if (n > 0) {
+            m->offset += n;
+            m->failures = 0;
+            return (long)n;
+        }
+        rc = le_tidal_media_close(m->fd, m->pid, n == 0);
+        m->fd = -1;
+        m->pid = -1;
+        if (n == 0 && rc == LE_TIDAL_OK) {
+            m->finished = 1;            /* curl delivered the whole file */
+            return 0;
+        }
+        ++m->failures;
+    }
+}
+
+static int tidal_sink(void *ctx, const short *pcm, int frames, int channels,
+                      int rate)
+{
+    return write_bus(*(int *)ctx, pcm, frames, channels, rate) < 0 ? -1 : 0;
+}
+
+static int play_tidal_queue(const char *url, const char *bus_path)
+{
+    static char ids[LE_TIDAL_QUEUE_MAX][LE_TIDAL_ID_MAX];
+    static struct tidal_media m;
+    size_t count = 0, i = 0;
+    int bus, skipped = 0;
+    const char *hash = strchr(url, '#');
+
+    le_tidal_default_paths(&m.paths);
+    if (le_tidal_queue_read(&m.paths, ids, LE_TIDAL_QUEUE_MAX, &count) !=
+        LE_TIDAL_OK) {
+        le_log_warn("radiod: tidal queue is empty");
+        return -1;
+    }
+    if (hash) {
+        char *end;
+        long start = strtol(hash + 1, &end, 10);
+
+        if (end == hash + 1 || *end || start < 0 || (size_t)start >= count)
+            return -1;
+        i = (size_t)start;
+    }
+    bus = open(bus_path, O_WRONLY | O_CLOEXEC);
+    if (bus < 0)
+        return -1;
+    publish_metadata('N', "TIDAL");
+    for (; i < count && skipped < TIDAL_SKIP_LIMIT; ++i) {
+        struct le_tidal_item meta;
+        char line[TITLE_MAX * 2 + 8], title[TITLE_MAX], index[24];
+        long long frames = 0;
+        int rc;
+
+        snprintf(index, sizeof(index), "%lu", (unsigned long)i);
+        publish_metadata('I', index);
+        m.track_id = ids[i];
+        m.offset = 0;
+        m.fd = -1;
+        m.pid = -1;
+        m.failures = 0;
+        m.finished = 0;
+        rc = le_tidal_stream(&m.paths, ids[i], m.url, sizeof(m.url), &meta);
+        if (rc == LE_TIDAL_SIGNED_OUT) {
+            le_log_warn("radiod: tidal sign-in is no longer valid");
+            break;
+        }
+        if (rc != LE_TIDAL_OK) {
+            le_log_warn("radiod: tidal track %s unavailable (%s)", ids[i],
+                        rc == LE_TIDAL_UNSUPPORTED ? "not plain FLAC"
+                                                   : "lookup failed");
+            ++skipped;
+            continue;
+        }
+        if (meta.artist[0])
+            snprintf(line, sizeof(line), "%s - %s", meta.artist, meta.title);
+        else
+            snprintf(line, sizeof(line), "%s", meta.title);
+        sanitise_text(title, sizeof(title), line, strlen(line));
+        publish_metadata('T', title);
+        le_radio_resample_reset(&resampler);
+        rc = le_radio_flac_play(tidal_read, &m, tidal_sink, &bus, &frames);
+        if (m.fd >= 0)
+            (void)le_tidal_media_close(m.fd, m.pid, 0);
+        m.fd = -1;
+        if (rc == LE_RADIO_FLAC_SINK)
+            break;                      /* the bus went away */
+        if (rc != LE_RADIO_FLAC_OK)
+            le_log_warn("radiod: tidal track %s stopped after %lld frames "
+                        "(%d)", ids[i], frames, rc);
+        skipped = frames > 0 ? 0 : skipped + 1;
+    }
+    close(bus);
+    le_log_info("radiod: tidal queue finished");
+    return 0;
+}
+
+/*
  * One line at a time out of the player's pipe. The parent never blocks on it:
  * the pipe is non-blocking at both ends, so a player producing nothing simply
  * leaves the last title in place.
@@ -1222,6 +1396,8 @@ static void apply_metadata_line(const char *line, size_t length)
         snprintf(playing_title, sizeof(playing_title), "%s", text);
     else if (line[0] == 'N')
         snprintf(playing_station, sizeof(playing_station), "%s", text);
+    else if (line[0] == 'I')
+        playing_index = strtol(text, NULL, 10);
 }
 
 static void drain_metadata(void)
@@ -1260,6 +1436,7 @@ static void forget_player(void)
     playing_url[0] = '\0';
     playing_title[0] = '\0';
     playing_station[0] = '\0';
+    playing_index = -1;
     if (meta_fd >= 0)
         close(meta_fd);
     meta_fd = -1;
@@ -1373,6 +1550,8 @@ static int start_player(const char *url, const char *bus_path)
         signal(SIGTERM, SIG_DFL);
         if (!running)
             _exit(0);
+        if (is_tidal_url(url))
+            _exit(play_tidal_queue(url, bus_path) < 0 ? 1 : 0);
         _exit(play_with_reconnect(url, bus_path) < 0 ? 1 : 0);
     }
     close(fds[1]);
@@ -1430,10 +1609,11 @@ static void build_status_json(char *data, size_t size)
 #endif
     snprintf(data, size,
              "{\"playing\":%s,\"paused\":%s,\"url\":\"%s\",\"title\":\"%s\","
-             "\"station\":\"%s\",\"opus\":%s}",
+             "\"station\":\"%s\",\"opus\":%s,\"queue_index\":%ld}",
              player_pid > 0 && !player_paused ? "true" : "false",
              player_pid > 0 && player_paused ? "true" : "false", escaped_url,
-             escaped_title, escaped_station, opus_capability);
+             escaped_title, escaped_station, opus_capability,
+             player_pid > 0 ? playing_index : -1L);
 }
 
 static int handle(char *message, char *response, size_t response_size,
@@ -1449,7 +1629,7 @@ static int handle(char *message, char *response, size_t response_size,
                                       "malformed request");
     reap_player();
     if (!strcmp(command, "status")) {
-        char data[URL_MAX * 2 + TITLE_MAX * 4 + 96];
+        char data[URL_MAX * 2 + TITLE_MAX * 4 + 160];
 
         build_status_json(data, sizeof(data));
         return le_adapter_respond_ok(response, response_size, id, data);
@@ -1460,13 +1640,28 @@ static int handle(char *message, char *response, size_t response_size,
             return le_adapter_respond_err(response, response_size, id,
                                           "url is required");
         if (url[0] != '/' && strncmp(url, "http://", 7) &&
-            strncmp(url, "https://", 8))
+            strncmp(url, "https://", 8) && !is_tidal_url(url))
             return le_adapter_respond_err(response, response_size, id,
                                           "url must be http:// or https://");
         if (start_player(url, bus_path) < 0)
             return le_adapter_respond_err(response, response_size, id,
                                           "playback could not start");
         le_log_info("radiod: playing %s", url);
+        return le_adapter_respond_ok(response, response_size, id, "{}");
+    }
+    if (!strcmp(command, "next") || !strcmp(command, "previous")) {
+        char target[64];
+        long index = playing_index + (!strcmp(command, "next") ? 1 : -1);
+
+        if (player_pid <= 0 || !is_tidal_url(playing_url) || playing_index < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "no queue is playing");
+        if (index < 0)
+            index = 0;
+        snprintf(target, sizeof(target), "%s#%ld", LE_TIDAL_QUEUE_URL, index);
+        if (start_player(target, bus_path) < 0)
+            return le_adapter_respond_err(response, response_size, id,
+                                          "playback could not start");
         return le_adapter_respond_ok(response, response_size, id, "{}");
     }
     if (!strcmp(command, "pause") || !strcmp(command, "resume")) {
@@ -1510,7 +1705,7 @@ int main(int argc, char **argv)
         fprintf(stderr, "radiod: cannot listen on %s\n", socket_path);
         return 1;
     }
-    le_log_info("radiod: ready socket=%s (http, https, mp3, aac, hls, icy metadata)",
+    le_log_info("radiod: ready socket=%s (http, https, mp3, aac, hls, icy metadata, tidal flac)",
                 socket_path);
     while (running) {
         char message[LE_ADAPTER_MSG_MAX], response[LE_ADAPTER_MSG_MAX];

@@ -29,6 +29,7 @@
 #include "peer_settings.h"
 #include "peer_announce.h"
 #include "owner_eq.h"
+#include "tidal.h"
 #include "adapter/mdns_client.h"
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -3205,6 +3206,211 @@ static void voice_clip_delete_route(struct api_response*r, const char*id){
     ok(r, "{\"deleted\":true}");
 }
 
+/*
+ * TIDAL. Sign-in is TIDAL's device-code flow: POST /login returns a
+ * link.tidal.com address and a short code, the owner approves the device on
+ * their phone, and the page polls POST /login/poll until it is done. The
+ * tokens never leave this device: no route returns them, and they live in a
+ * 0600 file outside the backed-up configuration.
+ *
+ * Every route here may wait on TIDAL, so http_server.c runs them in an API
+ * worker process rather than the event loop.
+ */
+static int tidal_http_status(int rc){
+    switch(rc){
+    case LE_TIDAL_INVALID: return 400;
+    case LE_TIDAL_SIGNED_OUT: return 401;
+    case LE_TIDAL_NOT_FOUND: return 404;
+    case LE_TIDAL_EXPIRED: return 410;
+    case LE_TIDAL_UNSUPPORTED: return 415;
+    case LE_TIDAL_NETWORK: return 502;
+    default: return 503;
+    }
+}
+
+static void tidal_err(struct api_response*r,int rc,const char*what){
+    const char*why;
+    char msg[192];
+
+    switch(rc){
+    case LE_TIDAL_INVALID: why="the request was not valid"; break;
+    case LE_TIDAL_SIGNED_OUT: why="this speaker is not signed in to TIDAL"; break;
+    case LE_TIDAL_NOT_FOUND: why="TIDAL has no such item"; break;
+    case LE_TIDAL_EXPIRED: why="the sign-in code expired; start again"; break;
+    case LE_TIDAL_UNSUPPORTED: why="TIDAL did not offer a plain FLAC stream"; break;
+    case LE_TIDAL_NETWORK: why="TIDAL could not be reached"; break;
+    default: why="the device could not complete it"; break;
+    }
+    snprintf(msg,sizeof(msg),"%s: %s",what,why);
+    err(r,tidal_http_status(rc),rc==LE_TIDAL_INVALID?LE_INVALID:
+        rc==LE_TIDAL_SIGNED_OUT||rc==LE_TIDAL_EXPIRED?LE_BUSY:LE_IO,msg);
+}
+
+static const char*tidal_kind_name(enum le_tidal_kind kind){
+    return kind==LE_TIDAL_ALBUM?"album":kind==LE_TIDAL_PLAYLIST?"playlist":"track";
+}
+
+static void tidal_status_json(struct api_response*r,const struct le_tidal_paths*paths){
+    struct le_tidal_status st;
+    char user[LE_TIDAL_TEXT_MAX*2],link[256],code[64],country[16],login[512];
+    int available=le_tidal_available(paths);
+
+    if(le_tidal_status(paths,&st)!=LE_TIDAL_OK)memset(&st,0,sizeof(st));
+    json_escape(user,sizeof(user),st.username);
+    json_escape(country,sizeof(country),st.country);
+    if(st.login_pending){
+        json_escape(link,sizeof(link),st.login.link);
+        json_escape(code,sizeof(code),st.login.user_code);
+        snprintf(login,sizeof(login),
+                 "{\"link\":\"%s\",\"user_code\":\"%s\",\"expires_at\":%lld,\"interval\":%d}",
+                 link,code,st.login.expires_at,st.login.interval);
+    }else
+        strcpy(login,"null");
+    out(r,200,"{\"ok\":true,\"data\":{\"available\":%s,\"signed_in\":%s,"
+        "\"username\":\"%s\",\"country\":\"%s\",\"quality\":\"LOSSLESS\","
+        "\"login\":%s},\"error\":null}",
+        available?"true":"false",st.signed_in?"true":"false",user,country,login);
+}
+
+static size_t tidal_items_json(char*o,size_t size,const struct le_tidal_item*items,size_t count){
+    size_t used=0,i;
+    int n;
+
+    if(size<3)return 0;
+    o[used++]='[';
+    for(i=0;i<count;i++){
+        char id[LE_TIDAL_ID_MAX*2],title[LE_TIDAL_TEXT_MAX*2],artist[LE_TIDAL_TEXT_MAX*2],
+             album[LE_TIDAL_TEXT_MAX*2],image[160];
+        const struct le_tidal_item*it=&items[i];
+
+        json_escape(id,sizeof(id),it->id);
+        json_escape(title,sizeof(title),it->title);
+        json_escape(artist,sizeof(artist),it->artist);
+        json_escape(album,sizeof(album),it->album);
+        json_escape(image,sizeof(image),it->image);
+        n=snprintf(o+used,size-used,
+                   "%s{\"kind\":\"%s\",\"id\":\"%s\",\"title\":\"%s\",\"artist\":\"%s\","
+                   "\"album\":\"%s\",\"image\":\"%s\",\"duration\":%d,\"tracks\":%d}",
+                   i?",":"",tidal_kind_name(it->kind),id,title,artist,album,image,
+                   it->duration,it->tracks);
+        if(n<0||(size_t)n>=size-used-1)break;
+        used+=(size_t)n;
+    }
+    o[used++]=']';
+    o[used]='\0';
+    return used;
+}
+
+static void tidal_search_route(struct api_context*c,const struct api_request*q,
+                               struct api_response*r,const struct le_tidal_paths*paths){
+    static struct le_tidal_results res;
+    static char tracks[24000],albums[24000],playlists[24000];
+    char query[160];
+    int rc;
+
+    (void)c;
+    if(json_get_string(q->body,"query",query,sizeof(query))<1||!query[0]){
+        err(r,400,LE_INVALID,"query is required");return;}
+    rc=le_tidal_search(paths,query,&res);
+    if(rc){tidal_err(r,rc,"Search failed");return;}
+    tidal_items_json(tracks,sizeof(tracks),res.tracks,res.track_count);
+    tidal_items_json(albums,sizeof(albums),res.albums,res.album_count);
+    tidal_items_json(playlists,sizeof(playlists),res.playlists,res.playlist_count);
+    out(r,200,"{\"ok\":true,\"data\":{\"tracks\":%s,\"albums\":%s,\"playlists\":%s},\"error\":null}",
+        tracks,albums,playlists);
+}
+
+static void tidal_play_route(struct api_context*c,const struct api_request*q,
+                             struct api_response*r,const struct le_tidal_paths*paths){
+    static char ids[LE_TIDAL_QUEUE_MAX][LE_TIDAL_ID_MAX];
+    char kind_name[16],id[LE_TIDAL_ID_MAX],url[48];
+    enum le_tidal_kind kind;
+    size_t count=0;
+    int start=0,rc;
+
+    if(json_get_string(q->body,"kind",kind_name,sizeof(kind_name))<1||
+       json_get_string(q->body,"id",id,sizeof(id))<1){
+        err(r,400,LE_INVALID,"kind and id are required");return;}
+    if(!strcmp(kind_name,"track"))kind=LE_TIDAL_TRACK;
+    else if(!strcmp(kind_name,"album"))kind=LE_TIDAL_ALBUM;
+    else if(!strcmp(kind_name,"playlist"))kind=LE_TIDAL_PLAYLIST;
+    else{err(r,400,LE_INVALID,"kind must be track, album or playlist");return;}
+    if(json_get_int(q->body,"start",&start)<1)start=0;
+    rc=le_tidal_track_ids(paths,kind,id,ids,LE_TIDAL_QUEUE_MAX,&count);
+    if(rc){tidal_err(r,rc,"TIDAL could not list the tracks");return;}
+    if(!count){err(r,404,LE_INVALID,"There is nothing playable there");return;}
+    if(start<0||(size_t)start>=count){err(r,400,LE_INVALID,"start is past the end");return;}
+    rc=le_tidal_queue_write(paths,ids,count);
+    if(rc){tidal_err(r,rc,"The play queue could not be saved");return;}
+    snprintf(url,sizeof(url),"%s#%d",LE_TIDAL_QUEUE_URL,start);
+    rc=le_radio_play(c->backend,url);
+    if(rc){err(r,rc==LE_NOT_SUPPORTED?501:503,rc,rc==LE_NOT_SUPPORTED?
+               "Stream playback is not available on this image":"Playback could not start");return;}
+    api_log(c,"info","TIDAL playback started");
+    out(r,200,"{\"ok\":true,\"data\":{\"queued\":%zu,\"start\":%d},\"error\":null}",count,start);
+}
+
+/* Skip within the TIDAL queue radiod is playing. */
+static void tidal_skip_route(struct api_context*c,struct api_response*r,int step){
+    struct le_radio_status radio;
+    char url[48];
+    long index;
+    int rc;
+
+    if(le_radio_playing(c->backend,&radio)!=LE_OK||!radio.playing||
+       strncmp(radio.url,LE_TIDAL_QUEUE_URL,strlen(LE_TIDAL_QUEUE_URL))||radio.queue_index<0){
+        err(r,409,LE_BUSY,"No TIDAL queue is playing");return;}
+    index=radio.queue_index+step;
+    if(index<0)index=0;
+    snprintf(url,sizeof(url),"%s#%ld",LE_TIDAL_QUEUE_URL,index);
+    rc=le_radio_play(c->backend,url);
+    if(rc){err(r,503,rc,"Playback could not move");return;}
+    out(r,200,"{\"ok\":true,\"data\":{\"queue_index\":%ld},\"error\":null}",index);
+}
+
+static int tidal_route(struct api_context*c,const struct api_request*q,struct api_response*r){
+    struct le_tidal_paths paths;
+    struct le_tidal_login login;
+    const char*p=q->path;
+    int post=!strcmp(q->method,"POST"),rc;
+
+    if(strcmp(p,"/api/v1/tidal")&&
+       strncmp(p,"/api/v1/tidal/",strlen("/api/v1/tidal/")))
+        return 0;
+    le_tidal_default_paths(&paths);
+    if(!strcmp(p,"/api/v1/tidal")){
+        if(strcmp(q->method,"GET")){method_not_allowed(r);return 1;}
+        tidal_status_json(r,&paths);return 1;}
+    if(!post){method_not_allowed(r);return 1;}
+    if(!le_tidal_available(&paths)){
+        err(r,501,LE_NOT_SUPPORTED,"This image has no HTTPS client for TIDAL");return 1;}
+    if(!strcmp(p,"/api/v1/tidal/login")){
+        rc=le_tidal_login_start(&paths,&login);
+        if(rc){tidal_err(r,rc,"TIDAL sign-in could not start");return 1;}
+        api_log(c,"info","TIDAL sign-in started");
+        tidal_status_json(r,&paths);return 1;}
+    if(!strcmp(p,"/api/v1/tidal/login/poll")){
+        rc=le_tidal_login_poll(&paths);
+        if(rc==LE_TIDAL_OK)api_log(c,"info","TIDAL sign-in completed");
+        else if(rc!=LE_TIDAL_PENDING){tidal_err(r,rc,"TIDAL sign-in");return 1;}
+        tidal_status_json(r,&paths);return 1;}
+    if(!strcmp(p,"/api/v1/tidal/logout")){
+        struct le_radio_status radio;
+
+        if(le_radio_playing(c->backend,&radio)==LE_OK&&radio.playing&&
+           !strncmp(radio.url,LE_TIDAL_QUEUE_URL,strlen(LE_TIDAL_QUEUE_URL)))
+            (void)le_radio_stop(c->backend);
+        rc=le_tidal_logout(&paths);
+        if(rc){tidal_err(r,rc,"Signing out");return 1;}
+        api_log(c,"info","Signed out of TIDAL");
+        tidal_status_json(r,&paths);return 1;}
+    if(!strcmp(p,"/api/v1/tidal/search")){tidal_search_route(c,q,r,&paths);return 1;}
+    if(!strcmp(p,"/api/v1/tidal/play")){tidal_play_route(c,q,r,&paths);return 1;}
+    if(!strcmp(p,"/api/v1/tidal/next")){tidal_skip_route(c,r,1);return 1;}
+    if(!strcmp(p,"/api/v1/tidal/previous")){tidal_skip_route(c,r,-1);return 1;}
+    err(r,404,LE_INVALID,"Unknown TIDAL route");return 1;
+}
+
 static void voice_clips_clear_route(struct api_response*r){
     char data[32];
     int removed = le_voice_clip_clear(le_voice_clip_directory());
@@ -3295,6 +3501,7 @@ if(!strcmp(p,"/api/v1/audio/test")&&!strcmp(q->method,"POST")){rc=le_play_test_t
     if(want_aed>0)api_log(c,"info",av?"Acoustic event detection preference enabled (not yet implemented)":"Acoustic event detection preference disabled");
    features_json(c,r);return;}
   method_not_allowed(r);return;}
+ if(tidal_route(c,q,r))return;
  if(!strcmp(p,"/api/v1/integrations/radio/play")&&!strcmp(q->method,"POST")){
   char word[32];size_t i;
   if(json_get_string(q->body,"word",word,sizeof(word))<1||!word[0]){err(r,400,LE_INVALID,"word is required");return;}

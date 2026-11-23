@@ -3043,6 +3043,309 @@
     }
    }
   },
+  "/tidal": {
+   "get": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "TIDAL sign-in state",
+    "description": "Whether this speaker is signed in to TIDAL, as whom, and any sign-in waiting for approval (`login`: `link`, `user_code`, `expires_at`, `interval`, else null). `available` is false when the image has no HTTPS client. Playback is LOSSLESS (16-bit FLAC). No route ever returns a TIDAL token.",
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/tidal/login": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Start TIDAL sign-in",
+    "description": "Asks TIDAL for a device code. The owner opens `login.link` (link.tidal.com), logs in and approves `login.user_code`; poll `/tidal/login/poll` every `login.interval` seconds. The response has the shape of GET /tidal.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/tidal/login/poll": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Finish TIDAL sign-in",
+    "description": "Asks TIDAL once whether the code has been approved. Answers with the shape of GET /tidal: `signed_in` true when done, `login` still set while waiting; 410 when the code expired.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "410": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/tidal/logout": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Sign out of TIDAL",
+    "description": "Stops TIDAL playback, cancels any pending sign-in and deletes the stored tokens.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/tidal/search": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Search TIDAL",
+    "description": "Tracks, albums and playlists matching `query`. 401 when not signed in.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "query"
+        ],
+        "properties": {
+         "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 150
+         }
+        },
+        "example": {
+         "query": "daft punk"
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/tidal/play": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Play from TIDAL on this speaker",
+    "description": "Queues a track, or every track of an album or playlist (up to 200), and starts radiod at `start` (0-based). TIDAL streams LOSSLESS FLAC; a track TIDAL only offers encrypted or in another format is skipped.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "requestBody": {
+     "required": true,
+     "content": {
+      "application/json": {
+       "schema": {
+        "type": "object",
+        "required": [
+         "kind",
+         "id"
+        ],
+        "properties": {
+         "kind": {
+          "type": "string",
+          "enum": [
+           "track",
+           "album",
+           "playlist"
+          ]
+         },
+         "id": {
+          "type": "string",
+          "maxLength": 47,
+          "pattern": "^[A-Za-z0-9-]+$"
+         },
+         "start": {
+          "type": "integer",
+          "minimum": 0
+         }
+        },
+        "example": {
+         "kind": "album",
+         "id": "75413011"
+        }
+       }
+      }
+     }
+    },
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "400": {
+      "$ref": "#/components/responses/Error"
+     },
+     "401": {
+      "$ref": "#/components/responses/Error"
+     },
+     "404": {
+      "$ref": "#/components/responses/Error"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "501": {
+      "$ref": "#/components/responses/Error"
+     },
+     "502": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/tidal/next": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Next TIDAL track",
+    "description": "Moves the playing TIDAL queue on one track. 409 when no TIDAL queue is playing.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
+  "/tidal/previous": {
+   "post": {
+    "tags": [
+     "Integrations"
+    ],
+    "summary": "Previous TIDAL track",
+    "description": "Moves the playing TIDAL queue back one track. 409 when no TIDAL queue is playing.",
+    "parameters": [
+     {
+      "$ref": "#/components/parameters/Csrf"
+     }
+    ],
+    "responses": {
+     "200": {
+      "$ref": "#/components/responses/Success"
+     },
+     "405": {
+      "$ref": "#/components/responses/Error"
+     },
+     "409": {
+      "$ref": "#/components/responses/Error"
+     },
+     "503": {
+      "$ref": "#/components/responses/Error"
+     }
+    }
+   }
+  },
   "/integrations/{id}": {
    "put": {
     "tags": [
