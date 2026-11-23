@@ -3581,7 +3581,8 @@ static int handle_request(struct daemon_context *ctx, int fd,
             !strcmp(pattern, "solid")) {
             int kind = !strcmp(pattern, "pulse") ? PATTERN_PULSE :
                        !strcmp(pattern, "solid") ? PATTERN_SOLID : PATTERN_FLASH;
-            int pattern_profile;
+            int pattern_profile, have_profile, profile_colour = 0;
+            struct json_span profile_colour_span;
 
             if (get_arg_unsigned(&request, "r", &r, 255) != 0 ||
                 get_arg_unsigned(&request, "g", &g, 255) != 0 ||
@@ -3590,6 +3591,17 @@ static int handle_request(struct daemon_context *ctx, int fd,
                 get_arg_unsigned(&request, "repeats", &repeats, 100) != 0)
                 return send_response(fd, request.id, 0, NULL,
                                      "pattern requires r, g, b, brightness and repeats");
+            have_profile = get_arg_profile_field(&request, "profile",
+                                                  &pattern_profile) == 0;
+            if (json_object_find(request.args, "profile_colour",
+                                 &profile_colour_span) == 1 &&
+                json_get_boolean(request.args, "profile_colour",
+                                  &profile_colour) != 0)
+                return send_response(fd, request.id, 0, NULL,
+                                     "profile_colour must be a boolean");
+            if (profile_colour && !have_profile)
+                return send_response(fd, request.id, 0, NULL,
+                                     "profile_colour requires a valid profile");
             /*
              * An optional "profile" takes the brightness from that state
              * theme instead of the literal above. The wake indicator uses it
@@ -3599,19 +3611,25 @@ static int handle_request(struct daemon_context *ctx, int fd,
              * the settings page already offers, rather than through a knob
              * invented for this.
              *
-             * Only the brightness is taken. The colour stays the caller's, so
+             * By default only brightness is taken. Colour stays the caller's, so
              * the wake pulse remains red rather than becoming the theme's idle
              * colour. A profile brightness of zero is honoured: someone who
-             * turns the indicator off means it.
+             * turns the indicator off means it. Voice state themes can opt into
+             * the saved RGB too with profile_colour=true; this leaves fixed-red
+             * wake indicators and explicit HA light colours unchanged.
              *
              * Unlike "animate", nothing here is written to state.current or
              * persisted -- a transient indicator must leave the saved ring
              * settings as it found them.
              */
-            if (get_arg_profile_field(&request, "profile",
-                                      &pattern_profile) == 0)
+            if (have_profile)
                 brightness =
                     (unsigned int)ctx->state.profiles[pattern_profile].brightness;
+            if (profile_colour) {
+                r = ctx->state.profiles[pattern_profile].r;
+                g = ctx->state.profiles[pattern_profile].g;
+                b = ctx->state.profiles[pattern_profile].b;
+            }
             colour.r = r;
             colour.g = g;
             colour.b = b;

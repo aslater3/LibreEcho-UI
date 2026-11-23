@@ -177,12 +177,12 @@ static int mic_muted(void){return S.local_mute_gate||S.muted||S.privacy!=0||!S.l
 /* Turn indicators use ledd's owner-scoped pattern layer, never "animate":
  * animate persists the theme as the ring's saved colour and breathes until
  * another command replaces it, and nothing ever ended it -- a failed turn left
- * the ring pulsing the error colour indefinitely. Colours are ledd's default
- * themes; brightness follows the user's theme. Errors flash briefly and expire;
+ * the ring pulsing the error colour indefinitely. Colour and brightness follow
+ * the user's saved ledd state theme. Errors flash briefly and expire;
  * idle releases only this owner, leaving the saved ring settings untouched. */
 static void profile(const char *name){char a[192];if(!strcmp(name,"idle")){(void)job(S.led_path,"pattern","{\"name\":\"stop\",\"owner\":\"esphome\"}",0,0);return;}
  int error=!strcmp(name,"error");unsigned r=72,g=185,b=255;if(!strcmp(name,"thinking")){r=168;g=115;b=239;}else if(error){r=239;g=80;b=80;}
- snprintf(a,sizeof a,"{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":100,\"repeats\":%d,\"profile\":\"%s\",\"owner\":\"esphome\"}",error?"flash":"pulse",r,g,b,error?3:0,name);(void)job(S.led_path,"pattern",a,0,0);}
+ snprintf(a,sizeof a,"{\"name\":\"%s\",\"r\":%u,\"g\":%u,\"b\":%u,\"brightness\":100,\"repeats\":%d,\"profile\":\"%s\",\"profile_colour\":true,\"owner\":\"esphome\"}",error?"flash":"pulse",r,g,b,error?3:0,name);(void)job(S.led_path,"pattern",a,0,0);}
 static void light_state(struct client *c){unsigned char b[16];struct ep_writer w={b,sizeof b,0,0};float f=(float)(S.lux<0?0:S.lux);uint32_t bits;memcpy(&bits,&f,4);ep_fixed32(&w,1,LIGHT_KEY);ep_fixed32(&w,2,bits);if(S.lux<0)ep_uint(&w,3,1);(void)send_writer(c,25,&w);}
 /* Room level (#399): a level window is computed from the stream frames ring_frame() already receives, so there
  * is no second capture or subscriber. Muted, stale or disabled input reads as missing; only the number leaves. */
