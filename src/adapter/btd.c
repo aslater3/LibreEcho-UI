@@ -13,6 +13,7 @@
 
 #include "adapter.h"
 #include "log.h"
+#include "../timezone.h"
 
 #include "bt_adv_proxy.h"
 #include "bt_mgmt_events.h"
@@ -2325,6 +2326,17 @@ static int handle_request(struct bt_context *context, char *message,
                                            "advertisement batch too large");
         return le_adapter_respond_ok(response, response_size, id, batch);
     }
+    if (!strcmp(command, "clock_resync")) {
+        /*
+         * Force the next connect to send timeinfo.  Exposed as a button in
+         * the control centre so the owner can re-set the clock after a DST
+         * change or a battery swap without waiting for the half hour.
+         */
+        (void)unlink("/data/libreecho/config/gadget.timeinfo");
+        context->gadget.timeinfo_valid = 0;
+        return le_adapter_respond_ok(response, response_size, id,
+                                     "{\"resync\":true}");
+    }
     if (!strcmp(command, "scan") || !strcmp(command, "scan_stop")) {
         if (!strcmp(command, "scan") && context->proxy_started) {
             /* Hand the radio from the relay to the UI scan. */
@@ -2649,6 +2661,7 @@ int main(int argc, char **argv)
         }
         if (total == 2 && (pollfds[1].revents & POLLIN))
             drain_mgmt(&context);
+        (void)le_timezone_follow(NULL);
         if (profile_count) {
             le_profile_spp_refresh_time(&context.profiles, time(NULL));
             le_profile_poll_events(&context.profiles, pollfds + profile_base,

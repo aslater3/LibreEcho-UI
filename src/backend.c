@@ -35,3 +35,5 @@ int le_get_alarm_sunrise(struct le_backend*b,int*m){return b&&b->ops->timer_sunr
 int le_set_owner_eq(struct le_backend*b,const char*preset,const int halves[4]){const char*canonical;if(!halves||!le_eq_valid_halves(halves))return LE_INVALID;canonical=le_eq_canonical_preset(preset,halves);if(!canonical)return LE_INVALID;return b&&b->ops->owner_eq?b->ops->owner_eq(b,canonical,halves):LE_NOT_SUPPORTED;}
 int le_set_speaker_boost(struct le_backend*b,int db){if(!le_boost_valid(db))return LE_INVALID;return b&&b->ops->speaker_boost?b->ops->speaker_boost(b,db):LE_NOT_SUPPORTED;}
 int le_set_do_not_disturb(struct le_backend*b,int enabled){return b&&b->ops->do_not_disturb?b->ops->do_not_disturb(b,enabled):LE_NOT_SUPPORTED;}
+
+int le_bluetooth_clock_resync(struct le_backend*b){return b&&b->ops->bluetooth_clock_resync?b->ops->bluetooth_clock_resync(b):LE_NOT_SUPPORTED;}

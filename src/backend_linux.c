@@ -2361,6 +2361,12 @@ static int bluetooth_connectable(struct le_backend *b, int enabled)
     return bluetooth_controller_setting(b, "set_connectable", enabled);
 }
 
+static int bluetooth_clock_resync(struct le_backend *b)
+{
+    (void)b;
+    return adapter_json_command(LE_ADAPTER_BLUETOOTH_SOCK, "clock_resync", NULL);
+}
+
 static int bluetooth_pairing_mode(struct le_backend *b, int enabled)
 {
     return bluetooth_controller_setting(b, "pairing_mode", enabled);
@@ -3578,6 +3584,7 @@ static const struct le_backend_ops ops = {
     bluetooth, bluetooth_set, bluetooth_scan, bluetooth_pair,
     bluetooth_unpair, bluetooth_disconnect, bluetooth_pairing_response,
     bluetooth_discoverable, bluetooth_connectable, bluetooth_pairing_mode,
+    bluetooth_clock_resync,
     airplay, airplay_set, playback,
     linux_reboot, linux_shutdown, factory_reset, tick, control,
     spotify, spotify_set,

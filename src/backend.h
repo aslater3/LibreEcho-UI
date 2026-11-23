@@ -226,6 +226,8 @@ int le_recovery_stop(struct le_backend*);
 int le_get_wake_word_state(struct le_backend*,struct le_wake_word_state*); int le_set_wake_word(struct le_backend*,const char*); int le_set_wake_word_sensitivity(struct le_backend*,int); int le_test_wake_word(struct le_backend*);
 int le_get_bluetooth_state(struct le_backend*,struct le_bluetooth_state*); int le_set_bluetooth_enabled(struct le_backend*,int);
 int le_bluetooth_scan(struct le_backend*,int); int le_bluetooth_pair(struct le_backend*,const char*,int,int); int le_bluetooth_unpair(struct le_backend*,const char*,int); int le_bluetooth_disconnect(struct le_backend*,const char*,int); int le_bluetooth_pairing_response(struct le_backend*,const char*,int,const char*,unsigned int,const char*); int le_bluetooth_set_discoverable(struct le_backend*,int); int le_bluetooth_set_connectable(struct le_backend*,int); int le_bluetooth_set_pairing_mode(struct le_backend*,int);
+/* Force the wall clock to re-sync (the 204 s sweep). */
+int le_bluetooth_clock_resync(struct le_backend*);
 int le_get_airplay_state(struct le_backend*,struct le_airplay_state*); int le_set_airplay_enabled(struct le_backend*,int);
 int le_get_sendspin_state(struct le_backend*,struct le_sendspin_state*); int le_set_sendspin_enabled(struct le_backend*,int);
 /* The player's pairing token, for the authenticated pairing flow only. */
