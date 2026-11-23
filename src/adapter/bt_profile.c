@@ -3081,6 +3081,7 @@ int le_profile_test_init(struct le_profiles *p, const char *service_name)
     p->sdp_listener = -1;
     p->avdtp_listener = -1;
     p->avrcp_listener = -1;
+    p->spp_listener = -1;
     p->media_bus_fd = -1;
     p->volume_percent = -1;
     snprintf(p->service_name, sizeof(p->service_name), "%s",
