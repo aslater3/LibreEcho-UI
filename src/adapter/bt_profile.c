@@ -231,11 +231,15 @@ struct le_avrcp_session {
  * One Alexa Gadget (e.g. an Echo Wall Clock) on SPP/RFCOMM 4.  `buf` holds
  * partial AGT frames until a complete one arrives.
  */
+#define LE_GADGET_HANDSHAKE_TIMEOUT_SECONDS 15
+
 struct le_spp_session {
     int fd;
     uint8_t buf[1024];
     size_t used;
     int offered;             /* Discover sent for this connection */
+    int answered;            /* Discover.Response received for this connection */
+    time_t opened_at;        /* when Discover was sent (handshake timeout) */
     uint8_t seq;             /* next frame sequence number */
     struct le_gadget *gadget; /* wall-clock state, NULL when not hosting */
     struct le_gadget_alert alert_sent[LE_GADGET_MAX_ALERTS];
@@ -1731,17 +1735,79 @@ static void avrcp_send_volume_changed(struct le_avrcp_session *session,
                    status, payload, sizeof(payload));
 }
 
+static void spp_close_session(struct le_spp_session *session,
+                              const char *reason)
+{
+    if (!session || session->fd < 0)
+        return;
+    if (reason)
+        le_log_info("btd-profiles: gadget channel closed (%s)", reason);
+    close(session->fd);
+    session->fd = -1;
+    session->used = 0;
+    session->offered = 0;
+    session->answered = 0;
+    session->opened_at = 0;
+    session->seq = 0;
+    session->alert_bytes = 0;
+    memset(session->alert_sent, 0, sizeof(session->alert_sent));
+}
+
+/*
+ * Write framed bytes to a gadget session with a short POLLOUT / POLLHUP
+ * liveness check so a dead or stalled peer is reaped immediately rather than
+ * blocking btd or silently absorbing writes into a hung-up socket.
+ */
+static int spp_write_raw(struct le_spp_session *session, const uint8_t *data,
+                         size_t length)
+{
+    size_t sent = 0;
+
+    if (!session || session->fd < 0 || !data || length == 0)
+        return -1;
+    while (sent < length) {
+        struct pollfd pfd;
+        int ready;
+        ssize_t written;
+
+        pfd.fd = session->fd;
+        pfd.events = POLLOUT;
+        pfd.revents = 0;
+        do {
+            ready = poll(&pfd, 1, 100);
+        } while (ready < 0 && errno == EINTR);
+        if (ready <= 0) {
+            spp_close_session(session, ready == 0 ? "write timeout"
+                                                  : strerror(errno));
+            return -1;
+        }
+        if (pfd.revents & (POLLHUP | POLLERR | POLLNVAL)) {
+            spp_close_session(session, "peer hangup/error before write");
+            return -1;
+        }
+        do {
+            written = send(session->fd, data + sent, length - sent,
+                           MSG_NOSIGNAL);
+        } while (written < 0 && errno == EINTR);
+        if (written <= 0) {
+            spp_close_session(session, written < 0 ? strerror(errno)
+                                                   : "zero write");
+            return -1;
+        }
+        sent += (size_t)written;
+    }
+    return 0;
+}
+
 /*
  * Send one AGT directive to a gadget.  The sequence number skips the
- * framing's reserved bytes, and a failed write ends the session so the
- * caller's next poll reaps it.
+ * framing's reserved bytes, and a failed write reaps the session immediately.
  */
 static int spp_send(struct le_spp_session *session, const uint8_t *message,
                     size_t message_length)
 {
     uint8_t frame[LE_AGT_FRAME_MAX];
     size_t frame_length;
-    ssize_t written;
 
     if (!session || session->fd < 0 || message_length == 0)
         return -1;
@@ -1753,8 +1819,7 @@ static int spp_send(struct le_spp_session *session, const uint8_t *message,
                                 message_length);
     if (!frame_length)
         return -1;
-    written = write(session->fd, frame, frame_length);
-    return written == (ssize_t)frame_length ? 0 : -1;
+    return spp_write_raw(session, frame, frame_length);
 }
 
 /* Local wall-clock time as ISO-8601 with a colon in the offset. */
@@ -1911,6 +1976,8 @@ static int spp_send_bootstrap(struct le_spp_session *session)
                  le_agt_build_clear_indicator(message, sizeof(message))) < 0)
         return -1;
     session->offered = 1;
+    session->answered = 0;
+    session->opened_at = time(NULL);
     return 0;
 }
 
@@ -1937,19 +2004,10 @@ static int spp_open_session(struct le_profiles *p, const uint8_t *address,
 
     if (!sessions || !address || !p->gadget)
         return -1;
+    /* One gadget at a time; a fresh link supersedes any open one. */
     for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
         if (sessions->spp[i].fd >= 0)
-            session = &sessions->spp[i];
-    }
-    if (session) {
-        /* One gadget at a time; a fresh link supersedes the old one. */
-        le_log_info("btd-profiles: replacing open gadget channel");
-        close(session->fd);
-        session->fd = -1;
-        session->used = 0;
-        session->offered = 0;
-        session->seq = 0;
-        session = NULL;
+            spp_close_session(&sessions->spp[i], "replaced");
     }
     for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i)
         if (sessions->spp[i].fd < 0) {
@@ -2004,12 +2062,14 @@ static int spp_open_session(struct le_profiles *p, const uint8_t *address,
     session->fd = fd;
     session->used = 0;
     session->offered = 0;
+    session->answered = 0;
+    session->opened_at = 0;
     session->seq = 0;
     session->gadget = p->gadget;
     session->alert_bytes = 0;
+    memset(session->alert_sent, 0, sizeof(session->alert_sent));
     if (spp_send_bootstrap(session) != 0) {
-        close(fd);
-        session->fd = -1;
+        spp_close_session(session, "bootstrap failed");
         return -1;
     }
     if (out)
@@ -2075,10 +2135,12 @@ static void flush_deferred_deletes(struct le_profile_sessions *sessions,
 
             if (sessions->spp[slot].fd < 0 || !sessions->spp[slot].offered)
                 continue;
-            (void)spp_send(&sessions->spp[slot], message,
-                           le_agt_build_delete_alert(
-                               message, sizeof(message),
-                               deferred_delete[i].token));
+            if (spp_send(&sessions->spp[slot], message,
+                         le_agt_build_delete_alert(
+                             message, sizeof(message),
+                             deferred_delete[i].token)) == 0)
+                le_log_info("btd-profiles: deferred DeleteAlert for %s",
+                            deferred_delete[i].token);
         }
         deferred_delete[i].token[0] = '\0';
         deferred_delete[i].at = 0;
@@ -2096,11 +2158,20 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
     int reminder_spoke = 0;
     static int was_pulsing;
     static time_t next_pulse;
+    static time_t pulse_clear_at;
     time_t now = time(NULL);
     int i;
 
     if (!sessions || !gadget || !timers_json)
         return;
+
+    /* Reap any gadget channel that never answered Discover within 15 s. */
+    for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
+        struct le_spp_session *s = &sessions->spp[i];
+        if (s->fd >= 0 && s->offered && !s->answered && s->opened_at > 0 &&
+            now - s->opened_at >= LE_GADGET_HANDSHAKE_TIMEOUT_SECONDS)
+            spp_close_session(s, "Discover.Response timeout");
+    }
 
     /* The response is a flat list of small objects; read the three fields the
      * clock needs rather than linking a JSON parser for this shape. */
@@ -2249,15 +2320,22 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
             }
         }
         if (ringing > 0 || reminder_spoke) {
-            time_t now_pulse = time(NULL);
+            time_t now_pulse = now;
 
             /*
              * The clock pulses for ~10 s per `active` and then goes dark, so a
              * ringing alert needs it re-sent about every 12 s (PROTOCOL.md).
-             * Repeating also covers a link that comes up mid-ring, which the
-             * old one-shot flag missed entirely.
+             * A reminder is dismissed immediately by timerd as it speaks, so
+             * hold `timers=cleared` for LE_GADGET_PULSE_CLEAR_SECONDS (11 s);
+             * a countdown/alarm stays `ringing > 0` until stopped, so it
+             * clears immediately once `ringing` drops back to 0.
              */
-            if (now_pulse >= next_pulse) {
+            if (reminder_spoke)
+                pulse_clear_at = now_pulse + LE_GADGET_PULSE_CLEAR_SECONDS;
+            else
+                pulse_clear_at = 0;
+
+            if (reminder_spoke || now_pulse >= next_pulse) {
                 next_pulse = now_pulse + 12;
                 le_gadget_set_timers_active(gadget, 1);
                 was_pulsing = 1;
@@ -2273,22 +2351,26 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                         le_log_info("btd-profiles: timers=active sent");
                 }
             }
-        } else if (was_pulsing) {
+        } else if (was_pulsing && now >= pulse_clear_at) {
             /*
-             * Send the clear on the transition out of ringing.  Using the
-             * gadget's own flag here lost the clear when a reminder spoke and
-             * the alert set was rebuilt in the same poll.
+             * Send the clear once ringing stops and any reminder pulse window
+             * has finished.  Reset `next_pulse` so an immediate new ring is
+             * never suppressed by the previous throttle window.
              */
             was_pulsing = 0;
+            next_pulse = 0;
+            pulse_clear_at = 0;
+            le_gadget_set_timers_active(gadget, 0);
             for (i = 0; i < LE_MAX_SPP_SESSIONS; ++i) {
                 uint8_t message[LE_AGT_FRAME_MAX];
 
                 if (sessions->spp[i].fd < 0 || !sessions->spp[i].offered)
                     continue;
-                (void)spp_send(&sessions->spp[i], message,
-                               le_agt_build_state_update(
-                                   message, sizeof(message), "timers",
-                                   "cleared"));
+                if (spp_send(&sessions->spp[i], message,
+                             le_agt_build_state_update(
+                                 message, sizeof(message), "timers",
+                                 "cleared")) == 0)
+                    le_log_info("btd-profiles: timers=cleared sent");
             }
         }
     }
@@ -2317,21 +2399,33 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
                     }
                 if (still)
                     continue;
-                if (reminder_spoke) {
+                if (previous_type[k] == 'R') {
                     /* Let the pulse finish before the alert goes away. */
                     defer_delete(previous[k],
                                  now + LE_GADGET_PULSE_CLEAR_SECONDS);
+                    le_log_info("btd-profiles: DeleteAlert for %s deferred "
+                                "%ds", previous[k],
+                                LE_GADGET_PULSE_CLEAR_SECONDS);
                     continue;
                 }
                 (void)spp_send(&sessions->spp[i], message,
                                le_agt_build_delete_alert(message,
                                                          sizeof(message),
                                                          previous[k]));
+                if (sessions->spp[i].fd < 0)
+                    break;
             }
         }
+        if (sessions->spp[i].fd < 0)
+            continue;
         length = le_gadget_build_alert_frames(gadget, frames, sizeof(frames));
         if (!length) {
             static int warned;
+            /* Clear dedup cache so a later alert with the same token/time
+             * is not mistakenly suppressed. */
+            sessions->spp[i].alert_bytes = 0;
+            memset(sessions->spp[i].alert_sent, 0,
+                   sizeof(sessions->spp[i].alert_sent));
             if (!warned) {
                 warned = 1;
                 le_log_warn("btd-profiles: no alert frames built (in_use scanning)");
@@ -2349,20 +2443,14 @@ void le_profile_spp_sync_alerts(struct le_profiles *p, const char *timers_json)
             !memcmp(gadget->alerts, sessions->spp[i].alert_sent,
                     sizeof(gadget->alerts)))
             continue;
-        if (length > sizeof(sessions->spp[i].alert_sent))
-            length = sizeof(sessions->spp[i].alert_sent);
+        if (spp_write_raw(&sessions->spp[i], frames, length) != 0) {
+            le_log_warn("btd-profiles: alert write %zu bytes failed", length);
+            continue;
+        }
         memcpy(sessions->spp[i].alert_sent, gadget->alerts,
                sizeof(gadget->alerts));
         sessions->spp[i].alert_bytes = length;
-        {
-            ssize_t wrote = write(sessions->spp[i].fd, frames, length);
-            if (wrote != (ssize_t)length)
-                le_log_warn("btd-profiles: alert write %zd/%zu failed: %s",
-                            wrote, length, strerror(errno));
-            else
-                le_log_info("btd-profiles: %zu alert bytes to the clock",
-                            length);
-        }
+        le_log_info("btd-profiles: %zu alert bytes to the clock", length);
     }
     flush_deferred_deletes(sessions, now);
 }
@@ -2418,7 +2506,7 @@ void le_profile_spp_refresh_time(struct le_profiles *p, time_t now)
 }
 
 static void spp_session_read(struct le_profiles *p,
-                             struct le_spp_session *session)
+                             struct le_spp_session *session, short revents)
 {
     ssize_t received;
     size_t consumed;
@@ -2430,61 +2518,75 @@ static void spp_session_read(struct le_profiles *p,
     (void)p;
     if (!session || session->fd < 0)
         return;
-    received = read(session->fd, session->buf + session->used,
-                    sizeof(session->buf) - session->used);
-    if (received == 0) {
-        le_log_info("btd-profiles: gadget closed the channel");
-        close(session->fd);
-        session->fd = -1;
-        session->used = 0;
-        session->offered = 0;
-        return;
-    }
-    if (received < 0)
-        return;
-    session->used += (size_t)received;
+    if (revents & POLLIN) {
+        if (session->used >= sizeof(session->buf))
+            session->used = 0;
+        received = read(session->fd, session->buf + session->used,
+                        sizeof(session->buf) - session->used);
+        if (received == 0) {
+            spp_close_session(session, "peer closed");
+            return;
+        }
+        if (received < 0) {
+            if ((errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) &&
+                !(revents & (POLLHUP | POLLERR | POLLNVAL)))
+                return;
+            spp_close_session(session, strerror(errno));
+            return;
+        }
+        session->used += (size_t)received;
 
-    /* Drain every complete frame the buffer holds. */
-    for (;;) {
-        consumed = 0;
-        payload_length = le_agt_decode(session->buf, session->used, payload,
-                                       sizeof(payload), &consumed);
-        if (payload_length < 0) {
-            /*
-             * Either a partial frame or a corrupt one.  A partial frame is
-             * normal on a stream, so only drop the buffer when it cannot
-             * contain a frame start at all.
-             */
-            if (session->used && session->buf[0] != LE_AGT_STX) {
-                size_t i;
-                for (i = 1; i < session->used; ++i)
-                    if (session->buf[i] == LE_AGT_STX)
-                        break;
-                if (i == session->used) {
-                    session->used = 0;
-                } else {
-                    memmove(session->buf, session->buf + i, session->used - i);
-                    session->used -= i;
+        /* Drain every complete frame the buffer holds. */
+        for (;;) {
+            consumed = 0;
+            payload_length = le_agt_decode(session->buf, session->used, payload,
+                                           sizeof(payload), &consumed);
+            if (payload_length < 0) {
+                /*
+                 * Either a partial frame or a corrupt one.  A partial frame is
+                 * normal on a stream, so only drop the buffer when it cannot
+                 * contain a frame start at all.
+                 */
+                if (session->used && session->buf[0] != LE_AGT_STX) {
+                    size_t i;
+                    for (i = 1; i < session->used; ++i)
+                        if (session->buf[i] == LE_AGT_STX)
+                            break;
+                    if (i == session->used) {
+                        session->used = 0;
+                    } else {
+                        memmove(session->buf, session->buf + i,
+                                session->used - i);
+                        session->used -= i;
+                    }
                 }
+                break;
             }
-            break;
-        }
-        if (consumed && session->used > consumed)
-            memmove(session->buf, session->buf + consumed,
-                    session->used - consumed);
-        if (consumed)
-            session->used -= consumed;
+            if (consumed && session->used > consumed)
+                memmove(session->buf, session->buf + consumed,
+                        session->used - consumed);
+            if (consumed)
+                session->used -= consumed;
 
-        if (le_agt_read_event_header(payload, (size_t)payload_length,
-                                     namespace_out, sizeof(namespace_out),
-                                     name_out, sizeof(name_out)) == 0 &&
-            strcmp(namespace_out, "Alexa.Discovery") == 0 &&
-            strcmp(name_out, "Discover.Response") == 0) {
-            /* The connect sequence already went out on accept; the clock's
-             * own answer is only an acknowledgement. */
-            le_log_info("btd-profiles: gadget %s discovered",
-                        session->offered ? "answered" : "unexpected");
+            if (le_agt_read_event_header(payload, (size_t)payload_length,
+                                         namespace_out, sizeof(namespace_out),
+                                         name_out, sizeof(name_out)) == 0 &&
+                strcmp(namespace_out, "Alexa.Discovery") == 0 &&
+                strcmp(name_out, "Discover.Response") == 0) {
+                /* The connect sequence already went out on accept; the clock's
+                 * own answer is only an acknowledgement. */
+                session->answered = 1;
+                le_log_info("btd-profiles: gadget %s discovered",
+                            session->offered ? "answered" : "unexpected");
+            }
         }
+    }
+    if (revents & (POLLHUP | POLLERR | POLLNVAL)) {
+        char reason[48];
+
+        snprintf(reason, sizeof(reason), "peer hangup/error revents=0x%x",
+                 (unsigned)revents);
+        spp_close_session(session, reason);
     }
 }
 
@@ -2806,7 +2908,7 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
     if (!sessions)
         return;
     for (i = 0; i < count; ++i) {
-        if (!(pollfds[i].revents & (POLLIN | POLLHUP | POLLERR)))
+        if (!(pollfds[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)))
             continue;
         switch (fd_map[i]) {
         case 1: {
@@ -2884,15 +2986,20 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
                 if (sessions->spp[slot].fd < 0)
                     break;
             if (slot == LE_MAX_SPP_SESSIONS) {
-                close(client);
-                break;
+                /* Supersede the oldest slot rather than refusing a fresh clock. */
+                spp_close_session(&sessions->spp[0], "replaced by incoming");
+                slot = 0;
             }
             sessions->spp[slot].fd = client;
             sessions->spp[slot].used = 0;
             sessions->spp[slot].offered = 0;
+            sessions->spp[slot].answered = 0;
+            sessions->spp[slot].opened_at = 0;
             sessions->spp[slot].seq = 0;
             sessions->spp[slot].gadget = p->gadget;
             sessions->spp[slot].alert_bytes = 0;
+            memset(sessions->spp[slot].alert_sent, 0,
+                   sizeof(sessions->spp[slot].alert_sent));
             /*
              * A real Echo opens the session as soon as the gadget connects.
              * Waiting for the clock's Discover.Response deadlocks: it sends
@@ -2901,8 +3008,7 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
              */
             if (sessions->spp[slot].gadget &&
                 spp_send_bootstrap(&sessions->spp[slot]) != 0) {
-                close(client);
-                sessions->spp[slot].fd = -1;
+                spp_close_session(&sessions->spp[slot], "bootstrap failed");
                 le_log_warn("btd-profiles: SPP bootstrap failed");
             }
             break;
@@ -2918,7 +3024,8 @@ void le_profile_poll_events(struct le_profiles *p, const struct pollfd *pollfds,
             } else if (fd_map[i] >= 40 && fd_map[i] < 40 + LE_MAX_AVRCP_SESSIONS) {
                 avrcp_session_read(p, &sessions->avrcp[fd_map[i] - 40]);
             } else if (fd_map[i] >= 50 && fd_map[i] < 50 + LE_MAX_SPP_SESSIONS) {
-                spp_session_read(p, &sessions->spp[fd_map[i] - 50]);
+                spp_session_read(p, &sessions->spp[fd_map[i] - 50],
+                                 pollfds[i].revents);
             }
             break;
         }

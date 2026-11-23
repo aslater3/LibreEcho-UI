@@ -168,6 +168,10 @@ static int test_bounds(void)
     CHECK(le_gadget_set_timeinfo(&gadget, "") < 0);
     CHECK(le_gadget_set_alert(&gadget, NULL, "TIMER", "x") < 0);
     CHECK(le_gadget_set_alert(&gadget, "1234567890123456", "TIMER", "x") < 0);
+    /* Failed set_alert must not leak an in_use slot. */
+    CHECK(le_gadget_set_alert(&gadget, "1", "", "2026-10-14T10:44:19-04:00") < 0);
+    CHECK(le_gadget_build_alert_frames(&gadget, small, sizeof(small)) == 0);
+    CHECK(gadget.alerts[0].in_use == 0);
     /* A tiny buffer yields no frames rather than an overrun. */
     CHECK(le_gadget_build_connect_frames(&gadget, small, sizeof(small)) == 0);
     CHECK(le_gadget_build_alert_frames(&gadget, small, sizeof(small)) == 0);

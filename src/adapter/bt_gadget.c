@@ -62,11 +62,17 @@ int le_gadget_set_alert(struct le_gadget *gadget, const char *token,
                         const char *type, const char *scheduled_time)
 {
     struct le_gadget_alert *alert;
+    struct le_gadget_alert staged;
     size_t i;
 
     if (!gadget || !token || !type || !scheduled_time)
         return -1;
-    if (strlen(token) >= LE_GADGET_TOKEN_MAX)
+    memset(&staged, 0, sizeof(staged));
+    staged.in_use = 1;
+    if (copy_field(staged.token, sizeof(staged.token), token) < 0 ||
+        copy_field(staged.type, sizeof(staged.type), type) < 0 ||
+        copy_field(staged.scheduled_time, sizeof(staged.scheduled_time),
+                   scheduled_time) < 0)
         return -1;
     alert = find_alert(gadget, token);
     if (!alert) {
@@ -77,15 +83,8 @@ int le_gadget_set_alert(struct le_gadget *gadget, const char *token,
             }
         if (!alert)
             return -1;
-        memset(alert, 0, sizeof(*alert));
-        alert->in_use = 1;
-        if (copy_field(alert->token, sizeof(alert->token), token) < 0)
-            return -1;
     }
-    if (copy_field(alert->type, sizeof(alert->type), type) < 0 ||
-        copy_field(alert->scheduled_time, sizeof(alert->scheduled_time),
-                   scheduled_time) < 0)
-        return -1;
+    *alert = staged;
     return 0;
 }
 
