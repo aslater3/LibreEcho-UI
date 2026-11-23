@@ -40,9 +40,12 @@
 #define LE_AGT_FRAME_MAX (LE_AGT_PAYLOAD_MAX * 2 + 8)
 
 /*
- * Encode one frame around `payload`.  `seq` is the frame sequence number;
- * the AGT caller skips values 0xF0..0xF2.  Returns the frame length, or 0
- * when the payload is too large or the output buffer is short.
+ * Encode one frame around `payload`.  `seq` is the frame sequence number and
+ * must not be one of the reserved framing bytes 0xF0..0xF2; the AGT caller
+ * skips them (`bt_profile.c`: `if (++seq > 0xEF) seq = 1`), and
+ * `le_agt_encode` also rejects them so the encoder can never produce a frame
+ * `le_agt_decode` rejects.  Returns the frame length, or 0 when `seq` is
+ * reserved, the payload is too large, or the output buffer is short.
  */
 size_t le_agt_encode(uint8_t *out, size_t out_size, uint8_t seq,
                      const uint8_t *payload, size_t payload_length);
@@ -52,6 +55,12 @@ size_t le_agt_encode(uint8_t *out, size_t out_size, uint8_t seq,
  * the frame occupied (so a caller can advance a stream buffer) and the
  * payload is written to `payload`.  Returns the payload length, or -1 on a
  * malformed or truncated frame.
+ *
+ * Strict about what it accepts, because the peer is not trusted: a payload
+ * longer than LE_AGT_PAYLOAD_MAX, a reserved byte in `seq`, an unescaped
+ * reserved byte in the body, and an escape that decodes to a non-reserved
+ * byte are all rejected.  That is exactly the set `le_agt_encode` can
+ * produce.
  */
 int le_agt_decode(const uint8_t *in, size_t in_length, uint8_t *payload,
                   size_t payload_size, size_t *consumed);

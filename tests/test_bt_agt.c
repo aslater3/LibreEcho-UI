@@ -230,6 +230,53 @@ static int test_header_etx(void)
 }
 
 /*
+ * Frames a well-behaved peer cannot produce.  The decoder used to accept all
+ * three: a payload past LE_AGT_PAYLOAD_MAX, a raw reserved byte in the body,
+ * and an escape that decoded to a non-reserved byte.
+ */
+static int test_decoder_strictness(void)
+{
+    uint8_t payload[LE_AGT_PAYLOAD_MAX];
+    uint8_t oversized[1024];
+    size_t n = 0;
+    uint32_t sum = LE_AGT_CMD + LE_AGT_ERR;
+    size_t i;
+
+    /* 513-byte payload, valid checksum, otherwise well formed. */
+    oversized[n++] = LE_AGT_STX;
+    oversized[n++] = LE_AGT_CMD;
+    oversized[n++] = LE_AGT_ERR;
+    oversized[n++] = 1;
+    for (i = 0; i < (size_t)LE_AGT_PAYLOAD_MAX + 1; ++i) {
+        oversized[n++] = 0x41;
+        sum += 0x41;
+    }
+    oversized[n++] = (uint8_t)(sum >> 8);
+    oversized[n++] = (uint8_t)sum;
+    oversized[n++] = LE_AGT_ETX;
+    CHECK(le_agt_decode(oversized, n, payload, sizeof(payload), NULL) == -1);
+
+    /* A raw STX inside the body (the encoder always escapes it). */
+    {
+        static const uint8_t raw_stx[] = {
+            0xF0, 0x02, 0x00, 0x01, 0xF0, 0x00, 0xF2, 0x00, 0xF1
+        };
+        CHECK(le_agt_decode(raw_stx, sizeof(raw_stx), payload,
+                            sizeof(payload), NULL) == -1);
+    }
+
+    /* ESC + a non-reserved byte: two wire forms for one payload. */
+    {
+        static const uint8_t non_canonical[] = {
+            0xF0, 0x02, 0x00, 0x01, 0x41, 0x42, 0x43, 0xF2, 0x00, 0xF1
+        };
+        CHECK(le_agt_decode(non_canonical, sizeof(non_canonical), payload,
+                            sizeof(payload), NULL) == -1);
+    }
+    return 0;
+}
+
+/*
  * A crafted inner length near 2^32 used to wrap `offset + field_length` in
  * pb_read_bytes on a 32-bit target, so the bounds check passed and the caller
  * received a pointer with a bogus length.  A single malformed frame from the
@@ -257,7 +304,7 @@ int main(void)
 {
     if (test_payloads() || test_framing() || test_escaped_bytes() ||
         test_corruption() || test_event_header() || test_bounds() ||
-        test_header_etx() || test_length_wrap())
+        test_header_etx() || test_length_wrap() || test_decoder_strictness())
         return 1;
     printf("bt agt codec contract: ok\n");
     return 0;
