@@ -183,7 +183,8 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
                  barrier_at=None, preexisting_reboot=None,
                  preexisting_guard=False, reboot_fifo=False,
                  association_fails=False, scan_results="", fail_command="",
-                 initial_connected=True, dhcp_success=False):
+                 initial_connected=True, dhcp_success=False, no_ip=False,
+                 no_route=False):
     wpa_path = directory / "wpa.sock"
     adapter_path = directory / "network.sock"
     action_log = directory / "actions.log"
@@ -206,9 +207,25 @@ def start_daemon(directory: Path, script: str, *, fail_reassociate=False,
         "LIBREECHO_GATEWAY_PROBE_SCRIPT": script,
         "LIBREECHO_NETWORKD_TEST_ACTION_LOG": str(action_log),
     })
-    if dhcp_success:
+    if dhcp_success or no_ip or no_route:
         dhcp = directory / "dhcp-success"
-        dhcp.write_text("#!/bin/sh\nexit 0\n")
+        body = "#!/bin/sh\n"
+        if no_ip:
+            # The marker models an associated interface whose DHCP never ran
+            # (a late association); the adopted lease clears it, mirroring a
+            # real lease appearing on wlan0.
+            no_ip_flag = directory / "no-ip-flag"
+            no_ip_flag.write_text("1\n")
+            env["LIBREECHO_NETWORKD_TEST_NO_IP"] = str(no_ip_flag)
+            body += f"rm -f {no_ip_flag}\n"
+        if no_route:
+            # The marker models an interface that kept its address but lost
+            # the default route (an interface reset does this).
+            no_route_flag = directory / "no-route-flag"
+            no_route_flag.write_text("1\n")
+            env["LIBREECHO_NETWORKD_TEST_NO_ROUTE"] = str(no_route_flag)
+            body += f"rm -f {no_route_flag}\n"
+        dhcp.write_text(body + "exit 0\n")
         dhcp.chmod(0o700)
         env["LIBREECHO_NETWORKD_DHCP_ORACLE"] = str(dhcp)
     if fail_interface:
@@ -267,9 +284,10 @@ def test_ordered_recovery_and_one_shot_reboot():
 def test_recovery_can_succeed_without_supervisor_request():
     with tempfile.TemporaryDirectory(prefix="libreecho-networkd-recover-") as temp:
         directory = Path(temp)
-        # The first post-reassociation probe still fails, so networkd performs
-        # its single interface cycle.  The following probe succeeds.
-        script = "1,0,0,0,0,1,1"
+        # The first post-reassociation probe window still fails (both the
+        # probe and its single retry), so networkd performs its single
+        # interface cycle.  The following probe succeeds.
+        script = "1,0,0,0,0,0,0,0,0,1,1"
         proc, wpa, adapter, action_log, reboot = start_daemon(directory, script)
         try:
             wait_for(lambda: read_actions(action_log) ==
@@ -293,9 +311,14 @@ def test_explicit_commands_cancel_pending_recovery():
                 prefix=f"libreecho-networkd-{command}-") as temp:
             directory = Path(temp)
             barrier = directory / "probe-barrier"
+            # The barrier blocks the first probe after the interface cycle;
+            # the command must cancel the pending reboot escalation while that
+            # probe is in flight.  Retries count as probe starts, so the plan
+            # is one healthy probe, four double-miss windows and a healthy
+            # probe again.
             process, wpa, adapter, actions, reboot = start_daemon(
-                directory, "1,0,0,0,0,1," +
-                ",".join("0" for _ in range(32)), barrier_at=6)
+                directory, "1," + ",".join("0" for _ in range(8)) + "," +
+                ",".join("1" for _ in range(32)), barrier_at=10)
             try:
                 wait_for(barrier.exists,
                          message="simultaneous client/probe barrier")
@@ -578,10 +601,93 @@ def test_dense_scan_truncates_without_failing():
             stop_daemon(process, wpa)
 
 
+def test_late_association_adopts_dhcp():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-adopt-") as temp:
+        directory = Path(temp)
+        # The interface is associated but has no address: the boot-time helper
+        # gave up before the association completed, so nothing ran DHCP.
+        # networkd must adopt the addressless interface and lease on its own.
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1,1,1,1,1,1", no_ip=True)
+        try:
+            wait_for(lambda: adapter_request(adapter, 1, "status")["data"]["ip"]
+                     == "192.0.2.10", message="adopted DHCP lease")
+            status = adapter_request(adapter, 2, "status")
+            assert status["data"]["state"] == "connected", status
+            assert not (directory / "no-ip-flag").exists()
+            assert read_actions(actions) == [], read_actions(actions)
+            assert not any(command.startswith(
+                ("SELECT_NETWORK", "SET_NETWORK", "ENABLE_NETWORK",
+                 "REASSOCIATE")) for command in wpa.commands)
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_missing_default_route_is_adopted():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-route-") as temp:
+        directory = Path(temp)
+        # The interface keeps its address but loses the default route (an
+        # interface reset does this) and nothing else re-applies it; networkd
+        # must adopt DHCP until the route is back, not just when the address
+        # is missing.
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,1,1,1,1,1,1,1", no_route=True)
+        try:
+            wait_for(lambda: adapter_request(adapter, 1, "status")["data"]
+                     ["gateway"] == "192.0.2.1",
+                     message="restored default route")
+            status = adapter_request(adapter, 2, "status")
+            assert status["data"]["ip"] == "192.0.2.10", status
+            assert not (directory / "no-route-flag").exists()
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_single_lost_probe_reply_is_retried_before_failing():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-probe-retry-") as temp:
+        directory = Path(temp)
+        # Four scripted misses arrive as two retried probe windows; without
+        # the single retry they would count as three consecutive liveness
+        # failures and reassociate.  The action log staying empty proves the
+        # retry absorbed the isolated loss.
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1,0,0,0,0," + ",".join("1" for _ in range(64)))
+        try:
+            wait_for(lambda: adapter_request(adapter, 3, "status")["data"]
+                     ["connectivity"] == "healthy",
+                     message="healthy after retried single misses")
+            time.sleep(0.3)
+            assert read_actions(actions) == [], read_actions(actions)
+            assert not reboot.exists()
+            status = adapter_request(adapter, 4, "status")
+            assert status["data"]["connectivity"] == "healthy", status
+        finally:
+            stop_daemon(process, wpa)
+
+
+def test_sustained_probe_failures_still_reassociate():
+    with tempfile.TemporaryDirectory(prefix="libreecho-networkd-probe-fail-") as temp:
+        directory = Path(temp)
+        # Retries absorb isolated loss but not sustained outages: three
+        # consecutive double-miss windows still trigger reassociation.
+        process, wpa, adapter, actions, reboot = start_daemon(
+            directory, "1," + ",".join("0" for _ in range(6)) + "," +
+            ",".join("1" for _ in range(32)))
+        try:
+            wait_for(lambda: "reassociate" in read_actions(actions),
+                     message="reassociation after sustained probe failures")
+        finally:
+            stop_daemon(process, wpa)
+
+
 def main():
     test_ordered_recovery_and_one_shot_reboot()
     test_recovery_can_succeed_without_supervisor_request()
     test_explicit_commands_cancel_pending_recovery()
+    test_late_association_adopts_dhcp()
+    test_missing_default_route_is_adopted()
+    test_single_lost_probe_reply_is_retried_before_failing()
+    test_sustained_probe_failures_still_reassociate()
     test_persistent_reboot_guard_blocks_cross_boot_loop()
     test_stale_non_reboot_request_is_not_accepted()
     test_non_regular_reboot_request_fails_closed_without_blocking()
