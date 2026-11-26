@@ -84,7 +84,7 @@ unity, one per ALSA lane: the stock `libasp.so` applies `miccal.N` to lane N.
   -> 7 microphone lanes (top 16 bits of each word)
   -> per-lane miccal gain
   -> fixed-beam beamformer (lanes 0, 1, 3, 4 by default)
-  -> 80 Hz high-pass
+  -> second-order 80 Hz high-pass
   -> mono S16_LE at 16 kHz
   -> consumers: wake word, baby monitor, voice assistant
 ```
@@ -110,6 +110,17 @@ subset for experiments; the default is the stock speech front end's four.
 The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction
 only and comb-filtered speech from every other direction.
+
+### High-pass
+
+The mono stream runs through a second-order (24 dB/octave) 80 Hz high-pass
+built from two identical non-resonant sections, so the passband has no peaking.
+The first trainable stage of the pipeline is the VAD, and a single section
+still passed roughly 41% of a 40 Hz tone into it; two sections cut that to
+about 17% and take a 20 Hz thump down from about -13 dB to about -26 dB, while
+300 Hz stays within 1 dB of where it was. This is what keeps fan rumble and
+handling noise out of the energy baseline. `status` reports
+`pipeline.highpass_order`.
 
 ## Mix mode
 

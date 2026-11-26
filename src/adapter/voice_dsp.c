@@ -140,6 +140,32 @@ int16_t le_voice_mix_selected(
     return saturate_s16(divide_rounded(sum, count));
 }
 
+/*
+ * One section of the 80 Hz high-pass at 16 kHz:
+ * y[n] = 0.9691 * (y[n-1] + x[n] - x[n-1]).
+ * The Q15 coefficient keeps the hot path integer-only on ARMv7.
+ *
+ * The state holds the unsaturated result so cascading sections does not
+ * compound clipping, and the caller saturates only the final output.
+ */
+static int32_t highpass_section(int32_t *previous_input,
+                                int32_t *previous_output, int32_t input)
+{
+    const int32_t coefficient_q15 = 31755;
+    int64_t difference = (int64_t)*previous_output +
+                         input - *previous_input;
+    /*
+     * Truncate toward zero here rather than rounding.  Rounding leaves a
+     * small fixed-point limit cycle after a DC step; truncation lets the
+     * state decay completely to zero.
+     */
+    int32_t output = (int32_t)((difference * coefficient_q15) / 32768);
+
+    *previous_input = input;
+    *previous_output = output;
+    return output;
+}
+
 void le_voice_highpass_init(struct le_voice_highpass *filter)
 {
     memset(filter, 0, sizeof(*filter));
@@ -149,24 +175,21 @@ int16_t le_voice_highpass_sample(struct le_voice_highpass *filter,
                                  int16_t input)
 {
     /*
-     * First-order 80 Hz high-pass at 16 kHz:
-     * y[n] = 0.9691 * (y[n-1] + x[n] - x[n-1]).
-     * The Q15 coefficient keeps the hot path integer-only on ARMv7.
+     * Two identical sections make this a second-order (24 dB/octave) 80 Hz
+     * high-pass.  A single section only reaches about -13 dB at 20 Hz, so
+     * fan rumble and handling thumps still pass into the VAD and the speech
+     * engines.  Two sections double that slope to about -26 dB there and
+     * give roughly -6 dB at the corner, which keeps the 80-150 Hz part of
+     * voiced speech essentially intact.  The sections are deliberately
+     * identical (Q = 0.5) rather than a resonant design, so the passband
+     * has no peaking and cannot add ringing to speech onsets.
      */
-    const int32_t coefficient_q15 = 31755;
-    int64_t difference = (int64_t)filter->previous_output +
-                         input - filter->previous_input;
-    /*
-     * Truncate toward zero here rather than rounding.  Rounding leaves a
-     * small fixed-point limit cycle after a DC step; truncation lets the
-     * state decay completely to zero.
-     */
-    int32_t output = (int32_t)(
-        (difference * coefficient_q15) / 32768);
+    int32_t first = highpass_section(&filter->previous_input,
+                                     &filter->previous_output, input);
+    int32_t second = highpass_section(&filter->previous_input_2,
+                                      &filter->previous_output_2, first);
 
-    filter->previous_input = input;
-    filter->previous_output = output;
-    return saturate_s16(output);
+    return saturate_s16(second);
 }
 
 void le_voice_process_interleaved(
