@@ -51,6 +51,8 @@ struct le_voice_calibration {
 struct le_voice_highpass {
     int32_t previous_input;
     int32_t previous_output;
+    int32_t previous_input_2;
+    int32_t previous_output_2;
 };
 
 struct le_voice_vad {

@@ -804,7 +804,8 @@ static int format_status(char *buffer, size_t size,
         "\"microphone_mix\":\"%s\",\"microphone_lane\":%d,"
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
-        "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
+        "\"highpass_hz\":80,\"highpass_order\":2,"
+        "\"vad\":\"native-energy-baseline\","
         "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
         available ? "true" : "false",
         capture_active ? "true" : "false",
@@ -1064,7 +1065,8 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
             "\"logical_map\":\"measured\","
             "\"beamforming\":\"fixed_beam_select\","
             "\"beams\":%d,\"latency_samples\":%d,"
-            "\"highpass_hz\":80}", mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
+            "\"highpass_hz\":80,\"highpass_order\":2}",
+            mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
     } else {
         n = snprintf(data, sizeof(data),
                      "{\"format\":\"pcm_s24_3le\",\"rate\":16000,"

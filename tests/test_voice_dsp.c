@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #define CHECK(x) do { \
     if (!(x)) { \
@@ -25,6 +26,35 @@ static void pack_s16_as_s24_3le(int16_t value, uint8_t output[3])
     output[0] = (uint8_t)packed;
     output[1] = (uint8_t)(packed >> 8);
     output[2] = (uint8_t)(packed >> 16);
+}
+
+/*
+ * Steady-state amplitude gain of the real high-pass path at a given
+ * frequency.  The filter is linear and time invariant, so the peak of the
+ * settled output divided by the input peak is the magnitude response.
+ */
+static double highpass_gain_at(double hz)
+{
+    const double amplitude = 8000.0;
+    const int settle = LE_VOICE_RATE;
+    const int measure = LE_VOICE_RATE / 2;
+    struct le_voice_highpass filter;
+    int highest = 0;
+    int n;
+
+    le_voice_highpass_init(&filter);
+    for (n = 0; n < settle + measure; ++n) {
+        double phase = 2.0 * 3.14159265358979323846 * hz *
+                       (double)n / (double)LE_VOICE_RATE;
+        int16_t input = (int16_t)(amplitude * sin(phase) + 0.5);
+        int16_t output = le_voice_highpass_sample(&filter, input);
+
+        if (n >= settle && output > highest)
+            highest = output;
+        if (n >= settle && -output > highest)
+            highest = -output;
+    }
+    return (double)highest / amplitude;
 }
 
 int main(void)
@@ -116,6 +146,19 @@ int main(void)
         (void)le_voice_highpass_sample(&highpass, 1000);
     CHECK(le_voice_highpass_sample(&highpass, 1000) >= -1);
     CHECK(le_voice_highpass_sample(&highpass, 1000) <= 1);
+
+    /*
+     * The high-pass is second order now.  A single section still passed
+     * about 41% of a 40 Hz signal (fan rumble, handling thumps) into the
+     * VAD and the speech engines; two sections cut that to roughly 17%.
+     * The upper bound at 40 Hz is what tells the two designs apart, and the
+     * passband checks keep the 300 Hz-1 kHz part of speech where it was.
+     */
+    CHECK(highpass_gain_at(20.0) < 0.08);
+    CHECK(highpass_gain_at(40.0) > 0.10);
+    CHECK(highpass_gain_at(40.0) < 0.25);
+    CHECK(highpass_gain_at(300.0) > 0.85);
+    CHECK(highpass_gain_at(1000.0) > 0.93);
 
     le_voice_vad_init(&vad);
     memset(frame, 0, sizeof(frame));
