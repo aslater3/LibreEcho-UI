@@ -34,14 +34,14 @@ class PinnedFixture(Fixture):
   client.switch_command(2,True);await self.wait_for(lambda:self.adapters['audio'].muted,'microphone mute');self.privacy.write_text('1\n');await asyncio.sleep(.3);before=sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls);client.switch_command(2,False);await asyncio.sleep(.1);self.assertEqual(sum(r['cmd']=='set_mute' for r in self.adapters['audio'].calls),before)
   self.privacy.write_text('0\n');await asyncio.sleep(.3);client.switch_command(2,False);await self.wait_for(lambda:not self.adapters['audio'].muted,'microphone unmute');await asyncio.sleep(.1)
   starts=[];stops=[];audio=[];finished=[]
-  async def start(conversation,flags,settings,wake):starts.append((conversation,flags,wake));return 0
+  async def start(conversation,flags,settings,wake):starts.append((conversation,flags,settings,wake));return 0
   async def stop(abort):stops.append(abort)
   async def capture(data,data2):audio.append((data,data2))
   async def done(result):finished.append(result)
   unsubscribe=client.subscribe_voice_assistant(handle_start=start,handle_stop=stop,handle_audio=capture,handle_announcement_finished=done)
   a=self.adapters['wake'];a.wait_streams()
   for i in range(0,6400,320):a.samples(i)
-  await asyncio.sleep(.1);a.wake(4000);await self.wait_for(lambda:len(starts)==1 and audio,'wake and indexed API audio');self.assertEqual(starts[0],('',1,'Alexa'),'device-side wake: USE_VAD only, never USE_WAKE_WORD');self.assertEqual(len(audio[0][0]),640);self.assertEqual(audio[0][0][:2],struct.pack('<h',800));self.assertFalse(audio[0][1])
+  await asyncio.sleep(.1);a.wake(4000);await self.wait_for(lambda:len(starts)==1 and audio,'wake and indexed API audio');self.assertEqual((starts[0][0],starts[0][1],starts[0][3]),('',1,'Alexa'),'device-side wake: USE_VAD only, never USE_WAKE_WORD');self.assertEqual((starts[0][2].noise_suppression_level,starts[0][2].auto_gain,starts[0][2].volume_multiplier),(0,0,1.0));self.assertEqual(len(audio[0][0]),640);self.assertEqual(audio[0][0][:2],struct.pack('<h',800));self.assertFalse(audio[0][1])
   for kind in VT:
    client.send_voice_assistant_timer_event(kind,'pinned-timer','tea',60,45,True)
    await self.wait_for(lambda:len([r for r in self.adapters['timer'].calls if r['cmd']=='remote_event'])==int(kind)+1,'ordered timer event')
@@ -50,7 +50,7 @@ class PinnedFixture(Fixture):
   self.assertEqual(clears,1,'startup clear must precede owner timer events')
   client.send_voice_assistant_event(VE.VOICE_ASSISTANT_ERROR,{'code':'fixture-error'});await self.wait_for(lambda:True in stops,'error cancellation');self.assertEqual(sum(r['cmd']=='remote_clear' for r in self.adapters['timer'].calls),clears)
   a.wake(4300);await self.wait_for(lambda:len(starts)==2,'second wake');await asyncio.sleep(.05)
-  client.send_voice_assistant_event(VE.VOICE_ASSISTANT_INTENT_END,{'conversation_id':'pinned-conversation','continue_conversation':'1'});client.send_voice_assistant_event(VE.VOICE_ASSISTANT_RUN_END,None);await self.wait_for(lambda:len(starts)==3,'no-TTS continuation');self.assertEqual(starts[-1],('pinned-conversation',1,None));self.assertIn(False,stops)
+  client.send_voice_assistant_event(VE.VOICE_ASSISTANT_INTENT_END,{'conversation_id':'pinned-conversation','continue_conversation':'1'});client.send_voice_assistant_event(VE.VOICE_ASSISTANT_RUN_END,None);await self.wait_for(lambda:len(starts)==3,'no-TTS continuation');self.assertEqual((starts[-1][0],starts[-1][1],starts[-1][3]),('pinned-conversation',1,None));self.assertEqual(starts[-1][2].volume_multiplier,1.0);self.assertIn(False,stops)
   client.send_voice_assistant_event(VE.VOICE_ASSISTANT_ERROR,None);await self.wait_for(lambda:not json.loads((self.p/'status.json').read_text())['in_progress'],'continued turn cleanup')
   await client.set_voice_assistant_configuration([]);cfg=await client.get_voice_assistant_configuration(3);self.assertEqual(cfg.active_wake_words,[]);self.assertEqual(json.loads(self.config.read_text())['esphome_active_wake_word'],'');self.assertEqual(sum(r['cmd']=='remote_clear' for r in self.adapters['timer'].calls),clears)
   wav=io.BytesIO()
@@ -64,7 +64,7 @@ class PinnedFixture(Fixture):
   while not announce.done():
    with contextlib.suppress(BlockingIOError):self.busbytes+=os.read(self.busfd,65536)
    await asyncio.sleep(.01)
-  self.assertTrue((await announce).success);self.assertEqual(self.sound(),struct.pack('<h',1900)*2000);await self.wait_for(lambda:len(starts)==4,'remote START_CONVERSATION with wake disabled');self.assertEqual(starts[-1],('',1,None))
+  self.assertTrue((await announce).success);self.assertEqual(self.sound(),struct.pack('<h',1900)*2000);await self.wait_for(lambda:len(starts)==4,'remote START_CONVERSATION with wake disabled');self.assertEqual((starts[-1][0],starts[-1][1],starts[-1][3]),('',1,None));self.assertEqual(starts[-1][2].volume_multiplier,1.0)
   unsubscribe();await self.wait_for(lambda:sum(r['cmd']=='remote_clear' for r in self.adapters['timer'].calls)==clears+1,'unsubscribe ownership cleanup');self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress'])
   await client.set_voice_assistant_configuration(['alexa_v0.1']);cfg=await client.get_voice_assistant_configuration(3);self.assertEqual(cfg.active_wake_words,['alexa_v0.1']);self.assertEqual(self.wait_call('wake','set_word')['args'],{'word':'Alexa'})
   client.subscribe_voice_assistant(handle_start=start,handle_stop=stop,handle_audio=capture);await asyncio.sleep(.05);await client.disconnect();await self.wait_for(lambda:sum(r['cmd']=='remote_clear' for r in self.adapters['timer'].calls)==clears+2,'disconnect ownership cleanup');self.assertFalse(json.loads((self.p/'status.json').read_text())['in_progress']);await client.connect(login=True)
@@ -171,7 +171,7 @@ class PinnedServerWake(PinnedFixture):
    try:
     await client.connect(login=True)
     starts=[];stops=[];audio=[]
-    async def start(conversation,flags,settings,wake):starts.append((conversation,flags,wake));return 0
+    async def start(conversation,flags,settings,wake):starts.append((conversation,flags,settings,wake));return 0
     async def stop(abort):stops.append(abort)
     async def capture(data,data2):audio.append((data,data2))
     async def done(result):pass
@@ -179,14 +179,14 @@ class PinnedServerWake(PinnedFixture):
     a=self.adapters['wake'];a.wait_streams()
     for i in range(0,6400,320):a.samples(i)
     await self.wait_for(lambda:len(starts)==1,'server-wake run start without any device wake event')
-    self.assertEqual(starts[0][1],3,'USE_VAD|USE_WAKE_WORD');self.assertFalse(starts[0][2],'no wake phrase is sent in server-wake mode')
+    self.assertEqual(starts[0][1],3,'USE_VAD|USE_WAKE_WORD');self.assertEqual(starts[0][2].volume_multiplier,1.0);self.assertFalse(starts[0][3],'no wake phrase is sent in server-wake mode')
     await self.wait_for(lambda:len(audio)>0,'continuous mic audio while the server run is open')
     self.assertTrue(json.loads((self.p/'status.json').read_text())['server_wake_streaming'])
     # Mic mute must end the server run (the client delivers the stop while still subscribed), and unmute must reopen it.
     client.switch_command(2,True);await self.wait_for(lambda:stops==[True],'server-wake stop on microphone mute')
     await asyncio.sleep(.1);self.assertFalse(json.loads((self.p/'status.json').read_text())['server_wake_streaming'])
     client.switch_command(2,False);await self.wait_for(lambda:len(starts)==2,'server-wake restart after unmute')
-    self.assertEqual(starts[1][1],3);self.assertFalse(starts[1][2])
+    self.assertEqual(starts[1][1],3);self.assertEqual(starts[1][2].volume_multiplier,1.0);self.assertFalse(starts[1][3])
     unsubscribe();await client.disconnect()
    finally:await client.disconnect(force=True)
   asyncio.run(asyncio.wait_for(run(),12))
