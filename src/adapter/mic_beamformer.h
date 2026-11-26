@@ -18,6 +18,15 @@
  * selected, so no coefficient file is shipped.  Each beam is distortionless
  * in its look direction, so a talker on a beam axis passes at unity gain.
  *
+ * Optional adaptive null steering estimates the noise covariance from hops
+ * with no active speech on any beam and re-solves the same distortionless
+ * MVDR weights against that measured covariance.  A steady directional
+ * interferer (a fan, television or speaker) that is present in the estimate
+ * gets a null while every beam keeps unity gain in its look direction, and
+ * speech is not treated as noise because covariance updates pause while a
+ * beam is active.  It is off by default; micd turns it on unless
+ * LE_MIC_BEAM_ADAPTIVE says otherwise.
+ *
  * Output is delayed by LE_BEAM_FFT samples (16 ms).
  */
 #define LE_BEAM_FFT 256
@@ -56,6 +65,21 @@ struct le_beamformer {
     unsigned long switches;
     int locked;              /* -1 = automatic selection, else beam index */
     int primed;
+    /*
+     * Adaptive noise covariance.  cov_re/cov_im hold the smoothed cross
+     * spectrum between every selected microphone pair, per FFT bin, built
+     * from hops with no active speech on any beam.
+     */
+    float cov_re[LE_BEAM_BINS][LE_VOICE_LOGICAL_CHANNELS]
+                [LE_VOICE_LOGICAL_CHANNELS];
+    float cov_im[LE_BEAM_BINS][LE_VOICE_LOGICAL_CHANNELS]
+                [LE_VOICE_LOGICAL_CHANNELS];
+    unsigned short cov_updates[LE_BEAM_BINS];
+    unsigned long hops;
+    unsigned long last_adaptive_hop;
+    unsigned int adaptive_enabled;
+    unsigned int adaptive_bins;
+    unsigned int adaptive_refreshes;
 };
 
 /* Returns 0, or -1 when mic_mask or beam_count is unusable. */
@@ -72,6 +96,17 @@ int16_t le_beamformer_sample(struct le_beamformer *beamformer,
  * a caller (room measurement, direction finding) can still read them.
  */
 void le_beamformer_lock(struct le_beamformer *beamformer, int azimuth_deg);
+
+/*
+ * Enable or disable adaptive null steering.  Disabling restores the fixed
+ * superdirective weights.  Enabling starts a fresh noise estimate; until it
+ * has enough quiet hops the fixed weights stay in use.  Returns 0, or -1 if
+ * the fixed design cannot be restored.
+ */
+int le_beamformer_set_adaptive(struct le_beamformer *beamformer, int enabled);
+
+/* Number of FFT bins with a usable measured covariance (0 when not ready). */
+unsigned int le_beamformer_adaptive_bins(const struct le_beamformer *beamformer);
 
 /* Smoothed speech-band power of beam index b (0 when out of range). */
 float le_beamformer_beam_power(const struct le_beamformer *beamformer,

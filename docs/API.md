@@ -246,7 +246,7 @@ Returns device information.
         "transport_channels": 2,
         "format": "pcm_s24_3le",
         "valid_bits": 16,
-        "beamforming": "12 fixed superdirective beams on mics 0, 1, 3 and 4 with SNR-based beam selection",
+        "beamforming": "12 adaptive superdirective beams on mics 0, 1, 3 and 4 with SNR-based beam selection",
         "high_pass_hz": 80,
         "digital_gain": "4.0x",
         "response": "flat within 0.5 dB, 200 Hz to 7 kHz",
@@ -681,8 +681,9 @@ when configured, local API authentication.
 
 #### GET /api/v1/microphones/beams
 
-A live snapshot of micd's fixed beamformer, for checking that beamforming
-works and roughly where sound is coming from. The **Audio** page draws it as
+A live snapshot of micd's beamformer, for checking that beamforming works and
+roughly where sound is coming from. The 12 beams are fixed in azimuth; their
+weights are superdirective and adapt to steady noise while no beam is active. The **Audio** page draws it as
 the *Direction of arrival* preview under **Microphones**, polling about four
 times a second. No audio is returned.
 
@@ -703,6 +704,9 @@ from the front (the volume-down side) viewed from above, the same frame as
     "reference": "0 deg front (volume down), clockwise viewed from above",
     "selected_deg": 90,
     "locked": false,
+    "adaptive": true,
+    "adaptive_bins": 129,
+    "adaptive_refreshes": 3,
     "doa_deg": 88.4,
     "peak_db": -41.2,
     "contrast_db": 5.1,
@@ -726,6 +730,9 @@ from the front (the volume-down side) viewed from above, the same frame as
   Near 0 dB the sound field is diffuse and `doa_deg` means little.
 - `selected_deg`: the beam currently feeding the voice pipeline; `locked` is
   true when it has been pinned rather than chosen automatically.
+- `adaptive`: whether measured-noise null steering is enabled; `adaptive_bins`
+  is how many of the 129 FFT bins currently have a usable noise covariance and
+  `adaptive_refreshes` counts weight refreshes since the stream started.
 - `running` is `false` (with a `reason`) when no beamformed stream is open.
 - The mock backend returns a simulated source circling the device every 20 s,
   with `"simulated": true`.
