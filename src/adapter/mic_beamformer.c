@@ -31,6 +31,25 @@
  * pointing the wrong way; with it, the beam stays on the last talker.
  */
 #define BEAM_ACTIVE_SCORE 2.0f
+/*
+ * Adaptive noise covariance.  A hop only contributes when no beam is active
+ * (all beam scores stay at their noise floor), so speech is not learnt as
+ * noise while a steady interferer is.  The covariance is smoothed over ~20
+ * contributing hops and the weights are re-solved every 2 s.
+ */
+#define BEAM_COV_SMOOTHING 0.05f
+#define BEAM_COV_MIN_UPDATES 8U
+#define BEAM_ADAPTIVE_WARMUP_HOPS 64UL
+#define BEAM_ADAPTIVE_REFRESH_HOPS 250UL
+#define BEAM_ADAPTIVE_MIN_POWER 1e-6f
+/*
+ * Diagonal loading is relative to the mean covariance eigenvalue.  The floor
+ * keeps the rank-one estimate from a single interferer invertible; the
+ * bisection raises it until the white-noise gain meets the fixed design's
+ * floor, so adaptation never amplifies sensor noise more than -3 dB.
+ */
+#define BEAM_ADAPTIVE_LOADING_LOW 1e-4
+#define BEAM_ADAPTIVE_LOADING_HIGH 1e2
 
 struct cplx { double re, im; };
 
@@ -116,12 +135,12 @@ static int solve(struct cplx a[LE_VOICE_LOGICAL_CHANNELS]
 }
 
 /*
- * MVDR weights against diffuse noise loaded by mu, for steering vector d:
- * w = (G + mu I)^-1 d / (d^H (G + mu I)^-1 d).  Returns the white-noise gain
- * 1/|w|^2, or a negative value when the system is singular.
+ * MVDR weights against noise covariance G loaded by mu, for steering vector
+ * d: w = (G + mu I)^-1 d / (d^H (G + mu I)^-1 d).  Returns the white-noise
+ * gain 1/|w|^2, or a negative value when the system is singular.
  */
-static double mvdr(double gamma[LE_VOICE_LOGICAL_CHANNELS]
-                                     [LE_VOICE_LOGICAL_CHANNELS],
+static double mvdr(const struct cplx gamma[LE_VOICE_LOGICAL_CHANNELS]
+                                    [LE_VOICE_LOGICAL_CHANNELS],
                    const struct cplx d[LE_VOICE_LOGICAL_CHANNELS],
                    unsigned int n, double mu,
                    struct cplx w[LE_VOICE_LOGICAL_CHANNELS])
@@ -133,8 +152,9 @@ static double mvdr(double gamma[LE_VOICE_LOGICAL_CHANNELS]
 
     for (i = 0; i < n; ++i) {
         for (j = 0; j < n; ++j) {
-            a[i][j].re = gamma[i][j] + (i == j ? mu : 0.0);
-            a[i][j].im = 0.0;
+            a[i][j] = gamma[i][j];
+            if (i == j)
+                a[i][j].re += mu;
         }
         w[i] = d[i];
     }
@@ -178,7 +198,7 @@ static void steering(const double px[], const double py[], unsigned int n,
 static int design(struct le_beamformer *bf)
 {
     double px[LE_VOICE_LOGICAL_CHANNELS], py[LE_VOICE_LOGICAL_CHANNELS];
-    double gamma[LE_VOICE_LOGICAL_CHANNELS][LE_VOICE_LOGICAL_CHANNELS];
+    struct cplx gamma[LE_VOICE_LOGICAL_CHANNELS][LE_VOICE_LOGICAL_CHANNELS];
     double wng_min = pow(10.0, LE_BEAM_WNG_MIN_DB / 10.0);
     double c = LE_MIC_ARRAY_SPEED_OF_SOUND_MM_S * 1e-3;
     unsigned int n = bf->mic_count, k, b, i, j;
@@ -194,7 +214,9 @@ static int design(struct le_beamformer *bf)
             for (j = 0; j < n; ++j) {
                 double r = hypot(px[i] - px[j], py[i] - py[j]);
                 double x = 2.0 * BEAM_PI * frequency * r / c;
-                gamma[i][j] = x < 1e-9 ? 1.0 : sin(x) / x;
+
+                gamma[i][j].re = x < 1e-9 ? 1.0 : sin(x) / x;
+                gamma[i][j].im = 0.0;
             }
         }
         /*
@@ -231,6 +253,156 @@ static int design(struct le_beamformer *bf)
         }
     }
     return 0;
+}
+
+/*
+ * Accumulate X X^H into the noise covariance for one speech-free hop.  The
+ * caller has already established that every beam is at its floor, so the
+ * samples here are the room and any steady interferer, not the talker.
+ */
+static void update_noise_covariance(struct le_beamformer *bf,
+                                    float xr[][LE_BEAM_BINS],
+                                    float xi[][LE_BEAM_BINS])
+{
+    unsigned int k, i, j;
+
+    for (k = 0; k < LE_BEAM_BINS; ++k) {
+        float power = 0.0f;
+        float alpha = bf->cov_updates[k] ? BEAM_COV_SMOOTHING : 1.0f;
+        float keep = 1.0f - alpha;
+
+        for (i = 0; i < bf->mic_count; ++i)
+            power += xr[i][k] * xr[i][k] + xi[i][k] * xi[i][k];
+        if (power < BEAM_ADAPTIVE_MIN_POWER)
+            continue;
+        for (i = 0; i < bf->mic_count; ++i) {
+            for (j = i; j < bf->mic_count; ++j) {
+                float cross_re = xr[i][k] * xr[j][k] +
+                                 xi[i][k] * xi[j][k];
+                float cross_im = xi[i][k] * xr[j][k] -
+                                 xr[i][k] * xi[j][k];
+
+                if (!bf->cov_updates[k]) {
+                    bf->cov_re[k][i][j] = cross_re;
+                    bf->cov_im[k][i][j] = cross_im;
+                } else {
+                    bf->cov_re[k][i][j] =
+                        keep * bf->cov_re[k][i][j] + alpha * cross_re;
+                    bf->cov_im[k][i][j] =
+                        keep * bf->cov_im[k][i][j] + alpha * cross_im;
+                }
+                /* Hermitian mirror; the diagonal is real. */
+                bf->cov_re[k][j][i] = bf->cov_re[k][i][j];
+                bf->cov_im[k][j][i] = -bf->cov_im[k][i][j];
+            }
+        }
+        if (bf->cov_updates[k] < 1000U)
+            ++bf->cov_updates[k];
+    }
+}
+
+/*
+ * Noise power a conjugated weight vector g would pass for the measured
+ * covariance: g R g^H.  Used to keep a new adaptive beam only when it is
+ * quieter than the beam it replaces, so adaptation can never make a bin
+ * worse than the fixed design it started from.
+ */
+static double weight_noise_power(const struct le_beamformer *bf, unsigned int k,
+                                 const float gr[], const float gi[],
+                                 unsigned int n)
+{
+    double power = 0.0;
+    unsigned int i, j;
+
+    for (i = 0; i < n; ++i) {
+        for (j = 0; j < n; ++j) {
+            double rr = bf->cov_re[k][i][j];
+            double ri = bf->cov_im[k][i][j];
+            double zr = gr[i] * rr - gi[i] * ri;
+            double zi = gr[i] * ri + gi[i] * rr;
+
+            power += zr * gr[j] + zi * gi[j];
+        }
+    }
+    return power;
+}
+
+/* Re-solve one bin's beams against the measured noise covariance. */
+static int adapt_bin(struct le_beamformer *bf, unsigned int k)
+{
+    struct cplx cov[LE_VOICE_LOGICAL_CHANNELS][LE_VOICE_LOGICAL_CHANNELS];
+    struct cplx d[LE_VOICE_LOGICAL_CHANNELS], w[LE_VOICE_LOGICAL_CHANNELS];
+    double px[LE_VOICE_LOGICAL_CHANNELS], py[LE_VOICE_LOGICAL_CHANNELS];
+    double wng_min = pow(10.0, LE_BEAM_WNG_MIN_DB / 10.0);
+    double frequency = (double)k * LE_VOICE_RATE / LE_BEAM_FFT;
+    double trace = 0.0, base;
+    unsigned int n = bf->mic_count, i, j, b;
+
+    for (i = 0; i < n; ++i) {
+        mic_position(bf->mics[i], &px[i], &py[i]);
+        for (j = 0; j < n; ++j) {
+            cov[i][j].re = bf->cov_re[k][i][j];
+            cov[i][j].im = bf->cov_im[k][i][j];
+        }
+        trace += bf->cov_re[k][i][i];
+    }
+    if (trace <= 1e-9)
+        return -1;
+    base = trace / (double)n;
+    for (b = 0; b < bf->beam_count; ++b) {
+        float g_re[LE_VOICE_LOGICAL_CHANNELS];
+        float g_im[LE_VOICE_LOGICAL_CHANNELS];
+        double old_power, new_power;
+        double lo = base * BEAM_ADAPTIVE_LOADING_LOW;
+        double hi = base * BEAM_ADAPTIVE_LOADING_HIGH;
+        int step;
+
+        old_power = weight_noise_power(bf, k, bf->w_re[b][k],
+                                       bf->w_im[b][k], n);
+        steering(px, py, n, frequency,
+                 bf->azimuth_deg[b] * BEAM_PI / 180.0, d);
+        if (mvdr(cov, d, n, lo, w) >= wng_min) {
+            hi = lo;
+        } else {
+            for (step = 0; step < 20; ++step) {
+                double mid = sqrt(lo * hi);
+                double wng = mvdr(cov, d, n, mid, w);
+
+                if (wng >= wng_min)
+                    hi = mid;
+                else
+                    lo = mid;
+            }
+        }
+        if (mvdr(cov, d, n, hi, w) < 0.0)
+            return -1;
+        for (i = 0; i < n; ++i) {
+            g_re[i] = (float)w[i].re;
+            g_im[i] = (float)-w[i].im;
+        }
+        new_power = weight_noise_power(bf, k, g_re, g_im, n);
+        if (new_power <= old_power) {
+            for (i = 0; i < n; ++i) {
+                bf->w_re[b][k][i] = g_re[i];
+                bf->w_im[b][k][i] = g_im[i];
+            }
+        }
+    }
+    return 0;
+}
+
+static void adaptive_refresh(struct le_beamformer *bf)
+{
+    unsigned int k, ready = 0;
+
+    for (k = 0; k < LE_BEAM_BINS; ++k) {
+        if (bf->cov_updates[k] < BEAM_COV_MIN_UPDATES)
+            continue;
+        if (adapt_bin(bf, k) == 0)
+            ++ready;
+    }
+    bf->adaptive_bins = ready;
+    ++bf->adaptive_refreshes;
 }
 
 static void fft(const struct le_beamformer *bf, float re[], float im[])
@@ -313,6 +485,7 @@ static void process_hop(struct le_beamformer *bf)
             xi[m][k] = im[k];
         }
     }
+    ++bf->hops;
     for (b = 0; b < bf->beam_count; ++b) {
         float energy = 0.0f;
         for (k = BEAM_SCORE_FIRST_BIN; k <= BEAM_SCORE_LAST_BIN; ++k) {
@@ -341,6 +514,23 @@ static void process_hop(struct le_beamformer *bf)
             best = b;
     }
     bf->primed = 1;
+    if (bf->adaptive_enabled) {
+        int speech = 0;
+
+        for (b = 0; b < bf->beam_count; ++b)
+            if (bf->score[b] >= BEAM_ACTIVE_SCORE)
+                speech = 1;
+        if (!speech) {
+            update_noise_covariance(bf, xr, xi);
+            if (bf->hops >= BEAM_ADAPTIVE_WARMUP_HOPS &&
+                (bf->last_adaptive_hop == 0 ||
+                 bf->hops - bf->last_adaptive_hop >=
+                     BEAM_ADAPTIVE_REFRESH_HOPS)) {
+                adaptive_refresh(bf);
+                bf->last_adaptive_hop = bf->hops;
+            }
+        }
+    }
     if (bf->locked >= 0) {
         bf->selected = (unsigned int)bf->locked;
         bf->candidate_frames = 0;
@@ -409,6 +599,28 @@ int16_t le_beamformer_sample(struct le_beamformer *bf,
         bf->fill = 0;
     }
     return out;
+}
+
+int le_beamformer_set_adaptive(struct le_beamformer *bf, int enabled)
+{
+    if (!bf)
+        return -1;
+    enabled = !!enabled;
+    if (bf->adaptive_enabled == (unsigned int)enabled)
+        return 0;
+    bf->adaptive_enabled = (unsigned int)enabled;
+    memset(bf->cov_re, 0, sizeof(bf->cov_re));
+    memset(bf->cov_im, 0, sizeof(bf->cov_im));
+    memset(bf->cov_updates, 0, sizeof(bf->cov_updates));
+    bf->adaptive_bins = 0;
+    bf->adaptive_refreshes = 0;
+    bf->last_adaptive_hop = 0;
+    return enabled ? 0 : design(bf);
+}
+
+unsigned int le_beamformer_adaptive_bins(const struct le_beamformer *bf)
+{
+    return bf ? bf->adaptive_bins : 0U;
 }
 
 void le_beamformer_lock(struct le_beamformer *bf, int azimuth_deg)

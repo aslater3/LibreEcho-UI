@@ -91,11 +91,29 @@ unity, one per ALSA lane: the stock `libasp.so` applies `miccal.N` to lane N.
 
 The beamformer (`src/adapter/mic_beamformer.c`) follows the shape of the stock
 Radar speech front end: a 256-point STFT with a 128-sample (8 ms) hop and 12
-fixed beams spaced 30 degrees apart. The beams are superdirective (minimum
-variance against diffuse noise) and designed at start-up from the geometry,
+beams spaced 30 degrees apart. The beams start as superdirective (minimum
+variance against diffuse noise) designs made at start-up from the geometry,
 with per-frequency diagonal loading that keeps white-noise gain at or above
 -3 dB. Each beam passes a talker on its axis at unity gain. Output is delayed
 by 16 ms.
+
+### Adaptive null steering
+
+micd also measures the noise covariance while no beam is active and re-solves
+the same distortionless MVDR weights against it every 2 s (off with
+`LE_MIC_BEAM_ADAPTIVE=0`). A steady directional interferer such as a fan,
+television or speaker then gets a null, while the on-axis gain of every beam
+stays exactly one. The estimate pauses whenever any beam is active, so a
+talker is not learnt as noise, and a new adaptive beam replaces the fixed one
+only when it is quieter for the measured covariance. This is real-data MVDR,
+not the diffuse-noise design alone; the stock `asp.cfg` eight-beam adaptive
+array is the reference shape, not a coefficient source.
+
+Measured on synthetic white noise from 90 degrees with the stock four
+microphones, adaptation removes 5.5 dB more of the interferer overall; the
+null is deep from about 500 Hz up and limited only by the array aperture at
+the lowest frequencies. `LE_MIC_BEAM_ADAPTIVE` and the beam status fields are
+diagnostics, not a user-facing setting.
 
 Beam selection scores each beam by its speech-band (312 Hz-4 kHz) power over
 its own running noise floor. That floor falls at once and rises 3 dB per

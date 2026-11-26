@@ -20,8 +20,12 @@
 
 #define SECONDS 2
 #define FRAMES (LE_VOICE_RATE * SECONDS)
+/* Long enough to fill the 1.54 s noise window and cross two weight refreshes. */
+#define ADAPT_SECONDS 5
+#define ADAPT_FRAMES (LE_VOICE_RATE * ADAPT_SECONDS)
 
 static struct le_beamformer bf;
+static struct le_beamformer fixed_bf;
 
 static void position(unsigned int lane, double *x, double *y)
 {
@@ -309,6 +313,74 @@ static void test_mix_modes(void)
     puts("mic-beamformer: mix modes parse, average and pick a lane");
 }
 
+/*
+ * A steady directional interferer is learnt during the quietest hops and
+ * nulled by the adaptive weights, while the beam's look direction stays
+ * distortionless.  The fixed beams on the same input are the baseline.
+ */
+static void test_adaptive_nulls_interferer(void)
+{
+    static float src[ADAPT_FRAMES];
+    static int16_t frames[ADAPT_FRAMES][LE_VOICE_LOGICAL_CHANNELS];
+    static int16_t adaptive_out[ADAPT_FRAMES];
+    static int16_t fixed_out[ADAPT_FRAMES];
+    static int16_t tone_out[LE_VOICE_RATE];
+    unsigned int seed = 4242, i;
+    size_t measure = 4 * LE_VOICE_RATE;
+    double adaptive_rms, fixed_rms, db, gain;
+
+    for (i = 0; i < ADAPT_FRAMES; ++i) {
+        seed = seed * 1103515245U + 12345U;
+        src[i] = (float)((int)((seed >> 16) % 8001) - 4000);
+    }
+    noise_source_frames(90.0, src, ADAPT_FRAMES, frames);
+
+    CHECK(le_beamformer_init(&bf, LE_BEAM_DEFAULT_MIC_MASK,
+                             LE_BEAM_DEFAULT_BEAMS) == 0);
+    CHECK(le_beamformer_set_adaptive(&bf, 1) == 0);
+    le_beamformer_lock(&bf, 0);
+    for (i = 0; i < ADAPT_FRAMES; ++i)
+        adaptive_out[i] = le_beamformer_sample(&bf, frames[i]);
+    printf("mic-beamformer: adaptive learnt %u of %u bins\n",
+           le_beamformer_adaptive_bins(&bf), LE_BEAM_BINS);
+    CHECK(le_beamformer_adaptive_bins(&bf) >= LE_BEAM_BINS * 3 / 4);
+
+    CHECK(le_beamformer_init(&fixed_bf, LE_BEAM_DEFAULT_MIC_MASK,
+                             LE_BEAM_DEFAULT_BEAMS) == 0);
+    le_beamformer_lock(&fixed_bf, 0);
+    for (i = 0; i < ADAPT_FRAMES; ++i)
+        fixed_out[i] = le_beamformer_sample(&fixed_bf, frames[i]);
+
+    adaptive_rms = rms_tail(adaptive_out, ADAPT_FRAMES, measure);
+    fixed_rms = rms_tail(fixed_out, ADAPT_FRAMES, measure);
+    db = 20.0 * log10((adaptive_rms + 1e-9) / (fixed_rms + 1e-9));
+    printf("mic-beamformer: steady 90 deg interferer, adaptive vs fixed: "
+           "%+.2f dB\n", db);
+    /*
+     * White noise carries real energy at 250 Hz and below, where a 72 mm
+     * array cannot resolve 90 degrees; the null is deep from ~500 Hz up.
+     * A four-microphone fixed beam still leaves 5 dB more of the interferer.
+     */
+    CHECK(db <= -4.0);
+
+    /* The look direction is 0 deg; adaptation must not notch it. */
+    for (i = 0; i < LE_VOICE_RATE; ++i) {
+        int16_t frame[LE_VOICE_LOGICAL_CHANNELS];
+
+        tone_frame((double)i / LE_VOICE_RATE, 1000.0, 0.0, 8000.0, frame);
+        tone_out[i] = le_beamformer_sample(&bf, frame);
+    }
+    gain = rms_tail(tone_out, LE_VOICE_RATE, LE_VOICE_RATE / 2) /
+           (8000.0 / sqrt(2.0));
+    printf("mic-beamformer: adapted 0 deg look-direction gain: %+.2f dB\n",
+           20.0 * log10(gain + 1e-9));
+    CHECK(fabs(20.0 * log10(gain + 1e-9)) <= 2.0);
+
+    /* Disabling restores the fixed design from the same state. */
+    CHECK(le_beamformer_set_adaptive(&bf, 0) == 0);
+    CHECK(le_beamformer_adaptive_bins(&bf) == 0);
+}
+
 int main(void)
 {
     test_parse();
@@ -317,5 +389,6 @@ int main(void)
     test_steady_source_ignored();
     test_between_beams();
     test_sensor_noise();
+    test_adaptive_nulls_interferer();
     return 0;
 }

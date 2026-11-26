@@ -59,6 +59,9 @@ struct beam_view {
     int locked;
     unsigned long hops;
     unsigned long switches;
+    unsigned int adaptive;
+    unsigned int adaptive_bins;
+    unsigned int adaptive_refreshes;
     long long updated_ms;
     /* enum le_mic_mix, set by "set_mix" and read by the stream worker per hop */
     volatile unsigned int mix_mode;
@@ -192,6 +195,9 @@ static void beam_view_publish(const struct le_beamformer *bf)
     beam_view->locked = bf->locked >= 0;
     beam_view->hops++;
     beam_view->switches = bf->switches;
+    beam_view->adaptive = bf->adaptive_enabled;
+    beam_view->adaptive_bins = bf->adaptive_bins;
+    beam_view->adaptive_refreshes = bf->adaptive_refreshes;
     beam_view->updated_ms = monotonic_ms();
     __sync_synchronize();
     beam_view->seq++;
@@ -272,11 +278,14 @@ static int format_beams(char *buffer, size_t size)
                  "\"hop_ms\":8,\"switches\":%lu,"
                  "\"reference\":\"0 deg front (volume down), clockwise viewed "
                  "from above\",\"selected_deg\":%d,\"locked\":%s,"
+                 "\"adaptive\":%s,\"adaptive_bins\":%u,"
+                 "\"adaptive_refreshes\":%u,"
                  "\"doa_deg\":%.1f,\"peak_db\":%.1f,\"contrast_db\":%.1f,"
                  "\"beams\":[",
                  monotonic_ms() - v.updated_ms, v.hops, v.switches,
                  v.selected_deg, v.locked ? "true" : "false",
-                 doa, db[peak], db[peak] - mean);
+                 v.adaptive ? "true" : "false", v.adaptive_bins,
+                 v.adaptive_refreshes, doa, db[peak], db[peak] - mean);
     if (n < 0 || (size_t)n >= size)
         return -1;
     used = (size_t)n;
@@ -557,6 +566,21 @@ static unsigned int beam_mic_mask(void)
     return mask && (mask & (mask - 1U)) ? mask : LE_BEAM_DEFAULT_MIC_MASK;
 }
 
+/*
+ * Adaptive null steering is on by default: it only learns while no beam is
+ * active, so it cannot track the talker.  LE_MIC_BEAM_ADAPTIVE=0 keeps the
+ * fixed superdirective beams for comparison or if a room misbehaves.
+ */
+static int beam_adaptive_enabled(void)
+{
+    const char *value = getenv("LE_MIC_BEAM_ADAPTIVE");
+
+    if (!value || !*value)
+        return 1;
+    return strcmp(value, "0") && strcmp(value, "off") &&
+           strcmp(value, "false");
+}
+
 /* Writes the selected lanes as "0,1,3,4"; needs 14 bytes for all seven. */
 static void format_mic_list(unsigned int mask, char *out, size_t size)
 {
@@ -804,6 +828,7 @@ static int format_status(char *buffer, size_t size,
         "\"microphone_mix\":\"%s\",\"microphone_lane\":%d,"
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
+        "\"beam_adaptive\":%s,"
         "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
         "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
         available ? "true" : "false",
@@ -815,7 +840,8 @@ static int format_status(char *buffer, size_t size,
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
         mics, le_mic_mix_name(current_mix_mode()), current_mix_lane(),
-        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
+        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP,
+        beam_adaptive_enabled() ? "true" : "false");
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
@@ -978,6 +1004,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
             ;
         return -1;
     }
+    (void)le_beamformer_set_adaptive(&beamformer, beam_adaptive_enabled());
     le_voice_highpass_init(&highpass);
     mix_mask = beam_mic_mask();
 
@@ -1063,8 +1090,11 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
             "\"calibration_mode\":\"direct_q14\","
             "\"logical_map\":\"measured\","
             "\"beamforming\":\"fixed_beam_select\","
+            "\"beam_adaptive\":%s,"
             "\"beams\":%d,\"latency_samples\":%d,"
-            "\"highpass_hz\":80}", mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
+            "\"highpass_hz\":80}", mics,
+            beam_adaptive_enabled() ? "true" : "false",
+            LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
     } else {
         n = snprintf(data, sizeof(data),
                      "{\"format\":\"pcm_s24_3le\",\"rate\":16000,"
