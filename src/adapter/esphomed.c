@@ -336,12 +336,16 @@ static void wake_detected(uint64_t sample){if(S.turn==3&&S.pipeline&&!S.announce
 /* Server-wake streaming ends with a stop request, never the on-device end-of-speech path. */
 static void stop_capture(const char *reason){if(S.server_turn)cancel_turn(reason);else capture_end();}
 static void client_close(unsigned i){struct client *c=&S.clients[i];if(c->fd>=0)close(c->fd);c->fd=-1;le_ble_proxy_close(&B,(int)i);if(S.owner==(int)i){cancel_turn("disconnected");S.owner=-1;timer_owner_end();}en_free(&c->noise);memset(c,0,sizeof *c);c->fd=-1;status_write();}
+/* VoiceAssistantAudioSettings (field 4): volume_multiplier = 1.0f (field 3)
+ * keeps Home Assistant 2026.12+ from inheriting proto3's 0.0 default and
+ * silencing microphone audio. */
+static void voice_audio_settings(struct ep_writer *w){unsigned char a[8];struct ep_writer s={a,sizeof a,0,0};put_float(&s,3,1.0f);ep_bytes(w,4,s.data,s.length);}
 static int voice_start(uint64_t sample,int continued){unsigned char b[256];struct ep_writer w={b,sizeof b,0,0};if(!S.ha_selected||S.owner<0||S.turn||S.now<S.cancel_guard||mic_muted()||(!continued&&!S.active_wake))return -1;
  ep_uint(&w,1,1);ep_string(&w,2,S.conversation);/* flags: USE_VAD only. USE_WAKE_WORD asks Home Assistant to run its own
     wake-word engine on the stream (ESPHome use_wake_word: true); the word was
     already detected here, so HA must start at STT -- with no HA wake engine the
     run otherwise fails instantly with wake-engine-missing. */
- ep_uint(&w,3,1);if(!continued)ep_string(&w,5,"Alexa");if(send_writer(&S.clients[S.owner],90,&w))return -1;
+ ep_uint(&w,3,1);voice_audio_settings(&w);if(!continued)ep_string(&w,5,"Alexa");if(send_writer(&S.clients[S.owner],90,&w))return -1;
  S.capture_next=sample>3200?sample-3200:0;if(S.capture_next<S.ring_first)S.capture_next=S.ring_first;S.turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;S.voice_open=1;if(!continued)event_send(ACTIVITY_VOICE_KEY,"wake_word");event_send(ACTIVITY_VOICE_KEY,"listening");profile("listening");status_write();return 0;
 }
 /* Server-side wake (esphome_server_wake, off by default): open an ESPHome run with
@@ -350,7 +354,7 @@ static int voice_start(uint64_t sample,int continued){unsigned char b[256];struc
  * unmuted and privacy-off; mute, privacy and unsubscribe stop the stream at once. */
 static int server_listen_start(void){unsigned char b[160];struct ep_writer w={b,sizeof b,0,0};uint64_t from;
  if(!S.server_wake||!S.ha_selected||S.owner<0||S.turn||mic_muted()||S.now<S.server_retry)return -1;
- ep_uint(&w,1,1);ep_string(&w,2,S.conversation);ep_uint(&w,3,3);if(send_writer(&S.clients[S.owner],90,&w)){S.server_retry=S.now+1000;return -1;}
+ ep_uint(&w,1,1);ep_string(&w,2,S.conversation);ep_uint(&w,3,3);voice_audio_settings(&w);if(send_writer(&S.clients[S.owner],90,&w)){S.server_retry=S.now+1000;return -1;}
  from=S.ring_end>16000?S.ring_end-16000:0;if(from<S.ring_first)from=S.ring_first;S.capture_next=from;
  S.turn=1;S.server_turn=1;S.turn_deadline=S.now+S.turn_limit;S.continue_turn=S.run_end=S.early_tts=S.tts_done=0;S.tts_url[0]=S.next_url[0]=0;S.announcement=0;S.pipeline=1;profile("listening");status_write();return 0;
 }
