@@ -170,6 +170,7 @@ WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
 WAKED_REQUIRED=1 python3 tests/test_waked_listen.py
 WAKED_REQUIRED=1 python3 tests/test_waked_clap.py
 WAKED_REQUIRED=1 python3 tests/test_waked_smoke_alarm.py
+WAKED_REQUIRED=1 python3 tests/test_waked_residual_echo.py
 WAKED_REQUIRED=1 python3 tests/test_waked_nearest_answers.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
@@ -380,8 +381,9 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
     -Isrc -Isrc/adapter tests/test_bt_media_resample.c src/adapter/radio_resample.c \
     -lm -o build/test-bt-media-resample
 ./build/test-bt-media-resample
-make build/test-voice-aec build/test-voice-reference build/test-voice-aec-guard build/test-spoken-time build/test-timezone
+make build/test-voice-aec build/test-voice-aec-residual build/test-voice-reference build/test-voice-aec-guard build/test-spoken-time build/test-timezone
 ./build/test-voice-aec
+./build/test-voice-aec-residual
 # #401: noise suppressor, and the local pipeline's off/on contract.
 make build/test-voice-ns build/test-voice-pipeline-noise
 ./build/test-voice-ns
