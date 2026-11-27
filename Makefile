@@ -1097,6 +1097,12 @@ $(BUILD)/test-voice-reference: tests/test_voice_reference.c src/adapter/voice_re
 		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
 		$^ $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
+$(BUILD)/test-voice-aec-residual: tests/test_voice_aec_residual.c \
+		src/adapter/voice_aec.c src/adapter/voice_aec.h
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -I$(SPEEX_PREFIX)/include \
+		$(filter %.c,$^) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
+
 $(BUILD)/test-voice-aec-guard: tests/test_voice_aec_guard.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_aec.c \
 		src/adapter/voice_reference.c
@@ -1490,6 +1496,7 @@ clean:
 	rm -f $(BUILD)/libreecho-waked $(BUILD)/libreecho-waked-arm32 \
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
+		$(BUILD)/test-voice-aec-residual \
 		$(BUILD)/test-voice-aec-guard \
 		$(BUILD)/test-voice-ns $(BUILD)/test-voice-pipeline-noise \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \

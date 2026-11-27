@@ -602,6 +602,7 @@ static void publish_audio_frame(struct waked_ipc *ipc,
 static void handle_control_client(
     struct waked_ipc *ipc,
     struct le_wake_worker *wake_worker,
+    struct le_voice_aec *aec,
     const struct waked_metrics *metrics,
     int client_fd)
 {
@@ -640,6 +641,9 @@ static void handle_control_client(
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
             "\"vad_active\":%s,\"vad_floor_rms\":%u,"
             "\"vad_noise_energy\":%llu,\"aec_active\":%s,"
+            "\"residual_echo_enabled\":%s,"
+            "\"residual_echo_suppress_db\":%d,"
+            "\"residual_echo_active_db\":%d,"
             "\"model_loaded\":%s,\"processed_frames\":%llu,"
             "\"capture_active\":%s,\"capture_age_ms\":%d,"
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
@@ -653,6 +657,9 @@ static void handle_control_client(
             metrics->vad_floor_rms,
             (unsigned long long)metrics->vad_noise_energy,
             metrics->playback_active ? "true" : "false",
+            aec->residual_echo_enabled ? "true" : "false",
+            aec->residual_suppress_db,
+            aec->residual_active_db,
             model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
             metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
             model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms,
@@ -770,6 +777,25 @@ static void handle_control_client(
                           enabled ? "{\"enabled\":true}"
                                   : "{\"enabled\":false}");
         }
+    } else if (!strcmp(command, "set_residual_echo")) {
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+        int enabled = 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "enabled") ||
+            json_get_top_level_bool(args, length, "enabled", &enabled) != 1)
+            (void)respond(client_fd, id, 0,
+                          "enabled must be a single top-level boolean");
+        else if (le_voice_aec_set_residual_echo(
+                     aec, enabled, LE_VOICE_AEC_RESIDUAL_SUPPRESS_DB,
+                     LE_VOICE_AEC_RESIDUAL_ACTIVE_DB) != 0)
+            (void)respond(client_fd, id, 0,
+                          "residual echo suppressor unavailable");
+        else
+            (void)respond(client_fd, id, 1,
+                          enabled ? "{\"enabled\":true}"
+                                  : "{\"enabled\":false}");
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -1108,7 +1134,7 @@ static int run_waked(const struct waked_config *config)
 
             if (client_fd >= 0)
                 handle_control_client(
-                    &ipc, &wake_worker, &metrics, client_fd);
+                    &ipc, &wake_worker, &aec, &metrics, client_fd);
         }
         if (descriptors[0].revents & (POLLERR | POLLHUP | POLLNVAL))
             break;

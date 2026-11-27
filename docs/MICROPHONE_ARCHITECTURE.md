@@ -168,6 +168,34 @@ while the selected beam follows talkers. The two can therefore differ.
 - The UI/API authentication and privacy policy remain in front of browser
   streaming and the beam view.
 
+## Residual echo suppression
+
+The stock AEC has an extra-suppression stage: after the adaptive canceller it
+cuts what is left of the loudspeaker echo, deeply when only echo remains and
+shallowly while the near end is talking, so barge-in survives. LibreEcho now
+runs the equivalent stage inside `libreecho-waked`'s canceller
+(`src/adapter/voice_aec.c`), using the libspeexdsp preprocessor driven by the
+canceller's own residual-echo estimate.
+
+- Defaults are the stock figures: -40 dB when only echo remains, -10 dB while
+  near-end speech is present.
+- Background noise reduction is a separate stage; the suppressor's noise floor
+  is set to 0 dB so it only acts on residual echo.
+- The filter is part of the AEC frame and adds the preprocessor's overlap-add
+  delay on top of the canceller.
+- `set_residual_echo` turns it off or on over the adapter control socket:
+  `{"v":1,"id":1,"cmd":"set_residual_echo","args":{"enabled":false}}`.
+  `status` reports `residual_echo_enabled`, `residual_echo_suppress_db` and
+  `residual_echo_active_db`.
+- `le_voice_aec_reset` (a reference discontinuity or playback edge) rebuilds
+  the suppressor with the current settings, so it never carries old statistics
+  into a new playback session.
+
+The two dB values are the stock defaults, not values measured on this hardware:
+the suppressor is only as good as the canceller's own residual estimate, and a
+real room with a real loudspeaker is still owed. Turning it off is the escape
+hatch if barge-in feels attenuated.
+
 ## Clap detection (experimental, off by default)
 
 `libreecho-waked` can screen its cleaned mono frames for claps. The detector
