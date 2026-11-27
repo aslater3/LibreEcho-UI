@@ -168,6 +168,44 @@ while the selected beam follows talkers. The two can therefore differ.
 - The UI/API authentication and privacy policy remain in front of browser
   streaming and the beam view.
 
+## Late-reverberation suppression
+
+The stock ASP front end has a CDR Dereverberator stage: `libasp.so` carries
+`CDR Dereverberator`, `CDR Dereverberator is enabled.` and the tunables
+`cdrAdapt`, `cdrDryStart`, `cdrMax`, `cdrMinCDRdB`, `cdrSpectralSmooth`,
+`cdrWet`, `cdrWetGain` and `gainLowCDR`. Its job is the far-field case: a
+talker reaches the array as direct sound plus a decaying tail of room
+reflections, and the tail smears each syllable into the next for both the wake
+word and recognition.
+
+`src/adapter/voice_dereverb.c` implements that shape on the wake path. It runs
+a 256-point STFT at the existing 8 ms hop, keeps a half-second power history,
+and estimates the late tail from the power of blocks that ended before the
+direct sound. The estimate decays exponentially and is subtracted per bin,
+with a floor so a reverberation-only bin is never removed entirely.
+
+- `waked` runs the stage after echo cancellation and before the VAD,
+  detectors and wake model. It adds the same 16 ms transform latency as the
+  noise suppressor; audio indices and the preroll stay aligned.
+- The floor defaults to 12 dB, the minimum is 3 dB and the maximum 24 dB.
+  `--dereverb-db 0` turns the stage off; values from 1 to 2 are clamped to 3.
+- The optional `/data/libreecho/config/wake-dereverb-db` file feeds that
+  argument through `init/libreecho-waked.init`. A literal 0 disables the
+  stage, an unreadable value falls back to 12 dB, and an out-of-range value is
+  clamped, so a bad hand-provisioned number never costs the device its wake
+  word.
+- `set_dereverb` changes the level at runtime:
+  `{"v":1,"id":1,"cmd":"set_dereverb","args":{"db":18}}`; 0 disables it.
+  `status` reports `dereverb_enabled`, `dereverb_db` and `dereverb_frames`.
+- `le_voice_dereverb_set_attenuation` changes the floor without discarding the
+  learned tail.
+
+The decay, delay and default level are tuned constants, not a measured room
+model. `tests/test_voice_dereverb.c` pins them against a synthetic exponential
+tail, and the 12 dB default is a judgement call from the stock stage's
+existence rather than a value read out of the stock binary. A real room is
+still owed.
+
 ## Clap detection (experimental, off by default)
 
 `libreecho-waked` can screen its cleaned mono frames for claps. The detector

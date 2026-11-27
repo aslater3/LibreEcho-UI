@@ -58,9 +58,20 @@ run() {
     PIDFILE="$T/waked.pid" LOGFILE="$T/waked.log" SOCKET="$T/wake.sock" \
     MIC_SOCKET="$T/mic.sock" REFERENCE_SOCKET="$T/ref.sock" \
     VAD_FLOOR_FILE="$T/none" AEC_FILE="$T/none" DUMP_FILE="$T/none" \
+    DEREVERB_FILE="$T/wake-dereverb-db" \
     WAKE_MODEL_FILE="$T/wake-model" WAKE_MODEL_BASE="$T/models" \
     WAKE_SECOND_FILE="$T/wake-second" \
     WAKE_MODEL_SETTLE_SECONDS=1 timeout 20 sh "$INIT" "$1" 2>>"$T/stderr"
+}
+
+# The fake start-stop-daemon backgrounds the daemon, so its argument line can
+# land just after start returns. Wait briefly instead of racing it.
+wait_args() {
+    count=0
+    while [ ! -s "$T/args" ] && [ "$count" -lt 40 ]; do
+        sleep 0.05
+        count=$((count + 1))
+    done
 }
 
 # expect <case> <model-dir> [<model-dir> ...]: each start's --model-dir, in order.
@@ -68,6 +79,7 @@ expect() {
     name=$1; shift
     : >"$T/args"
     run start
+    wait_args
     count=0
     for dir in "$@"; do
         count=$((count + 1))
@@ -115,6 +127,7 @@ expect_second() {
     name=$1; folder=$2
     : >"$T/args"
     run start
+    wait_args
     line=$(tail -n 1 "$T/args")
     if [ -n "$folder" ]; then
         case "$line" in
@@ -141,3 +154,32 @@ echo linked >"$T/wake-second"
 expect_second "a second word with a symlinked classifier is ignored" ""
 echo missing >"$T/wake-second"
 expect_second "a second word with no folder is ignored" ""
+
+# expect_dereverb <case> <level>: the last start's --dereverb-db value.
+expect_dereverb() {
+    name=$1; level=$2
+    : >"$T/args"
+    run start
+    wait_args
+    line=$(tail -n 1 "$T/args")
+    case "$line" in
+        *"--dereverb-db $level"*) ;;
+        *) echo "FAIL $name: $line" >&2; cat "$T/stderr" >&2; exit 1 ;;
+    esac
+    run stop
+    echo "waked init: $name"
+}
+
+rm -f "$T/wake-dereverb-db"
+expect_dereverb "no dereverb file uses the default" 12
+echo 0 >"$T/wake-dereverb-db"
+expect_dereverb "a literal 0 disables dereverb" 0
+echo 18 >"$T/wake-dereverb-db"
+expect_dereverb "a valid level is passed through" 18
+echo 2 >"$T/wake-dereverb-db"
+expect_dereverb "a level below the minimum is clamped" 3
+echo 99 >"$T/wake-dereverb-db"
+expect_dereverb "a level above the maximum is clamped" 24
+echo loud >"$T/wake-dereverb-db"
+expect_dereverb "junk falls back to the default" 12
+grep -q "unreadable dereverb level" "$T/stderr"

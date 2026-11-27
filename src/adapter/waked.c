@@ -5,6 +5,7 @@
 #include "smoke_alarm_detector.h"
 #include "voice_aec.h"
 #include "voice_aec_guard.h"
+#include "voice_dereverb.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
 #include "voice_stream.h"
@@ -64,6 +65,8 @@ struct waked_config {
     unsigned int dump_seconds;
     unsigned int wake_threads;
     unsigned int vad_floor_rms;
+    /* 0 disables late-reverberation suppression; 3..24 is the floor cut. */
+    int dereverb_db;
     float wake_threshold;
     /* Optional second wake word: a model folder whose classifier runs on the
      * first model's features. Its folder name is the word's name. */
@@ -86,6 +89,9 @@ struct waked_ipc {
     struct le_wake_led led;
     struct le_clap_detector clap;
     struct le_smoke_alarm_detector smoke_alarm;
+    struct le_voice_dereverb dereverb;
+    /* 0 disables the stage; otherwise the current floor cut in dB. */
+    int dereverb_db;
     struct le_wake_arbiter arbiter;
     /* A detection waiting for the other devices' claims. */
     int arb_pending;
@@ -100,6 +106,7 @@ struct waked_metrics {
     uint64_t processed_frames;
     uint64_t last_capture_ns;
     uint64_t aec_frames;
+    uint64_t dereverb_frames;
     uint64_t vad_active_frames;
     uint64_t vad_noise_energy;
     uint64_t dump_samples;
@@ -494,6 +501,43 @@ static void wake_event_received(
 }
 #endif
 
+/* json_int_span() also accepts 1.5 as 1; a level must be a whole number. */
+static int dereverb_span_is_integer(const char *s, size_t n)
+{
+    size_t i = 0;
+
+    if (i < n && s[i] == '-')
+        ++i;
+    if (i == n)
+        return 0;
+    for (; i < n; ++i)
+        if (s[i] < '0' || s[i] > '9')
+            return 0;
+    return 1;
+}
+
+static int parse_dereverb_db(const char *args, int *db)
+{
+    struct json_member member;
+    size_t count = 0;
+    size_t length;
+
+    if (!args)
+        return -1;
+    length = strnlen(args, LE_ADAPTER_MSG_MAX);
+    if (length == LE_ADAPTER_MSG_MAX ||
+        !json_valid_object(args, length) ||
+        json_duplicate_key(args, length, "db") ||
+        json_object_members(args, length, &member, 1, &count) < 0 ||
+        count != 1 || member.name_len != 2 ||
+        memcmp(member.name, "db", 2) != 0 ||
+        !dereverb_span_is_integer(member.value, member.value_len) ||
+        json_int_span(member.value, member.value_len, db) != 1 ||
+        *db < 0 || *db > LE_VOICE_DEREVERB_MAX_ATTENUATION_DB)
+        return -1;
+    return 0;
+}
+
 static int parse_sensitivity(const char *args, int *sensitivity)
 {
     const char *value = strstr(args, "\"sensitivity\"");
@@ -640,6 +684,8 @@ static void handle_control_client(
             "\"cpu_cost\":17,\"memory_cost_mb\":6,"
             "\"vad_active\":%s,\"vad_floor_rms\":%u,"
             "\"vad_noise_energy\":%llu,\"aec_active\":%s,"
+            "\"dereverb_enabled\":%s,\"dereverb_db\":%d,"
+            "\"dereverb_frames\":%llu,"
             "\"model_loaded\":%s,\"processed_frames\":%llu,"
             "\"capture_active\":%s,\"capture_age_ms\":%d,"
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
@@ -653,6 +699,8 @@ static void handle_control_client(
             metrics->vad_floor_rms,
             (unsigned long long)metrics->vad_noise_energy,
             metrics->playback_active ? "true" : "false",
+            ipc->dereverb_db > 0 ? "true" : "false", ipc->dereverb_db,
+            (unsigned long long)metrics->dereverb_frames,
             model_loaded ? "true" : "false", (unsigned long long)metrics->processed_frames,
             metrics->processed_frames && le_wake_recent(capture_age_ms, LE_WAKE_CAPTURE_STALE_MS) ? "true" : "false", capture_age_ms,
             model_loaded && le_wake_recent(inference_age_ms, LE_WAKE_INFERENCE_STALE_MS) ? "true" : "false", inference_age_ms,
@@ -770,6 +818,30 @@ static void handle_control_client(
                           enabled ? "{\"enabled\":true}"
                                   : "{\"enabled\":false}");
         }
+    } else if (!strcmp(command, "set_dereverb")) {
+        int db;
+
+        if (parse_dereverb_db(args, &db) < 0) {
+            (void)respond(client_fd, id, 0,
+                          "db must be one top-level integer 0..24");
+        } else {
+            if (db > 0 && db < LE_VOICE_DEREVERB_MIN_ATTENUATION_DB)
+                db = LE_VOICE_DEREVERB_MIN_ATTENUATION_DB;
+            if (db == 0) {
+                ipc->dereverb_db = 0;
+                (void)respond(client_fd, id, 1, "{}");
+            } else if (ipc->dereverb_db > 0) {
+                le_voice_dereverb_set_attenuation(&ipc->dereverb, db);
+                ipc->dereverb_db = db;
+                (void)respond(client_fd, id, 1, "{}");
+            } else if (le_voice_dereverb_init(&ipc->dereverb, db) < 0) {
+                (void)respond(client_fd, id, 0,
+                              "dereverberator unavailable");
+            } else {
+                ipc->dereverb_db = db;
+                (void)respond(client_fd, id, 1, "{}");
+            }
+        }
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -838,6 +910,11 @@ static int process_frame(struct le_voice_aec *aec,
     } else {
         memset(far_end, 0, sizeof(far_end));
         memcpy(clean, microphone, sizeof(clean));
+    }
+    if (ipc->dereverb_db > 0) {
+        le_voice_dereverb_process(&ipc->dereverb, clean,
+                                  LE_VOICE_AEC_FRAME_SAMPLES);
+        ++metrics->dereverb_frames;
     }
     vad_result = le_voice_vad_process(
         vad, clean, LE_VOICE_AEC_FRAME_SAMPLES);
@@ -948,6 +1025,17 @@ static int run_waked(const struct waked_config *config)
     memset(&ipc, 0, sizeof(ipc));
     le_clap_detector_init(&ipc.clap);
     le_smoke_alarm_detector_init(&ipc.smoke_alarm);
+    /*
+     * A failure here disables the stage rather than stopping the daemon: a
+     * device with no wake word is worse than a device without dereverberation.
+     */
+    if (config->dereverb_db > 0 &&
+        le_voice_dereverb_init(&ipc.dereverb, config->dereverb_db) == 0) {
+        ipc.dereverb_db = config->dereverb_db;
+    } else if (config->dereverb_db > 0) {
+        fprintf(stderr, "waked: unable to initialize dereverberator; "
+                "continuing without it\n");
+    }
     ipc.listen_fd = -1;
     ipc.event_pipe[0] = -1;
     ipc.event_pipe[1] = -1;
@@ -1044,8 +1132,8 @@ static int run_waked(const struct waked_config *config)
     }
     fprintf(stderr,
             "waked: running (16 kHz, frame=10 ms, AEC tail=200 ms, "
-            "preroll=3 s, vad-floor=%u RMS, wake=%s)\n",
-            config->vad_floor_rms,
+            "preroll=3 s, vad-floor=%u RMS, dereverb=%d dB, wake=%s)\n",
+            config->vad_floor_rms, ipc.dereverb_db,
 #ifdef LE_WAKE_ENGINE_ONNX
             "openwakeword-onnx"
 #else
@@ -1216,6 +1304,7 @@ int main(int argc, char **argv)
         0,
         2,
         LE_VOICE_VAD_DEFAULT_FLOOR_RMS,
+        LE_VOICE_DEREVERB_DEFAULT_ATTENUATION_DB,
         WAKE_ACCEPT_THRESHOLD,
         NULL
     };
@@ -1292,6 +1381,32 @@ int main(int argc, char **argv)
                 floor_rms = (long)LE_VOICE_VAD_MAX_FLOOR_RMS;
             }
             config.vad_floor_rms = (unsigned int)floor_rms;
+        } else if (!strcmp(argv[i], "--dereverb-db") && i + 1 < argc) {
+            char *end = NULL;
+            long db = strtol(argv[++i], &end, 10);
+
+            if (!end || *end != '\0' || db < 0) {
+                fprintf(stderr, "waked: dereverb dB must be 0 or more\n");
+                return 2;
+            }
+            /*
+             * Clamp like the VAD floor instead of refusing: the value is
+             * owner-provisioned through the init script, and a stage one
+             * decibel out of range must not cost the device its wake word.
+             */
+            if (db > 0 && db < LE_VOICE_DEREVERB_MIN_ATTENUATION_DB) {
+                fprintf(stderr, "waked: dereverb %ld dB below minimum %u; "
+                        "clamping\n", db,
+                        (unsigned int)LE_VOICE_DEREVERB_MIN_ATTENUATION_DB);
+                db = LE_VOICE_DEREVERB_MIN_ATTENUATION_DB;
+            }
+            if (db > LE_VOICE_DEREVERB_MAX_ATTENUATION_DB) {
+                fprintf(stderr, "waked: dereverb %ld dB above maximum %u; "
+                        "clamping\n", db,
+                        (unsigned int)LE_VOICE_DEREVERB_MAX_ATTENUATION_DB);
+                db = LE_VOICE_DEREVERB_MAX_ATTENUATION_DB;
+            }
+            config.dereverb_db = (int)db;
         } else if (!strcmp(argv[i], "--dump-pcm") && i + 1 < argc) {
             config.dump_path = argv[++i];
         } else if (!strcmp(argv[i], "--dump-seconds") && i + 1 < argc) {
@@ -1309,6 +1424,7 @@ int main(int argc, char **argv)
                     "[--reference-socket PATH] "
                     "[--model-dir PATH] [--wake-threads 1..4] "
                     "[--vad-floor-rms 1..16384] "
+                    "[--dereverb-db 0..24] "
                     "[--wake-threshold 0..1] "
                     "[--second-model-dir PATH] "
                     "[--dump-pcm PATH --dump-seconds N]\n", argv[0]);

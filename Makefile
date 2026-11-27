@@ -1017,6 +1017,12 @@ $(BUILD)/test-voice-ns: tests/test_voice_ns.c src/adapter/voice_ns.c src/adapter
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -Isrc/adapter $(filter %.c,$^) -lm -o $@
 
+$(BUILD)/test-voice-dereverb: tests/test_voice_dereverb.c \
+		src/adapter/voice_dereverb.c src/adapter/voice_dereverb.h
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -Isrc/adapter $(filter %.c,$^) -lm -o $@
+
 $(BUILD)/test-voice-pipeline-noise: tests/test_voice_pipeline_noise.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c src/adapter/voice_whisper.c src/adapter/voice_listening_led.c \
@@ -1262,6 +1268,7 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 	python3 tests/test_voice_listening_callers.py
 
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
+		src/adapter/voice_dereverb.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
@@ -1272,6 +1279,7 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		$(filter %.c,$^) $(SPEEX_PREFIX)/lib/libspeexdsp.a -lm -o $@
 
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
+		src/adapter/voice_dereverb.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
 		src/adapter/smoke_alarm_detector.c \
@@ -1491,7 +1499,8 @@ clean:
 		$(BUILD)/libreecho-waked-onnx-arm32 \
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
 		$(BUILD)/test-voice-aec-guard \
-		$(BUILD)/test-voice-ns $(BUILD)/test-voice-pipeline-noise \
+		$(BUILD)/test-voice-ns $(BUILD)/test-voice-dereverb \
+		$(BUILD)/test-voice-pipeline-noise \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
 		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-actions \
