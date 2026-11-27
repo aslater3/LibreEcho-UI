@@ -26,6 +26,14 @@
  */
 #define LE_VOICE_VAD_MAX_FLOOR_RMS 16384U
 /*
+ * The stock front end tracks its VAD noise floor with minimum statistics:
+ * subDuplexVadFlrMstatLength, subDuplexVadFlrMstatSubFrms, FlrAttack,
+ * FlrDecay, FlrFastAttack, FlrCountLim, FlrMinDelta, InitialNoiseLevel and
+ * MinNoiseLevel are all config keys in libasp.so.  One second of 10 ms frames
+ * is the usual M-statistics window and is what this detector keeps.
+ */
+#define LE_VOICE_VAD_MSTAT_FRAMES 100
+/*
  * The four microphones the stock speech front end uses: rear-left, rear-right,
  * front-right and front-left (see mic_array_geometry.h).  They are averaged
  * with no delay.  The capture lanes arrive in step, so any delay applied here
@@ -56,9 +64,12 @@ struct le_voice_highpass {
 struct le_voice_vad {
     uint64_t noise_energy;
     uint64_t minimum_energy;
+    /* Quietest inactive frame of the last LE_VOICE_VAD_MSTAT_FRAMES. */
+    uint32_t window[LE_VOICE_VAD_MSTAT_FRAMES];
+    unsigned int window_index;
+    unsigned int window_filled;
     unsigned int speech_run;
     unsigned int hangover;
-    int initialized;
     int active;
 };
 

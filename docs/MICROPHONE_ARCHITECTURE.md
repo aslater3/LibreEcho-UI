@@ -111,6 +111,24 @@ The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction
 only and comb-filtered speech from every other direction.
 
+### Wake detection gate
+
+`waked` runs the VAD in `src/adapter/voice_dsp.c` over the beamformed mono
+stream and reports its `vad_score` with every observation, so a click or a
+playback burst with a high model score can be rejected.
+
+The stock front end tracks the same floor with minimum statistics; the
+`subDuplexVadFlrMstatLength`, `subDuplexVadFlrMstatSubFrms`,
+`subDuplexVadFlrAttack`, `subDuplexVadFlrDecay`, `subDuplexVadFlrFastAttack`,
+`subDuplexVadFlrCountLim`, `subDuplexVadFlrMinDelta`,
+`subDuplexVadInitialNoiseLevel` and `subDuplexVadMinNoiseLevel` keys are all in
+`libasp.so`. This detector keeps a one-second window of the quietest inactive
+frames, takes the second-quietest frame as the floor (so one digital-silence or
+dropped-sample frame cannot set it), limits a drop to 12 dB per frame, and
+starts at the configured floor rather than at the first captured frame. A
+stream that starts mid-sentence or after a codec click recovers to the room's
+own level within that window instead of staying desensitised.
+
 ## Mix mode
 
 The owner picks how the speech microphones become the mono stream with
