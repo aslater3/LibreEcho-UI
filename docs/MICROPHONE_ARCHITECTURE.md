@@ -168,6 +168,32 @@ while the selected beam follows talkers. The two can therefore differ.
 - The UI/API authentication and privacy policy remain in front of browser
   streaming and the beam view.
 
+## False wake prevention
+
+The stock ASP runs a `FalseWWPrevention` stage with clipping and fast/slow
+variance thresholds, and the stock wake metrics carry `rawMicClipped`,
+`afeOutClipped` and the variance fields. LibreEcho now applies a narrow gate in
+front of the wake arbitration and the subscriber fan-out
+(`src/adapter/false_wake_guard.c`):
+
+- a detection is refused when more than 2% of the samples in the second before
+  it, on either side of the echo canceller, are at full scale;
+- a detection scored below 0.9 is refused when the loudest 10 ms frame in that
+  second is more than 50 times the quietest (a door or a hand, not speech);
+- a detection over digital silence is refused.
+
+It is on at boot. `status` reports `false_wake_guard_enabled` and
+`false_wake_guard_count`, and the gate can be switched off over the adapter
+control socket:
+
+```text
+{"v":1,"id":1,"cmd":"set_false_wake_guard","args":{"enabled":false}}
+```
+
+A refused detection is logged with the reason and its clipping, variance and
+RMS figures. The thresholds are tuned constants, not a measured standard; a
+loud room on real hardware is still owed.
+
 ## Clap detection (experimental, off by default)
 
 `libreecho-waked` can screen its cleaned mono frames for claps. The detector
