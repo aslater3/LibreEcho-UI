@@ -158,6 +158,37 @@ The direction is the loudest beam, refined by a parabola through its
 neighbours. It shows where the most sound comes from, including steady noise,
 while the selected beam follows talkers. The two can therefore differ.
 
+### Wake-direction lock
+
+The stock front end treats the beam as something to hold once a wake word has
+been accepted: `libasp.so` carries `EVD BeamFormer`, `SerialARA Beam Selector`,
+`Beam direction: %s`, and the diagnostics `AFEDiagSelectedBeamNumber`,
+`AFEDiagSelectedBeamResidencyinFrames` and `AFEDiagBeamChangeCount`. LibreEcho
+selected the beam continuously, so a fan, a television or a second talker could
+take the beam between the wake word and the request that followed.
+
+`micd` now takes two control commands:
+
+- `lock_beam` with `{"hold_ms":8000}` pins the array to the beam selected at
+  that moment. An optional `{"azimuth_deg":270}` names the direction instead.
+  `hold_ms` is clamped to 0..30000 and `azimuth_deg` to -1..359; a lock lasts
+  until the hold expires, `unlock_beam` arrives, or a new `lock_beam` replaces
+  it. Audio is unaffected apart from which beam feeds it.
+- `unlock_beam` returns the selector to automatic.
+
+`waked` sends `lock_beam` with `hold_ms` on every accepted wake event, whether
+the word came from the model, the action button's `listen` command or a
+neighbour's claim. It uses `micd`'s current selection rather than an azimuth,
+so the lock follows what the detector actually heard. `--beam-lock-ms` sets
+the hold (default 8000, range 0..30000); 0 disables the request entirely. The
+request is a separate short control connection with a 200 ms timeout, and its
+failure is logged and ignored: losing the lock must never lose the wake.
+
+`beams` reports `locked`, and `micd`'s log records each lock. The hold is a
+judgement call: long enough to cover a spoken follow-up (the stock residency
+diagnostic is the closest analogue), short enough that the array returns to
+automatic selection if the user says nothing.
+
 ## Safety and privacy properties
 
 - No capture starts merely because the device boots.

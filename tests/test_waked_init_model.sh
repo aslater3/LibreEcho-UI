@@ -58,9 +58,20 @@ run() {
     PIDFILE="$T/waked.pid" LOGFILE="$T/waked.log" SOCKET="$T/wake.sock" \
     MIC_SOCKET="$T/mic.sock" REFERENCE_SOCKET="$T/ref.sock" \
     VAD_FLOOR_FILE="$T/none" AEC_FILE="$T/none" DUMP_FILE="$T/none" \
+    BEAM_LOCK_FILE="$T/wake-beam-lock-ms" \
     WAKE_MODEL_FILE="$T/wake-model" WAKE_MODEL_BASE="$T/models" \
     WAKE_SECOND_FILE="$T/wake-second" \
     WAKE_MODEL_SETTLE_SECONDS=1 timeout 20 sh "$INIT" "$1" 2>>"$T/stderr"
+}
+
+# The fake start-stop-daemon backgrounds the daemon, so its argument line can
+# land just after start returns. Wait briefly instead of racing it.
+wait_args() {
+    count=0
+    while [ ! -s "$T/args" ] && [ "$count" -lt 40 ]; do
+        sleep 0.05
+        count=$((count + 1))
+    done
 }
 
 # expect <case> <model-dir> [<model-dir> ...]: each start's --model-dir, in order.
@@ -68,6 +79,7 @@ expect() {
     name=$1; shift
     : >"$T/args"
     run start
+    wait_args
     count=0
     for dir in "$@"; do
         count=$((count + 1))
@@ -115,6 +127,7 @@ expect_second() {
     name=$1; folder=$2
     : >"$T/args"
     run start
+    wait_args
     line=$(tail -n 1 "$T/args")
     if [ -n "$folder" ]; then
         case "$line" in
@@ -141,3 +154,30 @@ echo linked >"$T/wake-second"
 expect_second "a second word with a symlinked classifier is ignored" ""
 echo missing >"$T/wake-second"
 expect_second "a second word with no folder is ignored" ""
+
+# expect_beam_lock <case> <ms>: the last start's --beam-lock-ms value.
+expect_beam_lock() {
+    name=$1; hold=$2
+    : >"$T/args"
+    run start
+    wait_args
+    line=$(tail -n 1 "$T/args")
+    case "$line" in
+        *"--beam-lock-ms $hold"*) ;;
+        *) echo "FAIL $name: $line" >&2; cat "$T/stderr" >&2; exit 1 ;;
+    esac
+    run stop
+    echo "waked init: $name"
+}
+
+rm -f "$T/wake-beam-lock-ms"
+expect_beam_lock "no beam lock file uses the default" 8000
+echo 0 >"$T/wake-beam-lock-ms"
+expect_beam_lock "a literal 0 disables the beam lock" 0
+echo 4500 >"$T/wake-beam-lock-ms"
+expect_beam_lock "a valid beam lock is passed through" 4500
+echo 99999 >"$T/wake-beam-lock-ms"
+expect_beam_lock "a beam lock above the maximum is clamped" 30000
+echo hold >"$T/wake-beam-lock-ms"
+expect_beam_lock "junk falls back to the default" 8000
+grep -q "unreadable beam lock" "$T/stderr"

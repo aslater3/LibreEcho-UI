@@ -19,6 +19,10 @@ SOCKET=${SOCKET:-/run/libreecho/wakeword.sock}
 MIC_SOCKET=${MIC_SOCKET:-/run/libreecho/mic.sock}
 REFERENCE_SOCKET=${REFERENCE_SOCKET:-/run/libreecho-audio/aec-reference.sock}
 VAD_FLOOR_FILE=${VAD_FLOOR_FILE:-/data/libreecho/config/vad-floor-rms}
+# How long the array stays pinned to the wake direction, in ms (0 turns the
+# lock off). Hand-provisioned like the VAD floor, so junk falls back to the
+# default instead of stopping the daemon.
+BEAM_LOCK_FILE=${BEAM_LOCK_FILE:-/data/libreecho/config/wake-beam-lock-ms}
 # Echo cancellation is on unless this file says 0. It exists because a single
 # playback has been observed to stop the wake word detecting until reboot,
 # and the AEC reference is the prime suspect: before anything is spoken the
@@ -64,6 +68,9 @@ VAD_FLOOR_DEFAULT=16
 # LE_VOICE_VAD_MAX_FLOOR_RMS (16384) in src/adapter/voice_dsp.h.
 VAD_FLOOR_MAX=1024
 VAD_FLOOR_RMS=${VAD_FLOOR_RMS:-$VAD_FLOOR_DEFAULT}
+BEAM_LOCK_DEFAULT=8000
+BEAM_LOCK_MAX=30000
+BEAM_LOCK_MS=${BEAM_LOCK_MS:-$BEAM_LOCK_DEFAULT}
 
 mount_runtime() {
     [ -f "$PAYLOAD" ] || {
@@ -225,6 +232,22 @@ start_service() {
         echo "libreecho-waked: VAD floor above $VAD_FLOOR_MAX; clamping" >&2
         VAD_FLOOR_RMS=$VAD_FLOOR_MAX
     fi
+    # Same fail-safe shape as the VAD floor: junk means the default, an
+    # out-of-range number is clamped, and only a literal 0 disables the lock.
+    # The value is validated again by waked, but a bad one must not stop it.
+    if [ -r "$BEAM_LOCK_FILE" ]; then
+        BEAM_LOCK_MS=$(sed -n '1p' "$BEAM_LOCK_FILE")
+    fi
+    case "$BEAM_LOCK_MS" in
+        *[!0-9]*|'')
+            echo "libreecho-waked: unreadable beam lock '$BEAM_LOCK_MS'; using $BEAM_LOCK_DEFAULT" >&2
+            BEAM_LOCK_MS=$BEAM_LOCK_DEFAULT
+            ;;
+    esac
+    if [ "$BEAM_LOCK_MS" -gt "$BEAM_LOCK_MAX" ]; then
+        echo "libreecho-waked: beam lock above $BEAM_LOCK_MAX ms; clamping" >&2
+        BEAM_LOCK_MS=$BEAM_LOCK_MAX
+    fi
     # Same fail-safe as the VAD floor: a bad value must not cost the device
     # its wake word, so anything other than a literal 0 leaves AEC enabled.
     AEC_REFERENCE_ARG="--reference-socket $REFERENCE_SOCKET"
@@ -260,7 +283,7 @@ start_service() {
         SECOND_ARG="--second-model-dir $SECOND_MODEL_ROOT"
         model_note "listening for a second wake word from $SECOND_MODEL_ROOT"
     fi
-    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET $AEC_REFERENCE_ARG --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS $DUMP_ARG $SECOND_ARG}
+    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET $AEC_REFERENCE_ARG --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS --beam-lock-ms $BEAM_LOCK_MS $DUMP_ARG $SECOND_ARG}
     launch_daemon
     # waked exits at startup when it cannot load its models. Only a custom
     # model gets this check, and a failure restarts on the stock model.
