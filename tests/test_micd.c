@@ -6,6 +6,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -171,7 +172,9 @@ int main(void)
     if (child == 0) {
         /* A stale boot-time gain must not win over the saved one. */
         if (setenv("LE_MIC_CAPTURE_GAIN", "65", 1) ||
-            setenv("LE_MIC_CONFIG", config_path, 1))
+            setenv("LE_MIC_CONFIG", config_path, 1) ||
+            setenv("LE_MIC_GAIN_RAMP_MS", "200", 1) ||
+            setenv("LE_MIC_GAIN_RAMP_REBOOT_MS", "200", 1))
             _exit(127);
         execl("./build/libreecho-micd", "libreecho-micd",
               "--foreground", "--socket", socket_path,
@@ -457,6 +460,72 @@ int main(void)
         CHECK(strstr(response, "\"running\":false") != NULL);
         printf("micd: beams report a source at %.0f deg as %.1f deg, "
                "and clear when the stream stops\n", BEAM_TEST_AZIMUTH, doa);
+    }
+    {
+        /*
+         * Capture gain ramp: the stream starts at the baseline digital gain
+         * and walks up to the configured level. The capture is constant
+         * broadband for its first 250 ms, so the first 20 ms must be quieter
+         * than the 150-170 ms window once the 200 ms ramp has run. This is
+         * the wiring check; the exact shape is pinned in test_gain_ramp.c.
+         */
+        struct sockaddr_un address;
+        const char request[] =
+            "{\"v\":1,\"id\":36,\"cmd\":\"stream_mono\",\"args\":{}}\n";
+        int16_t audio[3200];
+        size_t header_used = 0;
+        size_t audio_bytes = 0;
+        double early_energy = 0.0;
+        double late_energy = 0.0;
+        size_t n;
+        ssize_t count;
+
+        stream_fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        CHECK(stream_fd >= 0);
+        memset(&address, 0, sizeof(address));
+        address.sun_family = AF_UNIX;
+        strncpy(address.sun_path, socket_path, sizeof(address.sun_path) - 1);
+        CHECK(connect(stream_fd, (struct sockaddr *)&address,
+                      sizeof(address)) == 0);
+        CHECK(write(stream_fd, request, sizeof(request) - 1) ==
+              (ssize_t)(sizeof(request) - 1));
+        while (header_used + 1 < sizeof(response)) {
+            count = read(stream_fd, response + header_used, 1);
+            CHECK(count == 1);
+            if (response[header_used++] == '\n')
+                break;
+        }
+        response[header_used] = '\0';
+        CHECK(strstr(response, "\"ok\":true") != NULL);
+        while (audio_bytes < sizeof(audio)) {
+            count = read(stream_fd, (char *)audio + audio_bytes,
+                         sizeof(audio) - audio_bytes);
+            CHECK(count > 0);
+            audio_bytes += (size_t)count;
+        }
+        for (n = 0; n < 320; ++n)
+            early_energy += (double)audio[n] * audio[n];
+        for (n = 2400; n < 2720; ++n)
+            late_energy += (double)audio[n] * audio[n];
+        early_energy = sqrt(early_energy / 320.0);
+        late_energy = sqrt(late_energy / 320.0);
+        CHECK(late_energy > 0.0);
+        CHECK(early_energy < late_energy * 0.7);
+        printf("micd: capture gain ramp starts below target (early RMS %.0f "
+               "vs late %.0f)\n", early_energy, late_energy);
+        close(stream_fd);
+        stream_fd = -1;
+        for (i = 0; i < 100; ++i) {
+            adapter = le_adapter_connect(socket_path, 250);
+            CHECK(adapter != NULL);
+            CHECK(le_adapter_call(adapter, "status", "{}", response,
+                                  sizeof(response)) == LE_ADAPTER_OK);
+            le_adapter_close(adapter);
+            adapter = NULL;
+            if (strstr(response, "\"capture\":{\"active\":false"))
+                break;
+            nanosleep(&pause_time, NULL);
+        }
     }
     {
         /*

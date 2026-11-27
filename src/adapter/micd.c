@@ -1,4 +1,5 @@
 #include "adapter.h"
+#include "gain_ramp.h"
 #include "log.h"
 #include "mic_beamformer.h"
 #include "voice_dsp.h"
@@ -545,6 +546,57 @@ static unsigned int digital_gain_from_environment(void)
 }
 
 /*
+ * Capture gain ramp, shaped after the stock GainRampUp config. The numeric
+ * defaults are judgement calls: no stock asp.cfg survives in the dump, so
+ * only the stage and its fields are known. A bad value falls back, and a
+ * value above the ceiling clamps; neither ever stops capture.
+ *
+ * The first calibrated stream after micd starts uses the reboot time
+ * constant, mirroring "GainRampUpConfig for first call after reboot". Later
+ * streams use the normal one.
+ */
+#define MIC_GAIN_RAMP_DEFAULT_MS 200U
+#define MIC_GAIN_RAMP_REBOOT_DEFAULT_MS 1000U
+#define MIC_GAIN_RAMP_START_DEFAULT 100U
+#define MIC_GAIN_RAMP_MAX_MS 30000U
+
+static unsigned int gain_ramp_ms_from_environment(const char *name,
+                                                  unsigned int fallback)
+{
+    const char *text = getenv(name);
+    char *end;
+    unsigned long parsed;
+
+    if (!text || !text[0] || text[0] == '-')
+        return fallback;
+    errno = 0;
+    parsed = strtoul(text, &end, 10);
+    if (errno || *end)
+        return fallback;
+    if (parsed > MIC_GAIN_RAMP_MAX_MS) {
+        le_log_warn("%s above %u ms; clamping", name, MIC_GAIN_RAMP_MAX_MS);
+        parsed = MIC_GAIN_RAMP_MAX_MS;
+    }
+    return (unsigned int)parsed;
+}
+
+static unsigned int gain_ramp_start_from_environment(void)
+{
+    const char *text = getenv("LE_MIC_GAIN_RAMP_START");
+    char *end;
+    unsigned long parsed;
+
+    if (!text || !text[0] || text[0] == '-')
+        return MIC_GAIN_RAMP_START_DEFAULT;
+    errno = 0;
+    parsed = strtoul(text, &end, 10);
+    if (errno || *end || parsed < MIC_DIGITAL_GAIN_UNITY ||
+        parsed > MIC_DIGITAL_GAIN_MAX)
+        return MIC_GAIN_RAMP_START_DEFAULT;
+    return (unsigned int)parsed;
+}
+
+/*
  * Microphones fed to the fixed beams.  The default is the stock speech set
  * (lanes 0, 1, 3 and 4); LE_MIC_BEAM_MICS="all" or a list such as "0,1,3,4,6"
  * selects another subset for comparison.  An invalid value falls back to the
@@ -571,25 +623,6 @@ static void format_mic_list(unsigned int mask, char *out, size_t size)
         out[used++] = (char)('0' + i);
     }
     out[used] = '\0';
-}
-
-static void apply_digital_gain(int16_t *samples, size_t count,
-                               unsigned int gain_hundredths)
-{
-    size_t i;
-
-    if (gain_hundredths == MIC_DIGITAL_GAIN_UNITY)
-        return;
-    for (i = 0; i < count; ++i) {
-        int32_t scaled = (int32_t)((samples[i] * (int32_t)gain_hundredths) /
-                                   (int32_t)MIC_DIGITAL_GAIN_UNITY);
-
-        if (scaled > INT16_MAX)
-            scaled = INT16_MAX;
-        else if (scaled < INT16_MIN)
-            scaled = INT16_MIN;
-        samples[i] = (int16_t)scaled;
-    }
 }
 
 /*
@@ -934,6 +967,7 @@ static pid_t start_capture(const struct micd_config *config, int output_fd)
  */
 static int relay_capture_mono(int client_fd, unsigned long id,
                               const char *header, size_t header_size,
+                              int first_stream,
                               const struct micd_config *config)
 {
     static const uint8_t identity_map[LE_VOICE_LOGICAL_CHANNELS] =
@@ -950,7 +984,21 @@ static int relay_capture_mono(int client_fd, unsigned long id,
     ssize_t count = 0;
     unsigned int digital_gain = digital_gain_from_environment();
     unsigned int mix_mask = LE_BEAM_DEFAULT_MIC_MASK;
+    struct le_gain_ramp gain_ramp;
+    unsigned int ramp_ms;
+    unsigned int ramp_start = gain_ramp_start_from_environment();
     int result = -1;
+
+    ramp_ms = gain_ramp_ms_from_environment(
+        "LE_MIC_GAIN_RAMP_MS", MIC_GAIN_RAMP_DEFAULT_MS);
+    if (first_stream)
+        ramp_ms = gain_ramp_ms_from_environment(
+            "LE_MIC_GAIN_RAMP_REBOOT_MS", MIC_GAIN_RAMP_REBOOT_DEFAULT_MS);
+    le_gain_ramp_init(&gain_ramp, ramp_ms, ramp_start, digital_gain, MIC_RATE);
+    if (ramp_ms > 0 && ramp_start != digital_gain)
+        le_log_info("capture gain ramp %u ms from %u to %u hundredths%s",
+                    ramp_ms, ramp_start, digital_gain,
+                    first_stream ? " (first after reboot)" : "");
 
     if (pipe(pipe_fds) < 0)
         return -1;
@@ -1020,7 +1068,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                     if (beamformer.fill == 0)
                         beam_view_publish(&beamformer);
                 }
-                apply_digital_gain(output, frames, digital_gain);
+                le_gain_ramp_process(&gain_ramp, output, frames);
                 if (write_all(client_fd, output,
                               frames * sizeof(output[0])) < 0)
                     break;
@@ -1043,7 +1091,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
 }
 
 static void run_stream_worker(int client_fd, unsigned long id, int channel,
-                              int calibrated_mono,
+                              int calibrated_mono, int first_stream,
                               const struct micd_config *config)
 {
     char data[512];
@@ -1080,7 +1128,7 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
         if (calibrated_mono) {
             /* relay_capture_mono sends this header once capture has started. */
             (void)relay_capture_mono(client_fd, id, response, (size_t)n,
-                                     config);
+                                     first_stream, config);
         } else if (write_all(client_fd, response, (size_t)n) == 0) {
             (void)relay_capture(client_fd, config);
         }
@@ -1111,6 +1159,7 @@ int main(int argc, char **argv)
     };
     pid_t stream_worker = -1;
     int capture_configured = 0;
+    unsigned int calibrated_starts = 0;
     int listen_fd;
     int i;
 
@@ -1299,7 +1348,7 @@ int main(int argc, char **argv)
             }
             if (worker == 0) {
                 close(listen_fd);
-                run_stream_worker(client_fd, id, channel, 0, &config);
+                run_stream_worker(client_fd, id, channel, 0, 0, &config);
                 _exit(0);
             }
             stream_worker = worker;
@@ -1307,6 +1356,7 @@ int main(int argc, char **argv)
             le_log_info("raw microphone stream started (lane=%d)", channel);
         } else if (!strcmp(command, "stream_mono")) {
             pid_t worker;
+            int first_stream;
             if (access(config.pcm_path, R_OK) != 0) {
                 (void)respond(client_fd, id, 0,
                               "microphone capture endpoint unavailable");
@@ -1326,6 +1376,14 @@ int main(int argc, char **argv)
                 close(client_fd);
                 continue;
             }
+            /*
+             * The first calibrated stream after start uses the reboot ramp:
+             * the stock GainRampUp config has a separate time constant for
+             * "first call after reboot". Counted here, in the parent, so it
+             * survives the per-stream fork.
+             */
+            ++calibrated_starts;
+            first_stream = calibrated_starts == 1;
             worker = fork();
             if (worker < 0) {
                 (void)respond(client_fd, id, 0,
@@ -1335,7 +1393,7 @@ int main(int argc, char **argv)
             }
             if (worker == 0) {
                 close(listen_fd);
-                run_stream_worker(client_fd, id, 0, 1, &config);
+                run_stream_worker(client_fd, id, 0, 1, first_stream, &config);
                 _exit(0);
             }
             stream_worker = worker;
