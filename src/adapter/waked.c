@@ -4,6 +4,7 @@
 #include "clap_detector.h"
 #include "smoke_alarm_detector.h"
 #include "voice_aec.h"
+#include "false_wake_guard.h"
 #include "voice_aec_guard.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
@@ -78,6 +79,8 @@ struct waked_ipc {
     unsigned int detected_count;
     unsigned int clap_count;
     unsigned int smoke_alarm_count;
+    unsigned int false_wake_guard_count;
+    struct le_false_wake_guard false_wake_guard;
     int sensitivity;
     struct le_wake_event last_event;
     /* The phrase and model name of the model this process runs. */
@@ -418,30 +421,47 @@ static uint64_t monotonic_milliseconds(void)
     return monotonic_nanoseconds() / 1000000ULL;
 }
 
-/* Level of the ARB_LEVEL_SAMPLES before the detection, from the preroll. */
-static int wake_level(const struct waked_ipc *ipc, uint64_t detection_sample)
+/*
+ * Copy up to samples samples from the preroll immediately before
+ * detection_sample into out. Returns the number copied, 0 when there is
+ * nothing usable.
+ */
+static size_t preroll_window(const struct waked_ipc *ipc,
+                             uint64_t detection_sample, int16_t *out,
+                             size_t samples)
 {
-    static int16_t window[ARB_LEVEL_SAMPLES];
     uint64_t end = detection_sample, start, held;
     size_t count, i, position;
 
     if (!ipc->preroll || !ipc->samples_written)
-        return LE_WAKE_ARB_LEVEL_MIN;
+        return 0;
     if (end > ipc->samples_written)
         end = ipc->samples_written;
     held = ipc->samples_written < PREROLL_SAMPLES
         ? ipc->samples_written : PREROLL_SAMPLES;
-    start = end > ARB_LEVEL_SAMPLES ? end - ARB_LEVEL_SAMPLES : 0;
+    start = end > samples ? end - samples : 0;
     if (start < ipc->samples_written - held)
         start = ipc->samples_written - held;
     if (end <= start)
-        return LE_WAKE_ARB_LEVEL_MIN;
+        return 0;
     count = (size_t)(end - start);
     /* *preroll_position is where sample samples_written goes next. */
     position = (*ipc->preroll_position + PREROLL_SAMPLES -
                 (size_t)(ipc->samples_written - start)) % PREROLL_SAMPLES;
     for (i = 0; i < count; ++i)
-        window[i] = ipc->preroll[(position + i) % PREROLL_SAMPLES];
+        out[i] = ipc->preroll[(position + i) % PREROLL_SAMPLES];
+    return count;
+}
+
+/* Level of the ARB_LEVEL_SAMPLES before the detection, from the preroll. */
+static int wake_level(const struct waked_ipc *ipc, uint64_t detection_sample)
+{
+    static int16_t window[ARB_LEVEL_SAMPLES];
+    size_t count = preroll_window(ipc, detection_sample, window,
+                                  ARB_LEVEL_SAMPLES);
+
+    if (count == 0)
+        return LE_WAKE_ARB_LEVEL_MIN;
     return le_wake_level(window, count);
 }
 
@@ -452,6 +472,28 @@ static void wake_detected_here(struct waked_ipc *ipc,
 {
     int level, rc;
 
+    if (ipc->false_wake_guard.enabled) {
+        static int16_t window[LE_FW_WINDOW_FRAMES * LE_FW_FRAME_SAMPLES];
+        struct le_false_wake_result guard;
+        size_t count = preroll_window(ipc, event->detection_sample, window,
+                                      sizeof(window) / sizeof(window[0]));
+
+        if (le_false_wake_guard_evaluate(&ipc->false_wake_guard, window,
+                                         count, event->score, &guard)) {
+            ++ipc->false_wake_guard_count;
+            fprintf(stderr,
+                    "waked: wake refused by false-wake guard "
+                    "sample=%llu score=%.6f reason=%s "
+                    "raw_clip=%.4f clean_clip=%.4f variance=%.1f rms=%.1f\n",
+                    (unsigned long long)event->detection_sample,
+                    event->score,
+                    guard.clipped ? "clipped" :
+                        (guard.wild ? "variance" : "quiet"),
+                    guard.raw_clip_ratio, guard.clean_clip_ratio,
+                    guard.variance_ratio, guard.rms);
+            return;
+        }
+    }
     if (ipc->arb_pending) {
         fprintf(stderr, "waked: wake ignored: the previous one is "
                 "still being settled\n");
@@ -645,6 +687,8 @@ static void handle_control_client(
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
             "\"clap_enabled\":%s,\"clap_count\":%u,"
             "\"smoke_alarm_enabled\":%s,\"smoke_alarm_count\":%u,"
+            "\"false_wake_guard_enabled\":%s,"
+            "\"false_wake_guard_count\":%u,"
             "\"nearest_answers\":%s,"
             "\"model\":\"%s\"}",
             ipc->wake_phrase,
@@ -659,6 +703,8 @@ static void handle_control_client(
             ipc->clap.enabled ? "true" : "false", ipc->clap_count,
             ipc->smoke_alarm.enabled ? "true" : "false",
             ipc->smoke_alarm_count,
+            ipc->false_wake_guard.enabled ? "true" : "false",
+            ipc->false_wake_guard_count,
             arbitration,
             ipc->wake_model);
         (void)respond(client_fd, id, 1, status);
@@ -770,6 +816,22 @@ static void handle_control_client(
                           enabled ? "{\"enabled\":true}"
                                   : "{\"enabled\":false}");
         }
+    } else if (!strcmp(command, "set_false_wake_guard")) {
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+        int enabled = 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "enabled") ||
+            json_get_top_level_bool(args, length, "enabled", &enabled) != 1)
+            (void)respond(client_fd, id, 0,
+                          "enabled must be a single top-level boolean");
+        else {
+            le_false_wake_guard_set_enabled(&ipc->false_wake_guard, enabled);
+            (void)respond(client_fd, id, 1,
+                          enabled ? "{\"enabled\":true}"
+                                  : "{\"enabled\":false}");
+        }
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -828,6 +890,8 @@ static int process_frame(struct le_voice_aec *aec,
     size_t dump_count = LE_VOICE_AEC_FRAME_SAMPLES;
 
     metrics->playback_active = playback_active;
+    le_false_wake_guard_observe(&ipc->false_wake_guard, microphone,
+                                LE_VOICE_AEC_FRAME_SAMPLES);
     (void)le_voice_aec_guard_update(guard, aec, reference,
                                     playback_active, now_ns);
     if (playback_active) {
@@ -948,6 +1012,7 @@ static int run_waked(const struct waked_config *config)
     memset(&ipc, 0, sizeof(ipc));
     le_clap_detector_init(&ipc.clap);
     le_smoke_alarm_detector_init(&ipc.smoke_alarm);
+    le_false_wake_guard_set_enabled(&ipc.false_wake_guard, 1);
     ipc.listen_fd = -1;
     ipc.event_pipe[0] = -1;
     ipc.event_pipe[1] = -1;
