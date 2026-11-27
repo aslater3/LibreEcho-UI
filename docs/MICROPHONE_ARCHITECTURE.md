@@ -1,5 +1,8 @@
 # LibreEcho microphone architecture
 
+The stock Amazon front end this replaces is mapped, with the evidence for each
+piece, in [`STOCK_FRONT_END.md`](STOCK_FRONT_END.md).
+
 ## Current contract
 
 `libreecho-micd` is the sole owner of microphone capture. It starts at boot but
