@@ -215,6 +215,9 @@ int main(void)
     CHECK(strstr(response, "\"centre_lane\":6,\"ring_radius_mm\":36") != NULL);
     CHECK(strstr(response, "\"vad\":\"native-energy-baseline\"") != NULL);
     CHECK(strstr(response, "\"wake_word\":false") != NULL);
+    CHECK(strstr(response,
+                 "\"asr_path\":{\"latency_ms\":56,\"capture_period_ms\":40,"
+                 "\"beamformer_ms\":16,\"highpass_ms\":0}") != NULL);
     CHECK(strstr(response, "\"microphone_mix\":\"beamformer\"") != NULL);
     CHECK(strstr(response, "\"microphone_lane\":-1") != NULL);
     le_adapter_close(adapter);
@@ -236,6 +239,10 @@ int main(void)
     CHECK(le_adapter_call(adapter, "status", "{}",
                           response, sizeof(response)) == LE_ADAPTER_OK);
     CHECK(strstr(response, "\"microphone_mix\":\"average\"") != NULL);
+    /* Average mode skips the beamformer delay. */
+    CHECK(strstr(response,
+                 "\"asr_path\":{\"latency_ms\":40,\"capture_period_ms\":40,"
+                 "\"beamformer_ms\":0,\"highpass_ms\":0}") != NULL);
     puts("micd: microphone mix mode is set live and reported in status");
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
@@ -432,6 +439,15 @@ int main(void)
                 CHECK(field != NULL);
                 doa = strtod(field + 10, NULL);
                 CHECK(strstr(response, "\"beams\":[{\"deg\":0,") != NULL);
+                CHECK(strstr(response,
+                             "\"afe_diagnostics\":{\"selected_beam\":3,")
+                      != NULL);
+                CHECK(strstr(response,
+                             "\"selected_beam_residency_hops\":") != NULL);
+                CHECK(strstr(response,
+                             "\"beam_change_count\":") != NULL);
+                CHECK(strstr(response,
+                             "\"dominant_beam_switch_count\":") != NULL);
                 break;
             }
             nanosleep(&pause_time, NULL);

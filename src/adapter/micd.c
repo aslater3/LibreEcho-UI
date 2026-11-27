@@ -59,6 +59,15 @@ struct beam_view {
     int locked;
     unsigned long hops;
     unsigned long switches;
+    /*
+     * AFE-style beam diagnostics, after the stock AFEDiagSelectedBeamNumber,
+     * AFEDiagSelectedBeamResidencyinFrames and AFEDiagBeamChangeCount
+     * fields. Residency is in 8 ms hops, not stock AFE frames.
+     */
+    int selected_beam;
+    unsigned long selected_residency_hops;
+    int dominant_beam;
+    unsigned long dominant_switches;
     long long updated_ms;
     /* enum le_mic_mix, set by "set_mix" and read by the stream worker per hop */
     volatile unsigned int mix_mode;
@@ -175,10 +184,14 @@ static long long monotonic_ms(void)
 
 static void beam_view_publish(const struct le_beamformer *bf)
 {
-    unsigned int b;
+    unsigned int b, dominant = 0;
+    int selected = (int)bf->selected;
 
     if (!beam_view)
         return;
+    for (b = 1; b < bf->beam_count && b < LE_BEAM_MAX_BEAMS; ++b)
+        if (bf->power[b] > bf->power[dominant])
+            dominant = b;
     beam_view->seq++;
     __sync_synchronize();
     beam_view->running = 1;
@@ -192,6 +205,18 @@ static void beam_view_publish(const struct le_beamformer *bf)
     beam_view->locked = bf->locked >= 0;
     beam_view->hops++;
     beam_view->switches = bf->switches;
+    if (beam_view->hops == 1 || beam_view->selected_beam != selected) {
+        beam_view->selected_beam = selected;
+        beam_view->selected_residency_hops = 1;
+    } else {
+        ++beam_view->selected_residency_hops;
+    }
+    if (beam_view->hops == 1 ||
+        beam_view->dominant_beam != (int)dominant) {
+        if (beam_view->hops != 1)
+            ++beam_view->dominant_switches;
+        beam_view->dominant_beam = (int)dominant;
+    }
     beam_view->updated_ms = monotonic_ms();
     __sync_synchronize();
     beam_view->seq++;
@@ -290,7 +315,15 @@ static int format_beams(char *buffer, size_t size)
             return -1;
         used += (size_t)n;
     }
-    n = snprintf(buffer + used, size - used, "]}");
+    n = snprintf(buffer + used, size - used, "],\"afe_diagnostics\":{"
+                 "\"selected_beam\":%d,"
+                 "\"selected_beam_residency_hops\":%lu,"
+                 "\"beam_change_count\":%lu,"
+                 "\"dominant_beam\":%d,"
+                 "\"dominant_beam_switch_count\":%lu,"
+                 "\"hop_ms\":8}}",
+                 v.selected_beam, v.selected_residency_hops, v.switches,
+                 v.dominant_beam, v.dominant_switches);
     if (n < 0 || (size_t)n >= size - used)
         return -1;
     return (int)(used + (size_t)n);
@@ -758,6 +791,22 @@ static int configure_capture_path(const struct micd_config *config)
     return 0;
 }
 
+/*
+ * Equivalent delay of the calibrated stream, after the stock ASP
+ * ASRPathLatency / "ASR Processing Equivalent Delay" reporting. tinycap
+ * delivers 640-sample (40 ms) periods, and the beamformer adds its 256-sample
+ * (16 ms) overlap-save window. Average and single do not run the beamformer
+ * output path, so they are 40 ms.
+ */
+#define MIC_CAPTURE_PERIOD_MS 40U
+
+static unsigned int asr_path_latency_ms(void)
+{
+    if (current_mix_mode() != LE_MIC_MIX_BEAMFORMER)
+        return MIC_CAPTURE_PERIOD_MS;
+    return MIC_CAPTURE_PERIOD_MS + LE_BEAM_FFT * 1000U / MIC_RATE;
+}
+
 static int format_status(char *buffer, size_t size,
                          const struct micd_config *config,
                          int capture_active, int capture_configured)
@@ -805,7 +854,9 @@ static int format_status(char *buffer, size_t size,
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
         "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
-        "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
+        "\"aec\":false,\"beamforming\":true,\"wake_word\":false,"
+        "\"asr_path\":{\"latency_ms\":%u,\"capture_period_ms\":%u,"
+        "\"beamformer_ms\":%u,\"highpass_ms\":0}}}",
         available ? "true" : "false",
         capture_active ? "true" : "false",
         capture_active ? "\"raw-stream\"" : "null",
@@ -815,7 +866,10 @@ static int format_status(char *buffer, size_t size,
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
         mics, le_mic_mix_name(current_mix_mode()), current_mix_lane(),
-        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
+        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP,
+        asr_path_latency_ms(), MIC_CAPTURE_PERIOD_MS,
+        current_mix_mode() == LE_MIC_MIX_BEAMFORMER
+            ? LE_BEAM_FFT * 1000U / MIC_RATE : 0U);
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
@@ -1064,7 +1118,9 @@ static void run_stream_worker(int client_fd, unsigned long id, int channel,
             "\"logical_map\":\"measured\","
             "\"beamforming\":\"fixed_beam_select\","
             "\"beams\":%d,\"latency_samples\":%d,"
-            "\"highpass_hz\":80}", mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT);
+            "\"asr_path_latency_ms\":%u,\"highpass_hz\":80}",
+            mics, LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT,
+            asr_path_latency_ms());
     } else {
         n = snprintf(data, sizeof(data),
                      "{\"format\":\"pcm_s24_3le\",\"rate\":16000,"
