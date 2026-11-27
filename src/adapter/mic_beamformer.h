@@ -55,6 +55,10 @@ struct le_beamformer {
     unsigned int candidate_frames;
     unsigned long switches;
     int locked;              /* -1 = automatic selection, else beam index */
+    /* Number of beams combined into the output; 1 is selected-only. */
+    unsigned int merge_count;
+    /* Per-beam weight used by the last merge, zero for beams not merged. */
+    float merge_weight[LE_BEAM_MAX_BEAMS];
     int primed;
 };
 
@@ -76,6 +80,24 @@ void le_beamformer_lock(struct le_beamformer *beamformer, int azimuth_deg);
 /* Smoothed speech-band power of beam index b (0 when out of range). */
 float le_beamformer_beam_power(const struct le_beamformer *beamformer,
                                unsigned int b);
+
+/*
+ * Combine up to beams beams into the output instead of selecting one.  The
+ * selected beam keeps unit weight and the highest-scoring others are mixed in
+ * proportion to their score relative to it, then the weights are normalised.
+ * Values below 1 are raised to 1 and values above the beam count are capped,
+ * so a bad runtime value degrades to the current behaviour rather than
+ * stopping capture.
+ */
+void le_beamformer_set_merge(struct le_beamformer *beamformer,
+                             unsigned int beams);
+
+/* Number of beams currently merged (1 when only the selected beam is used). */
+unsigned int le_beamformer_merge_count(const struct le_beamformer *beamformer);
+
+/* Weight given to beam b by the last merge, or 0 when it was not merged. */
+float le_beamformer_merge_weight(const struct le_beamformer *beamformer,
+                                 unsigned int b);
 
 /* Azimuth of the beam currently selected (see mic_array_geometry.h). */
 int le_beamformer_selected_azimuth(const struct le_beamformer *beamformer);

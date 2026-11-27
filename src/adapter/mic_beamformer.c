@@ -280,6 +280,7 @@ int le_beamformer_init(struct le_beamformer *bf,
     bf->mic_mask = mic_mask;
     bf->beam_count = beam_count;
     bf->locked = -1;
+    bf->merge_count = 1;
     for (i = 0; i < beam_count; ++i)
         bf->azimuth_deg[i] = (int)(i * 360U / beam_count);
     for (i = 0; i < LE_BEAM_FFT; ++i)
@@ -292,6 +293,47 @@ int le_beamformer_init(struct le_beamformer *bf,
         bf->twiddle_im[i] = (float)sin(-2.0 * BEAM_PI * i / LE_BEAM_FFT);
     }
     return design(bf);
+}
+
+static void update_merge_weights(struct le_beamformer *bf)
+{
+    unsigned int b, pick, chosen;
+    float base, sum = 0.0f;
+
+    for (b = 0; b < LE_BEAM_MAX_BEAMS; ++b)
+        bf->merge_weight[b] = 0.0f;
+    bf->merge_weight[bf->selected] = 1.0f;
+    if (bf->merge_count <= 1) {
+        bf->merge_weight[bf->selected] = 1.0f;
+        return;
+    }
+    base = bf->score[bf->selected] > 1e-6f ? bf->score[bf->selected] : 1.0f;
+    for (chosen = 1; chosen < bf->merge_count; ++chosen) {
+        pick = bf->beam_count;
+        for (b = 0; b < bf->beam_count; ++b) {
+            if (bf->merge_weight[b] > 0.0f)
+                continue;
+            if (pick == bf->beam_count || bf->score[b] > bf->score[pick])
+                pick = b;
+        }
+        if (pick == bf->beam_count)
+            break;
+        /* Score relative to the selected beam; an unrelated low-score beam
+           fades out instead of diluting the talker. */
+        bf->merge_weight[pick] = bf->score[pick] / base;
+        if (bf->merge_weight[pick] > 1.0f)
+            bf->merge_weight[pick] = 1.0f;
+        if (bf->merge_weight[pick] < 0.0f)
+            bf->merge_weight[pick] = 0.0f;
+    }
+    for (b = 0; b < bf->beam_count; ++b)
+        sum += bf->merge_weight[b];
+    if (sum <= 0.0f) {
+        bf->merge_weight[bf->selected] = 1.0f;
+        return;
+    }
+    for (b = 0; b < bf->beam_count; ++b)
+        bf->merge_weight[b] /= sum;
 }
 
 static void process_hop(struct le_beamformer *bf)
@@ -359,12 +401,22 @@ static void process_hop(struct le_beamformer *bf)
     } else {
         bf->candidate_frames = 0;
     }
-    b = bf->selected;
+    update_merge_weights(bf);
     for (k = 0; k < LE_BEAM_BINS; ++k) {
         float sr = 0.0f, si = 0.0f;
-        for (m = 0; m < bf->mic_count; ++m) {
-            sr += bf->w_re[b][k][m] * xr[m][k] - bf->w_im[b][k][m] * xi[m][k];
-            si += bf->w_re[b][k][m] * xi[m][k] + bf->w_im[b][k][m] * xr[m][k];
+        unsigned int mb;
+
+        for (mb = 0; mb < bf->beam_count; ++mb) {
+            float weight = bf->merge_weight[mb];
+
+            if (weight <= 0.0f)
+                continue;
+            for (m = 0; m < bf->mic_count; ++m) {
+                sr += weight * (bf->w_re[mb][k][m] * xr[m][k] -
+                                bf->w_im[mb][k][m] * xi[m][k]);
+                si += weight * (bf->w_re[mb][k][m] * xi[m][k] +
+                                bf->w_im[mb][k][m] * xr[m][k]);
+            }
         }
         yr[k] = sr;
         yi[k] = si;
@@ -437,6 +489,27 @@ void le_beamformer_lock(struct le_beamformer *bf, int azimuth_deg)
 float le_beamformer_beam_power(const struct le_beamformer *bf, unsigned int b)
 {
     return b < bf->beam_count ? bf->power[b] : 0.0f;
+}
+
+void le_beamformer_set_merge(struct le_beamformer *bf, unsigned int beams)
+{
+    if (!bf)
+        return;
+    if (beams < 1)
+        beams = 1;
+    if (beams > bf->beam_count)
+        beams = bf->beam_count;
+    bf->merge_count = beams;
+}
+
+unsigned int le_beamformer_merge_count(const struct le_beamformer *bf)
+{
+    return bf ? bf->merge_count : 1;
+}
+
+float le_beamformer_merge_weight(const struct le_beamformer *bf, unsigned int b)
+{
+    return bf && b < bf->beam_count ? bf->merge_weight[b] : 0.0f;
 }
 
 int le_beamformer_selected_azimuth(const struct le_beamformer *bf)

@@ -35,7 +35,7 @@ NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
-MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamformer.c src/adapter/adapter_server.c src/log.c
+MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamformer.c src/adapter/adapter_server.c src/json.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
 	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
 	src/adapter/led_music_director.c src/adapter/led_music_render.c

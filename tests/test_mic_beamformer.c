@@ -309,6 +309,44 @@ static void test_mix_modes(void)
     puts("mic-beamformer: mix modes parse, average and pick a lane");
 }
 
+static void test_beam_merge(void)
+{
+    static int16_t out[FRAMES];
+    double sum = 0.0;
+    unsigned int b, positive = 0;
+    size_t i;
+
+    CHECK(le_beamformer_init(&bf, LE_BEAM_DEFAULT_MIC_MASK,
+                             LE_BEAM_DEFAULT_BEAMS) == 0);
+    le_beamformer_set_merge(&bf, 3);
+    CHECK(le_beamformer_merge_count(&bf) == 3);
+    le_beamformer_lock(&bf, 90);
+    for (i = 0; i < FRAMES; ++i) {
+        int16_t frame[LE_VOICE_LOGICAL_CHANNELS];
+
+        tone_frame((double)i / LE_VOICE_RATE, 1000.0, 90.0, 8000.0, frame);
+        out[i] = le_beamformer_sample(&bf, frame);
+    }
+    for (b = 0; b < bf.beam_count; ++b) {
+        float weight = le_beamformer_merge_weight(&bf, b);
+
+        sum += weight;
+        if (weight > 0.0f)
+            ++positive;
+        CHECK(weight <= le_beamformer_merge_weight(&bf, bf.selected) + 1e-6f);
+    }
+    CHECK(fabs(sum - 1.0) < 1e-3);
+    CHECK(positive >= 2);
+    CHECK(rms_tail(out, FRAMES, LE_VOICE_RATE) > 1000.0);
+
+    le_beamformer_set_merge(&bf, 0);
+    CHECK(le_beamformer_merge_count(&bf) == 1);
+    le_beamformer_set_merge(&bf, LE_BEAM_MAX_BEAMS + 100);
+    CHECK(le_beamformer_merge_count(&bf) == bf.beam_count);
+    puts("mic-beamformer: beam merge combines the top beams with normalised "
+         "weights and clamps bad counts");
+}
+
 int main(void)
 {
     test_parse();
@@ -317,5 +355,6 @@ int main(void)
     test_steady_source_ignored();
     test_between_beams();
     test_sensor_noise();
+    test_beam_merge();
     return 0;
 }
