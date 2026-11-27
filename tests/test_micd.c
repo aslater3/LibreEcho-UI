@@ -217,6 +217,7 @@ int main(void)
     CHECK(strstr(response, "\"wake_word\":false") != NULL);
     CHECK(strstr(response, "\"microphone_mix\":\"beamformer\"") != NULL);
     CHECK(strstr(response, "\"microphone_lane\":-1") != NULL);
+    CHECK(strstr(response, "\"beam_merge\":1") != NULL);
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);
@@ -263,6 +264,32 @@ int main(void)
                           response, sizeof(response)) == LE_ADAPTER_OK);
     CHECK(strstr(response, "\"microphone_lane\":-1") != NULL);
     puts("micd: array lane is set live, reported in status and bounded to -1..6");
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_beam_merge", "{\"beams\":2}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"merge_beams\":2") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "status", "{}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"beam_merge\":2") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_beam_merge", "{\"beams\":0}",
+                          response, sizeof(response)) ==
+          LE_ADAPTER_ERR_REJECTED);
+    CHECK(strstr(response, "invalid beam merge count") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_beam_merge", "{\"beams\":1}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"merge_beams\":1") != NULL);
+    puts("micd: beam merge count is set live and reported in status");
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);
@@ -432,6 +459,7 @@ int main(void)
                 CHECK(field != NULL);
                 doa = strtod(field + 10, NULL);
                 CHECK(strstr(response, "\"beams\":[{\"deg\":0,") != NULL);
+                CHECK(strstr(response, "\"merge_beams\":1") != NULL);
                 break;
             }
             nanosleep(&pause_time, NULL);

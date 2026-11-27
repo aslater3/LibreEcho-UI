@@ -84,6 +84,7 @@ unity, one per ALSA lane: the stock `libasp.so` applies `miccal.N` to lane N.
   -> 7 microphone lanes (top 16 bits of each word)
   -> per-lane miccal gain
   -> fixed-beam beamformer (lanes 0, 1, 3, 4 by default)
+  -> optional score-weighted beam merge
   -> 80 Hz high-pass
   -> mono S16_LE at 16 kHz
   -> consumers: wake word, baby monitor, voice assistant
@@ -106,6 +107,27 @@ utterances the selection stays on the last talker.
 
 `LE_MIC_BEAM_MICS` (for example `0,1,2,3,4,5`) selects a different microphone
 subset for experiments; the default is the stock speech front end's four.
+
+## Beam merge
+
+The stock ASP front end includes a beam merger (`ConfSNRBeamMerger`,
+`AlignedBeamMerger`, `BestBeamSynthesis`, and the diagnostic
+`Merged Beams Average Weights:`). LibreEcho keeps selected-beam output as the
+default, and can instead combine up to four of the highest-scoring beams in
+`src/adapter/mic_beamformer.c`. The selected beam anchors the mixture at unit
+weight; other beams get the ratio of their smoothed score to the selected
+beam's score, capped at one, and all weights are normalised so the merged
+signal cannot sum above full scale. A beam with no speech relative to the
+selected one therefore fades out rather than diluting the talker.
+
+`LE_BEAM_MERGE` sets the boot value (default `1`, selected beam only; values
+below 1 or non-numeric fall back to 1, values above 12 are capped).
+`set_beam_merge` (`{"beams":N}`) changes it live for the running stream, and
+`status` reports it as `pipeline.beam_merge`. The `beams` snapshot reports
+`merge_beams` and each beam's `merge_weight`, so the web UI and diagnostics can
+show which beams contributed. The merge runs on the same STFT bins as the
+single-beam path, so there is no extra algorithmic delay. It is score-based,
+not a measured SNR estimate, because `AFE.cfg` was not in the stock dump.
 
 The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction

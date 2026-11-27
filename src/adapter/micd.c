@@ -1,4 +1,5 @@
 #include "adapter.h"
+#include "json.h"
 #include "log.h"
 #include "mic_beamformer.h"
 #include "voice_dsp.h"
@@ -64,6 +65,9 @@ struct beam_view {
     volatile unsigned int mix_mode;
     /* Array lane used by the "single" mode; -1 is automatic (lowest selected lane). */
     volatile int mix_lane;
+    /* Beams combined into the output, set by "set_beam_merge". */
+    volatile unsigned int merge_beams;
+    float merge_weight[LE_BEAM_MAX_BEAMS];
 };
 
 static struct beam_view *beam_view;
@@ -76,6 +80,58 @@ static unsigned int current_mix_mode(void)
 static int current_mix_lane(void)
 {
     return beam_view ? beam_view->mix_lane : -1;
+}
+
+/*
+ * Number of beams merged into the stream, after the stock beam merger.
+ * LE_BEAM_MERGE defaults to 1 (selected beam only); a non-numeric, zero or
+ * negative value also means 1, and anything above the beam count is capped.
+ * A bad value must not cost the wake word, so it degrades to the old path.
+ */
+static unsigned int merge_beams_from_environment(void)
+{
+    const char *text = getenv("LE_BEAM_MERGE");
+    char *end;
+    long value;
+
+    if (!text || !text[0])
+        return 1;
+    errno = 0;
+    value = strtol(text, &end, 10);
+    if (errno || end == text || *end != '\0' || value < 1)
+        return 1;
+    if (value > LE_BEAM_MAX_BEAMS)
+        return LE_BEAM_MAX_BEAMS;
+    return (unsigned int)value;
+}
+
+static unsigned int current_merge_beams(void)
+{
+    return beam_view ? beam_view->merge_beams : 1;
+}
+
+/* Exactly one top-level "beams" integer within 1..LE_BEAM_MAX_BEAMS. */
+static int parse_merge_args(const char *args, unsigned int *beams)
+{
+    struct json_member member;
+    int value;
+    size_t count = 0;
+    size_t length;
+
+    if (!args || !beams)
+        return -1;
+    length = strnlen(args, LE_ADAPTER_MSG_MAX);
+    if (length == LE_ADAPTER_MSG_MAX ||
+        !json_valid_object(args, length) ||
+        json_duplicate_key(args, length, "beams") ||
+        json_object_members(args, length, &member, 1, &count) < 0 ||
+        count != 1 || member.name_len != 5 ||
+        memcmp(member.name, "beams", 5) != 0 ||
+        json_int_span(member.value, member.value_len, &value) != 1 ||
+        value < 1 || value > LE_BEAM_MAX_BEAMS)
+        return -1;
+    *beams = (unsigned int)value;
+    return 0;
 }
 
 /*
@@ -187,7 +243,9 @@ static void beam_view_publish(const struct le_beamformer *bf)
         beam_view->azimuth_deg[b] = bf->azimuth_deg[b];
         beam_view->power[b] = bf->power[b];
         beam_view->floor[b] = bf->floor[b];
+        beam_view->merge_weight[b] = le_beamformer_merge_weight(bf, b);
     }
+    beam_view->merge_beams = le_beamformer_merge_count(bf);
     beam_view->selected_deg = le_beamformer_selected_azimuth(bf);
     beam_view->locked = bf->locked >= 0;
     beam_view->hops++;
@@ -272,20 +330,23 @@ static int format_beams(char *buffer, size_t size)
                  "\"hop_ms\":8,\"switches\":%lu,"
                  "\"reference\":\"0 deg front (volume down), clockwise viewed "
                  "from above\",\"selected_deg\":%d,\"locked\":%s,"
+                 "\"merge_beams\":%u,"
                  "\"doa_deg\":%.1f,\"peak_db\":%.1f,\"contrast_db\":%.1f,"
                  "\"beams\":[",
                  monotonic_ms() - v.updated_ms, v.hops, v.switches,
-                 v.selected_deg, v.locked ? "true" : "false",
+                 v.selected_deg, v.locked ? "true" : "false", v.merge_beams,
                  doa, db[peak], db[peak] - mean);
     if (n < 0 || (size_t)n >= size)
         return -1;
     used = (size_t)n;
     for (b = 0; b < v.beam_count; ++b) {
         n = snprintf(buffer + used, size - used,
-                     "%s{\"deg\":%d,\"power_db\":%.1f,\"snr_db\":%.1f}",
+                     "%s{\"deg\":%d,\"power_db\":%.1f,\"snr_db\":%.1f,"
+                     "\"merge_weight\":%.2f}",
                      b ? "," : "", v.azimuth_deg[b], db[b],
                      10.0 * log10(((double)v.power[b] + 1.0) /
-                                  ((double)v.floor[b] + 1.0)));
+                                  ((double)v.floor[b] + 1.0)),
+                     v.merge_weight[b]);
         if (n < 0 || (size_t)n >= size - used)
             return -1;
         used += (size_t)n;
@@ -803,6 +864,7 @@ static int format_status(char *buffer, size_t size,
         "\"pipeline\":{\"stage\":\"fixed-beam-select\","
         "\"microphone_mix\":\"%s\",\"microphone_lane\":%d,"
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
+        "\"beam_merge\":%u,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
         "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
         "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
@@ -815,7 +877,8 @@ static int format_status(char *buffer, size_t size,
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
         mics, le_mic_mix_name(current_mix_mode()), current_mix_lane(),
-        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
+        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP,
+        current_merge_beams());
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
@@ -1009,7 +1072,12 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                        and beam view stay warm; the mode only picks the
                        output. */
                     unsigned int mode = current_mix_mode();
-                    int16_t mixed = le_beamformer_sample(&beamformer, logical);
+                    unsigned int merge = current_merge_beams();
+                    int16_t mixed;
+
+                    if (le_beamformer_merge_count(&beamformer) != merge)
+                        le_beamformer_set_merge(&beamformer, merge);
+                    mixed = le_beamformer_sample(&beamformer, logical);
 
                     if (mode == LE_MIC_MIX_AVERAGE)
                         mixed = le_mic_mix_average(logical, mix_mask);
@@ -1166,6 +1234,7 @@ int main(int argc, char **argv)
         saved_mix_settings(&mode, &lane);
         beam_view->mix_mode = (unsigned int)mode;
         beam_view->mix_lane = lane;
+        beam_view->merge_beams = merge_beams_from_environment();
     }
     listen_fd = le_adapter_listen(config.socket_path);
     if (listen_fd < 0) {
@@ -1259,6 +1328,23 @@ int main(int argc, char **argv)
                 le_log_info("microphone lane set to %d", lane);
                 (void)snprintf(status, sizeof(status),
                                "{\"microphone_lane\":%d}", lane);
+                (void)respond(client_fd, id, 1, status);
+            }
+            close(client_fd);
+        } else if (!strcmp(command, "set_beam_merge")) {
+            unsigned int beams;
+
+            if (parse_merge_args(args, &beams) < 0) {
+                (void)respond(client_fd, id, 0,
+                              "invalid beam merge count");
+            } else if (!beam_view) {
+                (void)respond(client_fd, id, 0,
+                              "beam merge is unavailable");
+            } else {
+                beam_view->merge_beams = beams;
+                le_log_info("beam merge set to %u beam(s)", beams);
+                (void)snprintf(status, sizeof(status),
+                               "{\"merge_beams\":%u}", beams);
                 (void)respond(client_fd, id, 1, status);
             }
             close(client_fd);
