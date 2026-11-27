@@ -83,11 +83,18 @@ unity, one per ALSA lane: the stock `libasp.so` applies `miccal.N` to lane N.
 9 raw ALSA lanes
   -> 7 microphone lanes (top 16 bits of each word)
   -> per-lane miccal gain
+  -> per-lane 80 Hz high-pass
   -> fixed-beam beamformer (lanes 0, 1, 3, 4 by default)
-  -> 80 Hz high-pass
   -> mono S16_LE at 16 kHz
   -> consumers: wake word, baby monitor, voice assistant
 ```
+
+The high-pass runs on each lane before the array processing, as the stock
+`MicPreProcess` stage does with its `micsHpf_` state. Filtering only the mixed
+output left correlated low-frequency energy -- fan rumble, traffic, handling
+and DC -- inside the beam covariance and in the average and single mixes.
+Because the same filter runs on every lane, the lanes keep their relative
+phase, so steering, averaging and the beam design are unchanged.
 
 The beamformer (`src/adapter/mic_beamformer.c`) follows the shape of the stock
 Radar speech front end: a 256-point STFT with a 128-sample (8 ms) hop and 12
