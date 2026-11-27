@@ -198,6 +198,15 @@ void le_voice_vad_init(struct le_voice_vad *vad)
     vad->minimum_energy =
         LE_VOICE_VAD_DEFAULT_FLOOR_RMS *
         LE_VOICE_VAD_DEFAULT_FLOOR_RMS;
+    /*
+     * Start at the configured floor rather than at the first frame's own
+     * energy.  The first frame after a capture starts can be a codec click
+     * or the middle of a sentence; seeding from it once pinned the noise
+     * floor high enough to reject speech until the slow average had caught
+     * up.  The stock front end bounds the same case with InitialNoiseLevel
+     * and MinNoiseLevel.
+     */
+    vad->noise_energy = vad->minimum_energy;
 }
 
 int le_voice_vad_set_floor_rms(
@@ -213,6 +222,43 @@ int le_voice_vad_set_floor_rms(
         vad->noise_energy = minimum_energy;
     return 0;
 }
+
+/*
+ * Floor estimate from the minimum-statistics window, or 0 before the first
+ * frame.  This is the second-quietest frame, not the quietest: one
+ * digital-silence or dropped-sample frame must not set the floor for the
+ * whole window.  Frames are only recorded while the detector is not active
+ * (except during the short warm-up), so speech does not normally enter it.
+ */
+static uint64_t vad_window_floor(const struct le_voice_vad *vad)
+{
+    uint64_t smallest = UINT64_MAX;
+    uint64_t second = UINT64_MAX;
+    unsigned int i;
+
+    if (vad->window_filled == 0)
+        return 0;
+    for (i = 0; i < vad->window_filled; ++i) {
+        uint64_t value = vad->window[i];
+
+        if (value < smallest) {
+            second = smallest;
+            smallest = value;
+        } else if (value < second) {
+            second = value;
+        }
+    }
+    return vad->window_filled >= 2 ? second : smallest;
+}
+
+/*
+ * The first frames build the minimum-statistics window even when they look
+ * like speech.  Otherwise a room that idles above six times the configured
+ * floor would read as speech forever and the floor could never rise to meet
+ * it.  If the stream does start mid-sentence these frames leave the window as
+ * soon as quieter ones arrive.
+ */
+#define LE_VOICE_VAD_WARMUP_FRAMES 10U
 
 struct le_voice_vad_result le_voice_vad_process(
     struct le_voice_vad *vad,
@@ -241,11 +287,6 @@ struct le_voice_vad_result le_voice_vad_process(
     }
     result.frame_energy = sum / count;
 
-    if (!vad->initialized) {
-        vad->noise_energy = result.frame_energy > vad->minimum_energy
-            ? result.frame_energy : vad->minimum_energy;
-        vad->initialized = 1;
-    }
     threshold = vad->noise_energy * 6U;
     if (threshold < vad->minimum_energy * 6U)
         threshold = vad->minimum_energy * 6U;
@@ -266,13 +307,32 @@ struct le_voice_vad_result le_voice_vad_process(
             else
                 vad->active = 0;
         }
-        if (!vad->active) {
-            /* Slow attack prevents a short speech burst becoming "noise". */
-            vad->noise_energy =
-                (vad->noise_energy * 31U + result.frame_energy) / 32U;
-            if (vad->noise_energy < vad->minimum_energy)
-                vad->noise_energy = vad->minimum_energy;
-        }
+    }
+    if (!vad->active || vad->window_filled < LE_VOICE_VAD_WARMUP_FRAMES) {
+        /*
+         * Minimum statistics, as the stock front end does with
+         * subDuplexVadFlrMstatLength: the floor is the second-quietest frame
+         * of the last second, so a loud click or a sentence already in
+         * progress cannot pin it.  A drop is limited to 12 dB per frame
+         * (FlrMinDelta) and the configured floor is the lower bound
+         * (MinNoiseLevel).
+         */
+        uint64_t floor = vad_window_floor(vad);
+        uint32_t energy = result.frame_energy > UINT32_MAX
+            ? UINT32_MAX : (uint32_t)result.frame_energy;
+
+        if (floor < vad->minimum_energy)
+            floor = vad->minimum_energy;
+        if (vad->noise_energy > 0 && floor * 16U < vad->noise_energy)
+            floor = vad->noise_energy / 16U;
+        if (floor < vad->minimum_energy)
+            floor = vad->minimum_energy;
+        vad->noise_energy = floor;
+        vad->window[vad->window_index] = energy;
+        vad->window_index =
+            (vad->window_index + 1) % LE_VOICE_VAD_MSTAT_FRAMES;
+        if (vad->window_filled < LE_VOICE_VAD_MSTAT_FRAMES)
+            ++vad->window_filled;
     }
     result.noise_energy = vad->noise_energy;
     result.active = vad->active;

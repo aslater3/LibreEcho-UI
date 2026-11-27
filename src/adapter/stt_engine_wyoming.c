@@ -125,12 +125,9 @@ struct stt_stream *stt_engine_stream_create(struct stt_engine *engine)
         &stream->vad, engine->vad_floor_rms);
     /*
      * Recognition begins after a wake event, so its first frame can already
-     * contain speech. Seed the adaptive detector from the configured floor
-     * instead of treating that first frame as room noise.
+     * contain speech.  The detector starts at the configured floor rather
+     * than from that first frame, so a loud first frame cannot raise it.
      */
-    stream->vad.noise_energy =
-        (uint64_t)engine->vad_floor_rms * engine->vad_floor_rms;
-    stream->vad.initialized = 1;
     json_escape(model, sizeof(model), engine->model);
     json_escape(language, sizeof(language), engine->language);
     snprintf(data, sizeof(data),

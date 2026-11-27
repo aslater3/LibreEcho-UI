@@ -161,6 +161,63 @@ int main(void)
                                       LE_VOICE_FRAME_SAMPLES);
     CHECK(vad_result.active);
 
+    /*
+     * A capture that starts mid-sentence, or with a codec click, must not pin
+     * the noise floor.  After the loud start and two seconds of a quiet room,
+     * ordinary speech is detected again; seeding the floor from the first
+     * frame and then averaging it down missed it for seconds.
+     */
+    le_voice_vad_init(&vad);
+    for (i = 0; i < LE_VOICE_FRAME_SAMPLES; ++i)
+        frame[i] = (i & 1) ? 3000 : -3000;
+    for (i = 0; i < 4; ++i)
+        (void)le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    for (i = 0; i < LE_VOICE_FRAME_SAMPLES; ++i)
+        frame[i] = (i & 1) ? 30 : -30;
+    for (i = 0; i < 200; ++i)
+        (void)le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    for (i = 0; i < LE_VOICE_FRAME_SAMPLES; ++i)
+        frame[i] = (i & 1) ? 150 : -150;
+    vad_result = le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    CHECK(vad_result.speech);
+    vad_result = le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    CHECK(vad_result.active);
+
+    /*
+     * One digital-silence frame in a 40 RMS room is not the noise floor: the
+     * second-quietest frame of the window is, so the next room frame is not
+     * mistaken for speech.
+     */
+    le_voice_vad_init(&vad);
+    for (i = 0; i < LE_VOICE_FRAME_SAMPLES; ++i)
+        frame[i] = (i & 1) ? 40 : -40;
+    for (i = 0; i < 120; ++i)
+        (void)le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    memset(frame, 0, sizeof(frame));
+    (void)le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    for (i = 0; i < LE_VOICE_FRAME_SAMPLES; ++i)
+        frame[i] = (i & 1) ? 40 : -40;
+    vad_result = le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    CHECK(!vad_result.speech);
+
+    /*
+     * A room that idles above six times the configured floor is room noise,
+     * not speech: the warm-up lets the floor rise to meet it, and speech
+     * above that level still clears the gate.
+     */
+    le_voice_vad_init(&vad);
+    for (i = 0; i < LE_VOICE_FRAME_SAMPLES; ++i)
+        frame[i] = (i & 1) ? 45 : -45;
+    for (i = 0; i < 200; ++i)
+        vad_result = le_voice_vad_process(&vad, frame,
+                                          LE_VOICE_FRAME_SAMPLES);
+    CHECK(!vad_result.speech);
+    CHECK(!vad_result.active);
+    for (i = 0; i < LE_VOICE_FRAME_SAMPLES; ++i)
+        frame[i] = (i & 1) ? 150 : -150;
+    vad_result = le_voice_vad_process(&vad, frame, LE_VOICE_FRAME_SAMPLES);
+    CHECK(vad_result.speech);
+
     puts("voice_dsp: conversion, calibration, wake mix, HPF and VAD ok");
     return 0;
 }
