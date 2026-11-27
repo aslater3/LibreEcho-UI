@@ -365,6 +365,10 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -o build/test-voice-dsp
 ./build/test-voice-dsp
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
+    -Isrc -Isrc/adapter tests/test_mic_watch.c src/adapter/mic_watch.c \
+    -o build/test-mic-watch
+./build/test-mic-watch
+cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_mic_beamformer.c \
     src/adapter/mic_beamformer.c src/adapter/voice_dsp.c \
     -lm -o build/test-mic-beamformer

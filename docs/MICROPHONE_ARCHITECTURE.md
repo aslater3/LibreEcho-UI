@@ -111,6 +111,25 @@ The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction
 only and comb-filtered speech from every other direction.
 
+### Lane watch
+
+The stock front end carries a dedicated `MicOcclusionDetector` module and
+reports `AFEDiagMicCompensationMaxGain` and `AFEDiagMicCompensationNumberofMics`
+in its diagnostics: it watches what each microphone actually hears. LibreEcho
+applied the IDME gains once and then trusted all seven lanes forever, so a
+covered or failed microphone quietly biased every mix that included it.
+
+`src/adapter/mic_watch.c` compares each lane with the median of the lanes in
+use over one-second windows and flags a lane that is more than 12 dB down for
+three windows in a row. It needs two good windows to clear, ignores windows
+where the array is below the idle floor, and treats half or more of the set
+being down as a level change rather than a hardware fault. Flagged lanes are
+left out of the `average` mix and the automatic `single` pick, reported as
+`pipeline.occluded_lanes` and in `/api/v1/microphones/beams`, and logged once
+on each transition. The beamformer keeps the microphone set it was designed
+for: the fixed weights and the noise-covariance estimate are geometry, and
+dropping a lane there would need the whole design rebuilt.
+
 ## Mix mode
 
 The owner picks how the speech microphones become the mono stream with
