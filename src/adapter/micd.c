@@ -1,6 +1,7 @@
 #include "adapter.h"
 #include "log.h"
 #include "mic_beamformer.h"
+#include "mic_watch.h"
 #include "voice_dsp.h"
 
 #include <errno.h>
@@ -60,6 +61,15 @@ struct beam_view {
     unsigned long hops;
     unsigned long switches;
     long long updated_ms;
+    /*
+     * Per-lane watch: the lanes the last one-second window found dead or
+     * covered, and each lane's level relative to the loudest one.  Zeroed
+     * for lanes that are not in the current microphone set.
+     */
+    unsigned int lane_occluded;
+    int lane_level_db[LE_MIC_WATCH_LANES];
+    unsigned int lane_mask;
+    unsigned long lane_windows;
     /* enum le_mic_mix, set by "set_mix" and read by the stream worker per hop */
     volatile unsigned int mix_mode;
     /* Array lane used by the "single" mode; -1 is automatic (lowest selected lane). */
@@ -208,6 +218,48 @@ static void beam_view_stop(void)
     beam_view->seq++;
 }
 
+/*
+ * Lane levels share the beam snapshot and its seqlock: one worker publishes
+ * both, and a reader must see the beam and lane picture from the same
+ * instant, not a mixture of two updates.
+ */
+static void lane_view_publish(const struct le_mic_watch *watch,
+                              unsigned int mask)
+{
+    int lane;
+
+    if (!beam_view)
+        return;
+    beam_view->seq++;
+    __sync_synchronize();
+    beam_view->lane_mask = mask;
+    beam_view->lane_occluded = le_mic_watch_occluded(watch);
+    for (lane = 0; lane < LE_MIC_WATCH_LANES; ++lane)
+        beam_view->lane_level_db[lane] =
+            le_mic_watch_level_db(watch, lane);
+    beam_view->lane_windows = le_mic_watch_windows(watch);
+    __sync_synchronize();
+    beam_view->seq++;
+}
+
+static unsigned int current_occluded_lanes(void)
+{
+    unsigned int seq;
+    unsigned int mask;
+
+    if (!beam_view)
+        return 0;
+    do {
+        seq = beam_view->seq;
+        __sync_synchronize();
+        mask = beam_view->lane_occluded;
+        __sync_synchronize();
+    } while ((seq & 1U) || seq != beam_view->seq);
+    return mask;
+}
+
+static void format_lane_mask_json(unsigned int mask, char *out, size_t size);
+
 /* Hann-windowed full-scale tone, summed over the scoring band: 0 dB. */
 #define BEAM_FULL_SCALE_DB 126.4
 
@@ -290,10 +342,40 @@ static int format_beams(char *buffer, size_t size)
             return -1;
         used += (size_t)n;
     }
+    {
+        char lanes_json[16];
+
+        format_lane_mask_json(v.lane_occluded, lanes_json,
+                              sizeof(lanes_json));
+        n = snprintf(buffer + used, size - used,
+                     "],\"lane_windows\":%lu,\"occluded_lanes\":%s,"
+                     "\"lane_levels\":[",
+                     v.lane_windows, lanes_json);
+        if (n < 0 || (size_t)n >= size - used)
+            return -1;
+        used += (size_t)n;
+    }
+    {
+        int lane;
+        int first = 1;
+
+        for (lane = 0; lane < LE_VOICE_LOGICAL_CHANNELS; ++lane) {
+            if (!(v.lane_mask & (1U << lane)))
+                continue;
+            n = snprintf(buffer + used, size - used,
+                         "%s{\"lane\":%d,\"db\":%d}",
+                         first ? "" : ",", lane, v.lane_level_db[lane]);
+            if (n < 0 || (size_t)n >= size - used)
+                return -1;
+            used += (size_t)n;
+            first = 0;
+        }
+    }
     n = snprintf(buffer + used, size - used, "]}");
     if (n < 0 || (size_t)n >= size - used)
         return -1;
-    return (int)(used + (size_t)n);
+    used += (size_t)n;
+    return (int)used;
 }
 static volatile sig_atomic_t child_changed = 0;
 
@@ -573,6 +655,29 @@ static void format_mic_list(unsigned int mask, char *out, size_t size)
     out[used] = '\0';
 }
 
+/* Writes a lane bit mask as a JSON array, e.g. "[0,4]" or "[]". */
+static void format_lane_mask_json(unsigned int mask, char *out, size_t size)
+{
+    size_t used = 0;
+    unsigned int i;
+
+    if (size < 3) {
+        if (size)
+            out[0] = '\0';
+        return;
+    }
+    out[used++] = '[';
+    for (i = 0; i < LE_VOICE_LOGICAL_CHANNELS && used + 3 < size; ++i) {
+        if (!(mask & (1U << i)))
+            continue;
+        if (out[used - 1] != '[')
+            out[used++] = ',';
+        out[used++] = (char)('0' + i);
+    }
+    out[used++] = ']';
+    out[used] = '\0';
+}
+
 static void apply_digital_gain(int16_t *samples, size_t count,
                                unsigned int gain_hundredths)
 {
@@ -766,9 +871,12 @@ static int format_status(char *buffer, size_t size,
     int count = read_miccal(config->idme_dir, config->dt_idme_dir, values);
     int available = access(config->pcm_path, R_OK) == 0;
     char mics[16];
+    char occluded[16];
     int n;
 
     format_mic_list(beam_mic_mask(), mics, sizeof(mics));
+    format_lane_mask_json(current_occluded_lanes(), occluded,
+                          sizeof(occluded));
     n = snprintf(
         buffer, size,
         "{\"available\":%s,\"simulated\":false,"
@@ -805,6 +913,7 @@ static int format_status(char *buffer, size_t size,
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
         "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
+        "\"occluded_lanes\":%s,"
         "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
         available ? "true" : "false",
         capture_active ? "true" : "false",
@@ -815,7 +924,7 @@ static int format_status(char *buffer, size_t size,
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
         mics, le_mic_mix_name(current_mix_mode()), current_mix_lane(),
-        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
+        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP, occluded);
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
@@ -941,6 +1050,10 @@ static int relay_capture_mono(int client_fd, unsigned long id,
     static struct le_beamformer beamformer;
     struct le_voice_calibration calibration;
     struct le_voice_highpass highpass;
+    struct le_mic_watch lane_watch;
+    unsigned long lane_windows_seen = 0;
+    unsigned int lane_occluded_seen = 0;
+    unsigned int mix_lanes;
     unsigned char input[LE_VOICE_RAW_FRAME_BYTES * 256];
     int16_t output[256];
     int miccal[LE_VOICE_LOGICAL_CHANNELS];
@@ -979,7 +1092,9 @@ static int relay_capture_mono(int client_fd, unsigned long id,
         return -1;
     }
     le_voice_highpass_init(&highpass);
+    le_mic_watch_init(&lane_watch);
     mix_mask = beam_mic_mask();
+    mix_lanes = mix_mask;
 
     count = read(pipe_fds[0], input, sizeof(input));
     if (count <= 0) {
@@ -1011,10 +1126,47 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                     unsigned int mode = current_mix_mode();
                     int16_t mixed = le_beamformer_sample(&beamformer, logical);
 
+                    /*
+                     * Watch what each lane actually hears.  The beamformer
+                     * keeps the microphone set it was designed for, but a
+                     * lane that has been covered or has failed must not
+                     * drag the average or the automatic single-lane mix.
+                     */
+                    (void)le_mic_watch_feed(&lane_watch, logical, mix_mask);
+                    if (le_mic_watch_windows(&lane_watch) !=
+                        lane_windows_seen) {
+                        unsigned int occluded;
+
+                        lane_windows_seen =
+                            le_mic_watch_windows(&lane_watch);
+                        occluded = le_mic_watch_occluded(&lane_watch);
+                        mix_lanes = mix_mask & ~occluded;
+                        if (mix_lanes == 0)
+                            mix_lanes = mix_mask;
+                        lane_view_publish(&lane_watch, mix_mask);
+                        if (occluded != lane_occluded_seen) {
+                            char lanes[16];
+
+                            lane_occluded_seen = occluded;
+                            if (occluded) {
+                                format_mic_list(occluded, lanes,
+                                                sizeof(lanes));
+                                le_log_warn(
+                                    "micd: microphone lane(s) %s more than "
+                                    "12 dB below the array; excluded from "
+                                    "the average mix", lanes);
+                            } else {
+                                le_log_info(
+                                    "micd: all microphone lanes back at "
+                                    "array level");
+                            }
+                        }
+                    }
+
                     if (mode == LE_MIC_MIX_AVERAGE)
-                        mixed = le_mic_mix_average(logical, mix_mask);
+                        mixed = le_mic_mix_average(logical, mix_lanes);
                     else if (mode == LE_MIC_MIX_SINGLE)
-                        mixed = le_mic_mix_single(logical, mix_mask,
+                        mixed = le_mic_mix_single(logical, mix_lanes,
                                                   current_mix_lane());
                     output[frame] = le_voice_highpass_sample(&highpass, mixed);
                     if (beamformer.fill == 0)

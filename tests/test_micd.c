@@ -274,6 +274,12 @@ int main(void)
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "status", "{}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"occluded_lanes\":[]") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
     CHECK(le_adapter_call(adapter, "beams", "{}",
                           response, sizeof(response)) == LE_ADAPTER_OK);
     CHECK(strstr(response, "\"running\":false") != NULL);
@@ -432,6 +438,10 @@ int main(void)
                 CHECK(field != NULL);
                 doa = strtod(field + 10, NULL);
                 CHECK(strstr(response, "\"beams\":[{\"deg\":0,") != NULL);
+                /* The live lane watch is wired into the same snapshot. */
+                CHECK(strstr(response, "\"occluded_lanes\":[]") != NULL);
+                CHECK(strstr(response, "\"lane_levels\":["
+                             "{\"lane\":0,") != NULL);
                 break;
             }
             nanosleep(&pause_time, NULL);
