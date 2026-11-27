@@ -58,6 +58,7 @@ run() {
     PIDFILE="$T/waked.pid" LOGFILE="$T/waked.log" SOCKET="$T/wake.sock" \
     MIC_SOCKET="$T/mic.sock" REFERENCE_SOCKET="$T/ref.sock" \
     VAD_FLOOR_FILE="$T/none" AEC_FILE="$T/none" DUMP_FILE="$T/none" \
+    NOISE_FILE="$T/none" \
     WAKE_MODEL_FILE="$T/wake-model" WAKE_MODEL_BASE="$T/models" \
     WAKE_SECOND_FILE="$T/wake-second" \
     WAKE_MODEL_SETTLE_SECONDS=1 timeout 20 sh "$INIT" "$1" 2>>"$T/stderr"
