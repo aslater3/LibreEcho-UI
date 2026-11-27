@@ -383,8 +383,9 @@ cc -D_POSIX_C_SOURCE=200809L -D_DEFAULT_SOURCE -std=c99 -Wall -Wextra -Wpedantic
 make build/test-voice-aec build/test-voice-reference build/test-voice-aec-guard build/test-spoken-time build/test-timezone
 ./build/test-voice-aec
 # #401: noise suppressor, and the local pipeline's off/on contract.
-make build/test-voice-ns build/test-voice-pipeline-noise
+make build/test-voice-ns build/test-voice-pipeline-noise build/test-voice-agc
 ./build/test-voice-ns
+./build/test-voice-agc
 ./build/test-voice-pipeline-noise
 ./build/test-voice-reference
 ./build/test-voice-aec-guard

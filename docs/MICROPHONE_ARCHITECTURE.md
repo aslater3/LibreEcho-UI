@@ -85,6 +85,7 @@ unity, one per ALSA lane: the stock `libasp.so` applies `miccal.N` to lane N.
   -> per-lane miccal gain
   -> fixed-beam beamformer (lanes 0, 1, 3, 4 by default)
   -> 80 Hz high-pass
+  -> capture AGC
   -> mono S16_LE at 16 kHz
   -> consumers: wake word, baby monitor, voice assistant
 ```
@@ -131,6 +132,30 @@ live, and `status` reports it as `pipeline.microphone_mix`. At start-up micd
 reads the saved value from the web configuration named by `LE_MIC_CONFIG`.
 Average and single output are not delayed by the 16 ms beamformer latency, so
 a switch causes a one-time step of about 16 ms in the stream.
+
+## Capture AGC
+
+The stock ASP front end has an AGC (`m_enableAGC`, with compressor attack,
+decay, ratio and threshold settings) and a multi-band compressor. LibreEcho
+implements the full-band part in `src/adapter/voice_agc.c`: an envelope
+follower drives a smoothed gain that lifts quiet speech toward a threshold and
+attenuates loud speech above it. There is no lookahead and no band split. The
+stock numbers live in `AFE.cfg`, which was not in the retrieved dump, so the
+defaults (threshold 0.5, ratio 2, +6 dB maximum lift, -6 dB maximum cut,
+-45 dBFS gate, 5 ms attack, 300 ms release) are judgement calls rather than
+measured values.
+
+The AGC is on by default, matching `m_enableAGC`. It runs after the high-pass
+and digital gain, so its output is what wake word, baby monitor and the voice
+assistant consume. `LE_VOICE_AGC=0` starts it off; any other value, including
+an empty or malformed one, leaves it on. `set_agc` (`{"enabled":false}` or
+`{"enabled":true}`) changes it live for the running stream, and `status`
+reports it as `pipeline.agc`. The shared flag is read per period, so a change
+applies without restarting capture.
+
+The AGC holds unity below the gate, so room noise is not pumped up between
+utterances. It compresses peaks but does not normalise loudness, and it is not
+a replacement for the digital gain that the hardware profile applies first.
 
 ### External microphones
 
