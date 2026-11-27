@@ -85,6 +85,7 @@ unity, one per ALSA lane: the stock `libasp.so` applies `miccal.N` to lane N.
   -> per-lane miccal gain
   -> fixed-beam beamformer (lanes 0, 1, 3, 4 by default)
   -> 80 Hz high-pass
+  -> capture gain ramp
   -> mono S16_LE at 16 kHz
   -> consumers: wake word, baby monitor, voice assistant
 ```
@@ -110,6 +111,37 @@ subset for experiments; the default is the stock speech front end's four.
 The earlier fixed 4-sample delay-and-sum on lanes 0 and 3 was removed in
 0.14.4: the lanes arrive in step, so a fixed delay suited one source direction
 only and comb-filtered speech from every other direction.
+
+### Capture gain ramp
+
+The stock ASP front end has a GainRampUp stage: `libasp.so` carries
+`GainRampUp`, `MicGainRampUp`, `RefGainRampUp`, `Enable Gain Ramp`, `Ramp Type`,
+`Ramp Up Time Constant (ms)`, `Reboot Ramp Type`,
+`Reboot Ramp Up Time Constant (ms)`, `Linear Ramp Factor` and
+`GainRampUpConfig for first call after reboot`. A capture therefore does not
+step straight to its configured gain.
+
+`micd` implements the linear shape (`src/adapter/gain_ramp.c`) on the
+calibrated mono stream: the first samples use the baseline digital gain and it
+walks to the configured `LE_MIC_DIGITAL_GAIN` over a time constant. The first
+calibrated stream after `micd` starts uses the reboot constant, later streams
+the normal one, matching the stock split.
+
+- `LE_MIC_GAIN_RAMP_MS` is the normal time constant in ms, default 200.
+- `LE_MIC_GAIN_RAMP_REBOOT_MS` is the first-stream-after-start constant,
+  default 1000.
+- `LE_MIC_GAIN_RAMP_START` is the starting gain in hundredths (100 is unity),
+  default 100.
+- A time constant of 0 disables the ramp, so streams use the target gain from
+  the first sample. Bad values fall back to the defaults and values above
+  30000 ms clamp; none of them stops capture.
+
+The ramp runs before the stream header's first audio reaches a consumer, so
+the wake word and recognition both see it. It adds no buffering and no
+latency. The numeric defaults are judgement calls from the stock fields: no
+stock `asp.cfg` survives in the dump, so the stage and its shape are known but
+its values are not. `tests/test_gain_ramp.c` pins the shape and
+`tests/test_micd.c` checks the daemon wiring, both on synthetic capture.
 
 ## Mix mode
 
