@@ -1264,7 +1264,7 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
-		src/adapter/smoke_alarm_detector.c \
+		src/adapter/smoke_alarm_detector.c src/adapter/voice_ns.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -1274,7 +1274,7 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
-		src/adapter/smoke_alarm_detector.c \
+		src/adapter/smoke_alarm_detector.c src/adapter/voice_ns.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
@@ -1335,6 +1335,7 @@ $(BUILD)/voice_aec_guard.wake.arm.o: src/adapter/voice_aec_guard.h \
 	src/adapter/voice_aec.h src/adapter/voice_reference.h
 $(BUILD)/clap_detector.wake.arm.o: src/adapter/clap_detector.h
 $(BUILD)/smoke_alarm_detector.wake.arm.o: src/adapter/smoke_alarm_detector.h
+$(BUILD)/voice_ns.wake.arm.o: src/adapter/voice_ns.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
 $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
@@ -1375,6 +1376,7 @@ $(BUILD)/json.wake.arm.o: src/json.c src/json.h
 WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/clap_detector.wake.arm.o \
 	$(BUILD)/smoke_alarm_detector.wake.arm.o \
+	$(BUILD)/voice_ns.wake.arm.o \
 	$(BUILD)/voice_aec.wake.arm.o \
 	$(BUILD)/voice_aec_guard.wake.arm.o \
 	$(BUILD)/voice_reference.wake.arm.o \

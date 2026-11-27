@@ -4,6 +4,7 @@
 #include "clap_detector.h"
 #include "smoke_alarm_detector.h"
 #include "voice_aec.h"
+#include "voice_ns.h"
 #include "voice_aec_guard.h"
 #include "voice_dsp.h"
 #include "voice_reference.h"
@@ -41,6 +42,16 @@
 #define PREROLL_SAMPLES (LE_VOICE_AEC_RATE * 3U)
 #define REFERENCE_TIMEOUT_NS 250000000ULL
 #define WAKE_ACCEPT_THRESHOLD 0.55f
+/*
+ * The stock wake front end always runs its Wiener noise reduction
+ * (WNG_Reduction, ConfARAWNGReduction) before the wake classifier. LibreEcho
+ * runs the same le_voice_ns series here, but at a gentler cut than the
+ * assistant path: the wake model was not validated against a deep cut on this
+ * hardware, so the boot default only removes 6 dB of steady noise.
+ * --noise-suppression-db 0 disables it.
+ */
+#define WAKE_NS_DEFAULT_DB 6U
+#define WAKE_NS_MAX_DB 30U
 /* The classifier of a model folder: the one file a second word needs. */
 #define WAKE_CLASSIFIER_FILE "alexa_v0.1.onnx"
 #define WAKE_SECOND_PATH_BYTES 1024U
@@ -64,6 +75,7 @@ struct waked_config {
     unsigned int dump_seconds;
     unsigned int wake_threads;
     unsigned int vad_floor_rms;
+    unsigned int noise_suppression_db;
     float wake_threshold;
     /* Optional second wake word: a model folder whose classifier runs on the
      * first model's features. Its folder name is the word's name. */
@@ -78,6 +90,9 @@ struct waked_ipc {
     unsigned int detected_count;
     unsigned int clap_count;
     unsigned int smoke_alarm_count;
+    unsigned int noise_suppression_db;
+    int noise_suppression_enabled;
+    struct le_voice_ns noise;
     int sensitivity;
     struct le_wake_event last_event;
     /* The phrase and model name of the model this process runs. */
@@ -100,6 +115,7 @@ struct waked_metrics {
     uint64_t processed_frames;
     uint64_t last_capture_ns;
     uint64_t aec_frames;
+    uint64_t ns_frames;
     uint64_t vad_active_frames;
     uint64_t vad_noise_energy;
     uint64_t dump_samples;
@@ -645,6 +661,9 @@ static void handle_control_client(
             "\"inference_active\":%s,\"inference_age_ms\":%d,"
             "\"clap_enabled\":%s,\"clap_count\":%u,"
             "\"smoke_alarm_enabled\":%s,\"smoke_alarm_count\":%u,"
+            "\"noise_suppression_enabled\":%s,"
+            "\"noise_suppression_db\":%u,"
+            "\"noise_suppression_frames\":%llu,"
             "\"nearest_answers\":%s,"
             "\"model\":\"%s\"}",
             ipc->wake_phrase,
@@ -659,6 +678,9 @@ static void handle_control_client(
             ipc->clap.enabled ? "true" : "false", ipc->clap_count,
             ipc->smoke_alarm.enabled ? "true" : "false",
             ipc->smoke_alarm_count,
+            ipc->noise_suppression_enabled ? "true" : "false",
+            ipc->noise_suppression_db,
+            (unsigned long long)metrics->ns_frames,
             arbitration,
             ipc->wake_model);
         (void)respond(client_fd, id, 1, status);
@@ -770,6 +792,27 @@ static void handle_control_client(
                           enabled ? "{\"enabled\":true}"
                                   : "{\"enabled\":false}");
         }
+    } else if (!strcmp(command, "set_noise_suppression")) {
+        size_t length = args ? strnlen(args, LE_ADAPTER_MSG_MAX) : 0;
+        int enabled = 0;
+
+        if (!args || length == LE_ADAPTER_MSG_MAX ||
+            !json_valid_object(args, length) ||
+            json_duplicate_key(args, length, "enabled") ||
+            json_get_top_level_bool(args, length, "enabled", &enabled) != 1)
+            (void)respond(client_fd, id, 0,
+                          "enabled must be a single top-level boolean");
+        else {
+            /*
+             * The filters keep delay-line and noise state. Clearing it on a
+             * toggle means a switch never replays 16 ms of old audio.
+             */
+            le_voice_ns_reset(&ipc->noise);
+            ipc->noise_suppression_enabled = enabled;
+            (void)respond(client_fd, id, 1,
+                          enabled ? "{\"enabled\":true}"
+                                  : "{\"enabled\":false}");
+        }
     } else if (!strcmp(command, "test")) {
         const struct le_wake_event event = {
             metrics->processed_frames *
@@ -838,6 +881,16 @@ static int process_frame(struct le_voice_aec *aec,
     } else {
         memset(far_end, 0, sizeof(far_end));
         memcpy(clean, microphone, sizeof(clean));
+    }
+    if (ipc->noise_suppression_enabled) {
+        /*
+         * Suppress steady noise before the VAD, the detector fan-out and the
+         * wake worker, which is where the stock front end puts its Wiener
+         * reduction. The filter has a constant 16 ms delay, so every consumer
+         * still sees the same stream, just later.
+         */
+        le_voice_ns_process(&ipc->noise, clean, LE_VOICE_AEC_FRAME_SAMPLES);
+        ++metrics->ns_frames;
     }
     vad_result = le_voice_vad_process(
         vad, clean, LE_VOICE_AEC_FRAME_SAMPLES);
@@ -948,6 +1001,15 @@ static int run_waked(const struct waked_config *config)
     memset(&ipc, 0, sizeof(ipc));
     le_clap_detector_init(&ipc.clap);
     le_smoke_alarm_detector_init(&ipc.smoke_alarm);
+    ipc.noise_suppression_db = config->noise_suppression_db;
+    ipc.noise_suppression_enabled = config->noise_suppression_db > 0;
+    if (le_voice_ns_init(&ipc.noise,
+                         config->noise_suppression_db > 0
+                             ? (int)config->noise_suppression_db
+                             : (int)WAKE_NS_DEFAULT_DB) < 0) {
+        fprintf(stderr, "waked: invalid noise suppression attenuation\n");
+        goto out;
+    }
     ipc.listen_fd = -1;
     ipc.event_pipe[0] = -1;
     ipc.event_pipe[1] = -1;
@@ -1163,7 +1225,8 @@ out:
                               metrics.aec_frames, monotonic_nanoseconds(),
                               1);
     fprintf(stderr,
-            "waked: frames=%llu aec_frames=%llu vad_active_frames=%llu "
+            "waked: frames=%llu aec_frames=%llu ns_frames=%llu "
+            "vad_active_frames=%llu "
             "wake_scores=%llu wake_events=%llu max_wake_score=%.6f "
             "max_inference_us=%u wake_dropped_blocks=%llu "
             "wake_failed=%s "
@@ -1171,6 +1234,7 @@ out:
             "ref_discontinuities=%u aec_resets=%u\n",
             (unsigned long long)metrics.processed_frames,
             (unsigned long long)metrics.aec_frames,
+            (unsigned long long)metrics.ns_frames,
             (unsigned long long)metrics.vad_active_frames,
             (unsigned long long)metrics.wake_scores,
             (unsigned long long)metrics.wake_events,
@@ -1216,6 +1280,7 @@ int main(int argc, char **argv)
         0,
         2,
         LE_VOICE_VAD_DEFAULT_FLOOR_RMS,
+        WAKE_NS_DEFAULT_DB,
         WAKE_ACCEPT_THRESHOLD,
         NULL
     };
@@ -1292,6 +1357,19 @@ int main(int argc, char **argv)
                 floor_rms = (long)LE_VOICE_VAD_MAX_FLOOR_RMS;
             }
             config.vad_floor_rms = (unsigned int)floor_rms;
+        } else if (!strcmp(argv[i], "--noise-suppression-db") &&
+                   i + 1 < argc) {
+            char *end = NULL;
+            long db = strtol(argv[++i], &end, 10);
+
+            if (!end || *end != '\0' || db < 0 ||
+                db > (long)WAKE_NS_MAX_DB) {
+                fprintf(stderr,
+                        "waked: noise suppression must be 0..%u dB\n",
+                        WAKE_NS_MAX_DB);
+                return 2;
+            }
+            config.noise_suppression_db = (unsigned int)db;
         } else if (!strcmp(argv[i], "--dump-pcm") && i + 1 < argc) {
             config.dump_path = argv[++i];
         } else if (!strcmp(argv[i], "--dump-seconds") && i + 1 < argc) {
@@ -1309,6 +1387,7 @@ int main(int argc, char **argv)
                     "[--reference-socket PATH] "
                     "[--model-dir PATH] [--wake-threads 1..4] "
                     "[--vad-floor-rms 1..16384] "
+                    "[--noise-suppression-db 0..30] "
                     "[--wake-threshold 0..1] "
                     "[--second-model-dir PATH] "
                     "[--dump-pcm PATH --dump-seconds N]\n", argv[0]);

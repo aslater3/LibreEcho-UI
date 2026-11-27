@@ -168,6 +168,32 @@ while the selected beam follows talkers. The two can therefore differ.
 - The UI/API authentication and privacy policy remain in front of browser
   streaming and the beam view.
 
+## Wake-path noise suppression
+
+The stock front end runs a Wiener noise reduction (`WNG_Reduction`,
+`ConfARAWNGReduction` in the ASP configuration) before its wake classifier.
+LibreEcho now runs the existing `le_voice_ns` series
+(`src/adapter/voice_ns.c`) on that path too: after the echo canceller and
+before the VAD, the detector fan-out and the wake worker, so every consumer
+sees the same cleaned stream. The filter has a constant 16 ms delay and keeps
+sample indices unchanged.
+
+At boot the wake path removes 6 dB of steady noise. That is deliberately
+gentler than the assistant path's default 15 dB, because the wake model has
+not yet been validated against a deeper cut on real hardware. The attenuation
+is set with `--noise-suppression-db 0..30` (`0` disables it) and can be
+toggled at run time over the adapter control socket:
+
+```text
+{"v":1,"id":1,"cmd":"set_noise_suppression","args":{"enabled":false}}
+{"v":1,"id":1,"cmd":"set_noise_suppression","args":{"enabled":true}}
+```
+
+`status` reports `noise_suppression_enabled`, `noise_suppression_db` and
+`noise_suppression_frames`. Toggling resets the filter state so a switch never
+replays old audio. Turning suppression off is the escape hatch if a wake word
+stops being heard in a quiet room.
+
 ## Clap detection (experimental, off by default)
 
 `libreecho-waked` can screen its cleaned mono frames for claps. The detector

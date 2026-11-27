@@ -25,6 +25,10 @@ VAD_FLOOR_FILE=${VAD_FLOOR_FILE:-/data/libreecho/config/vad-floor-rms}
 # canceller is inert, afterwards it adapts. Being able to turn it off without
 # reflashing is what makes that testable on hardware.
 AEC_FILE=${AEC_FILE:-/data/libreecho/config/aec-reference}
+# Steady-noise attenuation on the wake path, in dB; 0 disables it. The daemon
+# default is 6 dB. A hand-provisioned bad value falls back to that default
+# rather than costing the device its wake word.
+NOISE_FILE=${NOISE_FILE:-/data/libreecho/config/wake-noise-suppression-db}
 # Write a number of seconds here to have waked dump exactly the audio it
 # processes to /data/libreecho/config/wake-dump.raw. It is the only way to see
 # what the detector receives, the microphone and capture-mux having been proven
@@ -232,6 +236,22 @@ start_service() {
         AEC_REFERENCE_ARG=""
         echo "libreecho-waked: echo cancellation disabled by $AEC_FILE" >&2
     fi
+    NOISE_ARG=""
+    if [ -r "$NOISE_FILE" ]; then
+        NOISE_DB=$(sed -n '1p' "$NOISE_FILE")
+        case "$NOISE_DB" in
+            ''|*[!0-9]*)
+                echo "libreecho-waked: unreadable noise suppression '$NOISE_DB'; using the default" >&2
+                ;;
+            *)
+                if [ "$NOISE_DB" -gt 30 ]; then
+                    echo "libreecho-waked: noise suppression above 30 dB; clamping" >&2
+                    NOISE_DB=30
+                fi
+                NOISE_ARG="--noise-suppression-db $NOISE_DB"
+                ;;
+        esac
+    fi
     # Same fail-safe shape: only a plain positive integer turns dumping on.
     DUMP_ARG=""
     if [ -r "$DUMP_FILE" ]; then
@@ -260,7 +280,7 @@ start_service() {
         SECOND_ARG="--second-model-dir $SECOND_MODEL_ROOT"
         model_note "listening for a second wake word from $SECOND_MODEL_ROOT"
     fi
-    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET $AEC_REFERENCE_ARG --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS $DUMP_ARG $SECOND_ARG}
+    ARGS=${ARGS:---foreground --socket $SOCKET --mic-socket $MIC_SOCKET $AEC_REFERENCE_ARG --model-dir $MODEL_ROOT --wake-threads 1 --vad-floor-rms $VAD_FLOOR_RMS $NOISE_ARG $DUMP_ARG $SECOND_ARG}
     launch_daemon
     # waked exits at startup when it cannot load its models. Only a custom
     # model gets this check, and a failure restarts on the stock model.

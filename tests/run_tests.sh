@@ -170,6 +170,7 @@ WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
 WAKED_REQUIRED=1 python3 tests/test_waked_listen.py
 WAKED_REQUIRED=1 python3 tests/test_waked_clap.py
 WAKED_REQUIRED=1 python3 tests/test_waked_smoke_alarm.py
+WAKED_REQUIRED=1 python3 tests/test_waked_noise_suppression.py
 WAKED_REQUIRED=1 python3 tests/test_waked_nearest_answers.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
@@ -360,6 +361,7 @@ cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -lm -o build/test-micd
 ./build/test-micd
 sh tests/test_waked_init_model.sh
+sh tests/test_waked_init_noise.sh
 cc -D_POSIX_C_SOURCE=200809L -std=c99 -Wall -Wextra -Wpedantic -Werror \
     -Isrc -Isrc/adapter tests/test_voice_dsp.c src/adapter/voice_dsp.c \
     -o build/test-voice-dsp
