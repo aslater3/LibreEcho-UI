@@ -170,6 +170,7 @@ WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
 WAKED_REQUIRED=1 python3 tests/test_waked_listen.py
 WAKED_REQUIRED=1 python3 tests/test_waked_clap.py
 WAKED_REQUIRED=1 python3 tests/test_waked_smoke_alarm.py
+WAKED_REQUIRED=1 python3 tests/test_waked_sound_events.py
 WAKED_REQUIRED=1 python3 tests/test_waked_nearest_answers.py
 sh tests/test_watchdogd_shutdown_contract.sh
 python3 tests/test_watchdog_service_table.py
@@ -196,6 +197,10 @@ make build/test-clap-detector
 ./build/test-clap-detector
 make build/test-smoke-alarm-detector
 ./build/test-smoke-alarm-detector
+make build/test-glass-break-detector
+./build/test-glass-break-detector
+make build/test-baby-cry-detector
+./build/test-baby-cry-detector
 sh tests/test_microphone_fanout_contract.sh
 sh tests/test_audio_retention_contract.sh
 python3 tests/test_baby_monitor_stream_contract.py

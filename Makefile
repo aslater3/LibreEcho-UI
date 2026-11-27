@@ -1118,6 +1118,12 @@ $(BUILD)/test-clap-detector: tests/test_clap_detector.c src/adapter/clap_detecto
 $(BUILD)/test-smoke-alarm-detector: tests/test_smoke_alarm_detector.c src/adapter/smoke_alarm_detector.c src/adapter/smoke_alarm_detector.h
 	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< src/adapter/smoke_alarm_detector.c -lm -o $@
 
+$(BUILD)/test-glass-break-detector: tests/test_glass_break_detector.c src/adapter/glass_break_detector.c src/adapter/glass_break_detector.h
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< src/adapter/glass_break_detector.c -lm -o $@
+
+$(BUILD)/test-baby-cry-detector: tests/test_baby_cry_detector.c src/adapter/baby_cry_detector.c src/adapter/baby_cry_detector.h
+	$(CC) -D_POSIX_C_SOURCE=200809L $(CSTD) $(WARN) -Werror -Isrc -Isrc/adapter $< src/adapter/baby_cry_detector.c -lm -o $@
+
 $(BUILD)/test-wake-led: tests/test_wake_led.c src/adapter/wake_led.c \
 		src/adapter/adapter_client.c src/log.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -1264,7 +1270,8 @@ test-voice-listening-feedback: $(BUILD)/test-voice-listening-feedback $(BUILD)/l
 $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
-		src/adapter/smoke_alarm_detector.c \
+		src/adapter/smoke_alarm_detector.c src/adapter/glass_break_detector.c \
+		src/adapter/baby_cry_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c \
 		src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
@@ -1274,7 +1281,8 @@ $(BUILD)/libreecho-waked: src/adapter/waked.c src/adapter/voice_aec.c \
 $(BUILD)/libreecho-waked-arm32: src/adapter/waked.c src/adapter/voice_aec.c \
 		src/adapter/voice_aec_guard.c src/adapter/voice_reference.c src/adapter/voice_dsp.c \
 		src/adapter/voice_stream.c src/adapter/clap_detector.c src/adapter/wake_arbiter.c \
-		src/adapter/smoke_alarm_detector.c \
+		src/adapter/smoke_alarm_detector.c src/adapter/glass_break_detector.c \
+		src/adapter/baby_cry_detector.c \
 		src/adapter/wake_led.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c src/json.c src/wake_model.c src/peer_auth.c src/adapter/voice_clip_store.c
 	$(CROSS_COMPILE)$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O3 \
 		-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
@@ -1326,7 +1334,8 @@ $(BUILD)/waked.wake.arm.o: src/adapter/adapter.h \
 	src/adapter/voice_aec.h src/adapter/voice_aec_guard.h src/adapter/voice_dsp.h \
 	src/adapter/voice_reference.h src/adapter/voice_stream.h \
 	src/adapter/clap_detector.h src/adapter/wake_arbiter.h \
-	src/adapter/smoke_alarm_detector.h \
+	src/adapter/smoke_alarm_detector.h src/adapter/glass_break_detector.h \
+	src/adapter/baby_cry_detector.h \
 	src/adapter/wake_led.h \
 	src/adapter/wake_worker.h src/json.h
 $(BUILD)/wake_arbiter.wake.arm.o: src/adapter/wake_arbiter.h src/peer_auth.h
@@ -1335,6 +1344,8 @@ $(BUILD)/voice_aec_guard.wake.arm.o: src/adapter/voice_aec_guard.h \
 	src/adapter/voice_aec.h src/adapter/voice_reference.h
 $(BUILD)/clap_detector.wake.arm.o: src/adapter/clap_detector.h
 $(BUILD)/smoke_alarm_detector.wake.arm.o: src/adapter/smoke_alarm_detector.h
+$(BUILD)/glass_break_detector.wake.arm.o: src/adapter/glass_break_detector.h
+$(BUILD)/baby_cry_detector.wake.arm.o: src/adapter/baby_cry_detector.h
 $(BUILD)/voice_reference.wake.arm.o: src/adapter/voice_reference.h
 $(BUILD)/voice_dsp.wake.arm.o: src/adapter/voice_dsp.h
 $(BUILD)/wake_worker.wake.arm.o: src/adapter/wake_worker.h \
@@ -1375,6 +1386,8 @@ $(BUILD)/json.wake.arm.o: src/json.c src/json.h
 WAKE_DAEMON_ARM_OBJECTS = $(BUILD)/waked.wake.arm.o \
 	$(BUILD)/clap_detector.wake.arm.o \
 	$(BUILD)/smoke_alarm_detector.wake.arm.o \
+	$(BUILD)/glass_break_detector.wake.arm.o \
+	$(BUILD)/baby_cry_detector.wake.arm.o \
 	$(BUILD)/voice_aec.wake.arm.o \
 	$(BUILD)/voice_aec_guard.wake.arm.o \
 	$(BUILD)/voice_reference.wake.arm.o \

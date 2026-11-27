@@ -222,3 +222,43 @@ standard and a real alarm before any conformance claim. Only the T3 pattern is
 covered; the CO (T4) pattern has short pulses that do not fit these windows.
 The setting is not persisted, not exposed in the HTTP API and not forwarded to
 Home Assistant yet.
+
+## Glass break and baby cry detection (experimental, off by default)
+
+The stock device hands sound events to Pryon's acoustic event pipeline:
+`libpryon.so` builds `acoustic_event_detection_pipeline`, scores
+`acoustic_event` results and counts `num_of_acoustic_events_since_last_ww`.
+That pipeline needs a shipped AED model, which LibreEcho does not have, so
+these are fixed decision rules over the same cleaned mono frames rather than a
+classifier.
+
+Both detectors are off at start-up and are switched on only by the adapter
+control socket:
+
+```text
+{"v":1,"id":1,"cmd":"set_glass_break","args":{"enabled":true}}
+{"v":1,"id":1,"cmd":"set_baby_cry","args":{"enabled":true}}
+```
+
+`status` reports `glass_break_enabled`/`glass_break_count` and
+`baby_cry_enabled`/`baby_cry_count`.
+
+A glass break (`src/adapter/glass_break_detector.c`) is a sharp broadband
+high-frequency transient followed by a smaller tinkle: the detector requires
+two bursts with most of their energy above 2.5 kHz, an impulsive crest factor
+and a broadband spectrum, both inside 700 ms. A door slam or speech can supply
+the first burst but not the high-frequency pair, so it does not fire. The cost
+is eight Goertzel passes on frames that clear the energy gate.
+
+A baby cry (`src/adapter/baby_cry_detector.c`) is a strongly voiced bout of
+450 ms or more with a fundamental between 250 and 700 Hz and clear harmonics,
+repeated within four seconds. Adult male speech is rejected by its energy below
+200 Hz; room noise is not periodic enough to voice.
+
+Events go to the wake subscriber stream as `glass_break_detected` with
+`{"detection_sample":N,"bursts":2}` and `baby_cry_detected` with
+`{"detection_sample":N,"bouts":2}`. Like claps, they never start a voice turn.
+The thresholds are tuned constants checked on synthetic signals only. A real
+pane of glass and a real infant on a real microphone are still owed. The
+settings are not persisted, not exposed in the HTTP API and not forwarded to
+Home Assistant yet.
