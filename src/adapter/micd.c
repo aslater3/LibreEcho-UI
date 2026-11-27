@@ -2,6 +2,7 @@
 #include "log.h"
 #include "mic_beamformer.h"
 #include "voice_dsp.h"
+#include "wake_direction.h"
 
 #include <errno.h>
 #include <math.h>
@@ -64,9 +65,18 @@ struct beam_view {
     volatile unsigned int mix_mode;
     /* Array lane used by the "single" mode; -1 is automatic (lowest selected lane). */
     volatile int mix_lane;
+    /* Wake-azimuth histogram, published with the beam snapshot. */
+    unsigned int direction_bins;
+    float direction_likelihood[LE_WAKE_DIRECTION_MAX_BINS];
+    int direction_deg;
+    float direction_rad;
+    float direction_variance_deg2;
+    float direction_confidence;
+    unsigned long direction_samples;
 };
 
 static struct beam_view *beam_view;
+static struct le_wake_direction wake_direction;
 
 static unsigned int current_mix_mode(void)
 {
@@ -188,6 +198,24 @@ static void beam_view_publish(const struct le_beamformer *bf)
         beam_view->power[b] = bf->power[b];
         beam_view->floor[b] = bf->floor[b];
     }
+    if (bf->primed) {
+        float weight = bf->score[bf->selected] - 1.0f;
+
+        if (weight > 0.0f)
+            (void)le_wake_direction_add(
+                &wake_direction, bf->azimuth_deg[bf->selected], weight);
+    }
+    beam_view->direction_bins = le_wake_direction_histogram(
+        &wake_direction, NULL, beam_view->direction_likelihood,
+        LE_WAKE_DIRECTION_MAX_BINS);
+    beam_view->direction_deg = le_wake_direction_azimuth_deg(&wake_direction);
+    beam_view->direction_rad = le_wake_direction_azimuth_rad(&wake_direction);
+    beam_view->direction_variance_deg2 =
+        le_wake_direction_variance_deg2(&wake_direction);
+    beam_view->direction_confidence =
+        le_wake_direction_confidence(&wake_direction);
+    beam_view->direction_samples =
+        le_wake_direction_samples(&wake_direction);
     beam_view->selected_deg = le_beamformer_selected_azimuth(bf);
     beam_view->locked = bf->locked >= 0;
     beam_view->hops++;
@@ -222,6 +250,49 @@ static double beam_db(float power)
  * contrast is how far the peak stands above the average beam, which says
  * how directional the sound field is; diffuse noise gives close to 0 dB.
  */
+/*
+ * The wake-direction histogram in the beam snapshot: circular mean, variance,
+ * confidence and normalised likelihood per beam azimuth. Field names follow
+ * the stock AWD diagnostics (awdAzRad, awdAzVar, awdAzHistAngle,
+ * awdAzHistLik) while staying self-describing in JSON.
+ */
+static int format_localization(const struct beam_view *v, char *buffer,
+                               size_t size)
+{
+    unsigned int b;
+    size_t used;
+    int n;
+
+    n = snprintf(buffer, size,
+                 "{\"azimuth_deg\":%d,\"azimuth_rad\":%.4f,"
+                 "\"variance_deg2\":%.1f,\"confidence\":%.3f,"
+                 "\"samples\":%lu,\"histogram\":[",
+                 v->direction_samples ? v->direction_deg : -1,
+                 v->direction_samples ? (double)v->direction_rad : -1.0,
+                 v->direction_samples ? (double)v->direction_variance_deg2 : 0.0,
+                 v->direction_samples ? (double)v->direction_confidence : 0.0,
+                 v->direction_samples);
+    if (n < 0 || (size_t)n >= size)
+        return -1;
+    used = (size_t)n;
+    for (b = 0; b < v->direction_bins && b < LE_WAKE_DIRECTION_MAX_BINS; ++b) {
+        double angle = v->direction_bins
+            ? (double)b * 360.0 / (double)v->direction_bins : 0.0;
+
+        n = snprintf(buffer + used, size - used,
+                     "%s{\"deg\":%.0f,\"likelihood\":%.4f}",
+                     b ? "," : "", angle,
+                     (double)v->direction_likelihood[b]);
+        if (n < 0 || (size_t)n >= size - used)
+            return -1;
+        used += (size_t)n;
+    }
+    n = snprintf(buffer + used, size - used, "]}");
+    if (n < 0 || (size_t)n >= size - used)
+        return -1;
+    return (int)(used + (size_t)n);
+}
+
 static int format_beams(char *buffer, size_t size)
 {
     struct beam_view v;
@@ -290,7 +361,15 @@ static int format_beams(char *buffer, size_t size)
             return -1;
         used += (size_t)n;
     }
-    n = snprintf(buffer + used, size - used, "]}");
+    n = snprintf(buffer + used, size - used, "],\"localization\":");
+    if (n < 0 || (size_t)n >= size - used)
+        return -1;
+    used += (size_t)n;
+    n = format_localization(&v, buffer + used, size - used);
+    if (n < 0)
+        return -1;
+    used += (size_t)n;
+    n = snprintf(buffer + used, size - used, "}");
     if (n < 0 || (size_t)n >= size - used)
         return -1;
     return (int)(used + (size_t)n);
@@ -819,6 +898,40 @@ static int format_status(char *buffer, size_t size,
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
+static int format_wake_direction(char *buffer, size_t size)
+{
+    struct beam_view v;
+    unsigned int seq, tries;
+    size_t used;
+    int n;
+
+    if (!beam_view)
+        return -1;
+    for (tries = 0; tries < 100; ++tries) {
+        seq = beam_view->seq;
+        __sync_synchronize();
+        memcpy(&v, (const void *)beam_view, sizeof(v));
+        __sync_synchronize();
+        if (!(seq & 1U) && seq == beam_view->seq)
+            break;
+    }
+    if (tries == 100)
+        return -1;
+    n = snprintf(buffer, size, "{\"running\":%s,\"localization\":",
+                 v.running ? "true" : "false");
+    if (n < 0 || (size_t)n >= size)
+        return -1;
+    used = (size_t)n;
+    n = format_localization(&v, buffer + used, size - used);
+    if (n < 0)
+        return -1;
+    used += (size_t)n;
+    n = snprintf(buffer + used, size - used, "}");
+    if (n < 0 || (size_t)n >= size - used)
+        return -1;
+    return (int)(used + (size_t)n);
+}
+
 static int parse_channel(const char *args, int *channel)
 {
     const char *key;
@@ -979,6 +1092,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
         return -1;
     }
     le_voice_highpass_init(&highpass);
+    le_wake_direction_init(&wake_direction, LE_BEAM_DEFAULT_BEAMS);
     mix_mask = beam_mic_mask();
 
     count = read(pipe_fds[0], input, sizeof(input));
@@ -1225,6 +1339,13 @@ int main(int argc, char **argv)
         } else if (!strcmp(command, "beams")) {
             if (format_beams(status, sizeof(status)) < 0)
                 (void)respond(client_fd, id, 0, "beam state unavailable");
+            else
+                (void)respond(client_fd, id, 1, status);
+            close(client_fd);
+        } else if (!strcmp(command, "wake_direction")) {
+            if (format_wake_direction(status, sizeof(status)) < 0)
+                (void)respond(client_fd, id, 0,
+                              "wake direction unavailable");
             else
                 (void)respond(client_fd, id, 1, status);
             close(client_fd);
