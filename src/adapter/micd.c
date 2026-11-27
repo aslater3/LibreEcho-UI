@@ -940,7 +940,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
         {0, 1, 2, 3, 4, 5, 6};
     static struct le_beamformer beamformer;
     struct le_voice_calibration calibration;
-    struct le_voice_highpass highpass;
+    struct le_voice_lane_highpass highpass;
     unsigned char input[LE_VOICE_RAW_FRAME_BYTES * 256];
     int16_t output[256];
     int miccal[LE_VOICE_LOGICAL_CHANNELS];
@@ -978,7 +978,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
             ;
         return -1;
     }
-    le_voice_highpass_init(&highpass);
+    le_voice_lane_highpass_init(&highpass);
     mix_mask = beam_mic_mask();
 
     count = read(pipe_fds[0], input, sizeof(input));
@@ -1005,6 +1005,14 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                     le_voice_decode_calibrated(
                         input + frame * LE_VOICE_RAW_FRAME_BYTES,
                         &calibration, logical);
+                    /*
+                     * High-pass each lane before the array processing, as
+                     * the stock MicPreProcess does.  Filtering the mixed
+                     * output instead leaves rumble and correlated
+                     * low-frequency energy in the beam covariance and in the
+                     * average and single mixes.
+                     */
+                    le_voice_lane_highpass_process(&highpass, logical);
                     /* The beamformer runs in every mode, so its selection
                        and beam view stay warm; the mode only picks the
                        output. */
@@ -1016,7 +1024,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                     else if (mode == LE_MIC_MIX_SINGLE)
                         mixed = le_mic_mix_single(logical, mix_mask,
                                                   current_mix_lane());
-                    output[frame] = le_voice_highpass_sample(&highpass, mixed);
+                    output[frame] = mixed;
                     if (beamformer.fill == 0)
                         beam_view_publish(&beamformer);
                 }

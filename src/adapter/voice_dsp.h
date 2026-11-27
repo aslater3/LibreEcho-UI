@@ -90,6 +90,24 @@ void le_voice_highpass_init(struct le_voice_highpass *filter);
 int16_t le_voice_highpass_sample(struct le_voice_highpass *filter,
                                  int16_t input);
 
+/*
+ * The stock front end high-passes every microphone before the array
+ * processing: MicPreProcess in libasp.so keeps micsHpf_ and refsHpf_, and the
+ * AFE config carries hpfCoeffs for them.  Filtering only the beam output
+ * leaves correlated low-frequency energy -- fans, traffic, handling, DC --
+ * inside the beam covariance and inside every raw mix mode.  One filter per
+ * lane keeps the lanes' relative phase, so steering, averaging and the beam
+ * covariance are unaffected.
+ */
+struct le_voice_lane_highpass {
+    struct le_voice_highpass lane[LE_VOICE_LOGICAL_CHANNELS];
+};
+
+void le_voice_lane_highpass_init(struct le_voice_lane_highpass *filter);
+void le_voice_lane_highpass_process(
+    struct le_voice_lane_highpass *filter,
+    int16_t logical[LE_VOICE_LOGICAL_CHANNELS]);
+
 void le_voice_process_interleaved(
     const uint8_t *raw,
     size_t frames,

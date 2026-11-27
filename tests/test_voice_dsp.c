@@ -40,6 +40,7 @@ int main(void)
     int16_t logical[LE_VOICE_LOGICAL_CHANNELS];
     int16_t beam_output[12];
     struct le_voice_highpass highpass;
+    struct le_voice_lane_highpass lane_highpass;
     struct le_voice_vad vad;
     struct le_voice_vad_result vad_result;
     int16_t frame[LE_VOICE_FRAME_SAMPLES];
@@ -116,6 +117,32 @@ int main(void)
         (void)le_voice_highpass_sample(&highpass, 1000);
     CHECK(le_voice_highpass_sample(&highpass, 1000) >= -1);
     CHECK(le_voice_highpass_sample(&highpass, 1000) <= 1);
+
+    /*
+     * The lanes are filtered separately, before the array processing and
+     * before any mix.  A DC offset on one lane decays to nothing and does not
+     * leak into the others, while a speech-band tone still passes.
+     */
+    le_voice_lane_highpass_init(&lane_highpass);
+    for (i = 0; i < LE_VOICE_RATE / 2; ++i) {
+        int channel;
+
+        for (channel = 0; channel < LE_VOICE_LOGICAL_CHANNELS; ++channel)
+            logical[channel] = (int16_t)(channel == 3 ? 1000 : 0);
+        le_voice_lane_highpass_process(&lane_highpass, logical);
+    }
+    CHECK(logical[3] >= -1);
+    CHECK(logical[3] <= 1);
+    CHECK(logical[0] == 0);
+    CHECK(logical[6] == 0);
+    for (i = 0; i < 100; ++i) {
+        int channel;
+
+        for (channel = 0; channel < LE_VOICE_LOGICAL_CHANNELS; ++channel)
+            logical[channel] = (int16_t)((i & 1) ? 1000 : -1000);
+        le_voice_lane_highpass_process(&lane_highpass, logical);
+    }
+    CHECK(logical[0] > 500 || logical[0] < -500);
 
     le_voice_vad_init(&vad);
     memset(frame, 0, sizeof(frame));

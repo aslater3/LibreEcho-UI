@@ -169,6 +169,22 @@ int16_t le_voice_highpass_sample(struct le_voice_highpass *filter,
     return saturate_s16(output);
 }
 
+void le_voice_lane_highpass_init(struct le_voice_lane_highpass *filter)
+{
+    memset(filter, 0, sizeof(*filter));
+}
+
+void le_voice_lane_highpass_process(
+    struct le_voice_lane_highpass *filter,
+    int16_t logical[LE_VOICE_LOGICAL_CHANNELS])
+{
+    size_t channel;
+
+    for (channel = 0; channel < LE_VOICE_LOGICAL_CHANNELS; ++channel)
+        logical[channel] = le_voice_highpass_sample(
+            &filter->lane[channel], logical[channel]);
+}
+
 void le_voice_process_interleaved(
     const uint8_t *raw,
     size_t frames,
