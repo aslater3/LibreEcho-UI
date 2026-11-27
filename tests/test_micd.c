@@ -22,8 +22,10 @@
 #define BEAM_TEST_AZIMUTH 90.0
 
 /*
- * Writes BEAM_TEST_SECONDS of nine-lane 24-bit capture holding broadband
- * bursts from BEAM_TEST_AZIMUTH, as the array would hear them.
+ * Writes BEAM_TEST_SECONDS plus a two-second tail of nine-lane 24-bit
+ * capture holding broadband bursts from BEAM_TEST_AZIMUTH, as the array would
+ * hear them. The tail keeps the beamformer running while the lock command is
+ * exercised; direction is still measured over BEAM_TEST_SECONDS.
  */
 static int write_directional_capture(const char *path)
 {
@@ -35,7 +37,7 @@ static int write_directional_capture(const char *path)
     if (!file)
         return -1;
     le_array_render_init(&render, BEAM_TEST_AZIMUTH);
-    for (i = 0; i < 16000L * BEAM_TEST_SECONDS; ++i) {
+    for (i = 0; i < 16000L * (BEAM_TEST_SECONDS + 2); ++i) {
         unsigned char frame[27];
         int on = (i % 9600) < 4000;
         unsigned int c;
@@ -379,6 +381,7 @@ int main(void)
             "{\"v\":1,\"id\":34,\"cmd\":\"stream_mono\",\"args\":{}}\n";
         char sink[4096];
         double doa = -1.0;
+        double locked_deg = -1.0;
         int running_seen = 0;
         FILE *file;
 
@@ -400,6 +403,20 @@ int main(void)
                 break;
             nanosleep(&pause_time, NULL);
         }
+        /*
+         * Wake-direction lock: pin the known source direction before the
+         * stream starts, so the test does not depend on how much capture the
+         * worker has already consumed. waked sends this as soon as it accepts
+         * a wake word on the selected beam.
+         */
+        adapter = le_adapter_connect(socket_path, 250);
+        CHECK(adapter != NULL);
+        CHECK(le_adapter_call(adapter, "lock_beam",
+                              "{\"azimuth_deg\":90,\"hold_ms\":15000}",
+                              response, sizeof(response)) == LE_ADAPTER_OK);
+        CHECK(strstr(response, "\"locked\":true") != NULL);
+        le_adapter_close(adapter);
+        adapter = NULL;
         stream_fd = socket(AF_UNIX, SOCK_STREAM, 0);
         CHECK(stream_fd >= 0);
         memset(&address, 0, sizeof(address));
@@ -437,6 +454,26 @@ int main(void)
             nanosleep(&pause_time, NULL);
         }
         CHECK(running_seen);
+        CHECK(strstr(response, "\"locked\":true") != NULL);
+        {
+            const char *field = strstr(response, "\"selected_deg\":");
+
+            CHECK(field != NULL);
+            locked_deg = strtod(field + 15, NULL);
+        }
+        if (azimuth_error(locked_deg, BEAM_TEST_AZIMUTH) > 20.0)
+            fprintf(stderr, "micd: lock reported %.1f deg for a source at "
+                    "%.0f deg\n", locked_deg, BEAM_TEST_AZIMUTH);
+        CHECK(azimuth_error(locked_deg, BEAM_TEST_AZIMUTH) <= 20.0);
+        adapter = le_adapter_connect(socket_path, 250);
+        CHECK(adapter != NULL);
+        CHECK(le_adapter_call(adapter, "unlock_beam", "{}", response,
+                              sizeof(response)) == LE_ADAPTER_OK);
+        CHECK(strstr(response, "\"locked\":false") != NULL);
+        le_adapter_close(adapter);
+        adapter = NULL;
+        printf("micd: wake-direction lock pins %.0f deg and unlocks\n",
+               locked_deg);
         if (azimuth_error(doa, BEAM_TEST_AZIMUTH) > 20.0)
             fprintf(stderr, "micd: beams reported %.1f deg for a source at "
                     "%.0f deg: %s\n", doa, BEAM_TEST_AZIMUTH, response);

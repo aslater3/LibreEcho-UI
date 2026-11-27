@@ -168,6 +168,7 @@ sh tests/test_watchdog_voice_mode.sh
 make build/libreecho-waked
 WAKED_REQUIRED=1 python3 tests/test_waked_subscriber_slots.py
 WAKED_REQUIRED=1 python3 tests/test_waked_listen.py
+WAKED_REQUIRED=1 python3 tests/test_waked_beam_lock.py
 WAKED_REQUIRED=1 python3 tests/test_waked_clap.py
 WAKED_REQUIRED=1 python3 tests/test_waked_smoke_alarm.py
 WAKED_REQUIRED=1 python3 tests/test_waked_nearest_answers.py

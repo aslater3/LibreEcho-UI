@@ -64,6 +64,14 @@ struct beam_view {
     volatile unsigned int mix_mode;
     /* Array lane used by the "single" mode; -1 is automatic (lowest selected lane). */
     volatile int mix_lane;
+    /*
+     * Wake-direction lock, set by "lock_beam" from the main process and read
+     * by the stream worker. -1 means automatic selection. The worker drops the
+     * lock once lock_until_ms passes, so a wake that never brings a follow-up
+     * does not leave the array deaf to other directions.
+     */
+    volatile int lock_azimuth;
+    volatile long long lock_until_ms;
 };
 
 static struct beam_view *beam_view;
@@ -140,6 +148,38 @@ static int lane_from_json(const char *text, const char *key, int *lane)
         return -1;
     *lane = (int)value;
     return 0;
+}
+
+/*
+ * Optional integer member: 1 when present and in range, 0 when absent, -1
+ * when present but malformed or out of range. The key must be quoted.
+ */
+static int optional_int_from_json(const char *text, const char *key,
+                                  long minimum, long maximum, int *out)
+{
+    const char *p;
+    char *end;
+    long value;
+
+    if (!text || !key || !out || !(p = strstr(text, key)))
+        return 0;
+    p += strlen(key);
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    if (*p++ != ':')
+        return -1;
+    while (*p == ' ' || *p == '\t')
+        ++p;
+    errno = 0;
+    value = strtol(p, &end, 10);
+    if (errno || end == p || value < minimum || value > maximum)
+        return -1;
+    while (*end == ' ' || *end == '\t')
+        ++end;
+    if (*end != ',' && *end != '}')
+        return -1;
+    *out = (int)value;
+    return 1;
 }
 
 /* The owner's saved mix mode and lane from LE_MIC_CONFIG, read once at start-up. */
@@ -1017,8 +1057,17 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                         mixed = le_mic_mix_single(logical, mix_mask,
                                                   current_mix_lane());
                     output[frame] = le_voice_highpass_sample(&highpass, mixed);
-                    if (beamformer.fill == 0)
+                    if (beamformer.fill == 0) {
+                        int lock = beam_view ? beam_view->lock_azimuth : -1;
+
+                        if (lock >= 0 &&
+                            monotonic_ms() <
+                                (beam_view ? beam_view->lock_until_ms : 0))
+                            le_beamformer_lock(&beamformer, lock);
+                        else
+                            le_beamformer_lock(&beamformer, -1);
                         beam_view_publish(&beamformer);
+                    }
                 }
                 apply_digital_gain(output, frames, digital_gain);
                 if (write_all(client_fd, output,
@@ -1166,6 +1215,7 @@ int main(int argc, char **argv)
         saved_mix_settings(&mode, &lane);
         beam_view->mix_mode = (unsigned int)mode;
         beam_view->mix_lane = lane;
+        beam_view->lock_azimuth = -1;
     }
     listen_fd = le_adapter_listen(config.socket_path);
     if (listen_fd < 0) {
@@ -1260,6 +1310,56 @@ int main(int argc, char **argv)
                 (void)snprintf(status, sizeof(status),
                                "{\"microphone_lane\":%d}", lane);
                 (void)respond(client_fd, id, 1, status);
+            }
+            close(client_fd);
+        } else if (!strcmp(command, "lock_beam")) {
+            /*
+             * Wake-direction lock: the wake detector has just heard its word
+             * on the beam the selector chose, so pin the array there for the
+             * follow-up instead of letting a fan or a second talker take the
+             * beam mid-sentence. An omitted azimuth uses the beam selected
+             * now; hold_ms 0 (or unlock_beam) returns to automatic selection.
+             */
+            int hold_ms = 8000;
+            int azimuth_deg = -1;
+            int hold_rc, azimuth_rc;
+
+            hold_rc = optional_int_from_json(args, "\"hold_ms\"", 0, 30000,
+                                             &hold_ms);
+            azimuth_rc = optional_int_from_json(args, "\"azimuth_deg\"",
+                                                -1, 359, &azimuth_deg);
+            if (hold_rc < 0 || azimuth_rc < 0) {
+                (void)respond(client_fd, id, 0,
+                              "hold_ms must be 0..30000 and azimuth_deg "
+                              "-1..359");
+            } else if (!beam_view) {
+                (void)respond(client_fd, id, 0, "beam lock is unavailable");
+            } else if (hold_ms == 0) {
+                beam_view->lock_azimuth = -1;
+                beam_view->locked = 0;
+                (void)respond(client_fd, id, 1, "{\"locked\":false}");
+            } else {
+                if (azimuth_deg < 0)
+                    azimuth_deg = beam_view->selected_deg;
+                beam_view->lock_azimuth = azimuth_deg;
+                beam_view->lock_until_ms = monotonic_ms() + hold_ms;
+                beam_view->locked = 1;
+                le_log_info("beam locked to %d deg for %d ms",
+                            azimuth_deg, hold_ms);
+                (void)snprintf(status, sizeof(status),
+                               "{\"locked\":true,\"azimuth_deg\":%d,"
+                               "\"hold_ms\":%d}",
+                               azimuth_deg, hold_ms);
+                (void)respond(client_fd, id, 1, status);
+            }
+            close(client_fd);
+        } else if (!strcmp(command, "unlock_beam")) {
+            if (!beam_view) {
+                (void)respond(client_fd, id, 0, "beam lock is unavailable");
+            } else {
+                beam_view->lock_azimuth = -1;
+                beam_view->locked = 0;
+                (void)respond(client_fd, id, 1, "{\"locked\":false}");
             }
             close(client_fd);
         } else if (!strcmp(command, "stream_raw")) {

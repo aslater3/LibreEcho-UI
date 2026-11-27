@@ -26,6 +26,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <time.h>
 #include <unistd.h>
@@ -64,6 +65,8 @@ struct waked_config {
     unsigned int dump_seconds;
     unsigned int wake_threads;
     unsigned int vad_floor_rms;
+    /* How long the array stays pinned to the wake direction; 0 disables. */
+    unsigned int beam_lock_ms;
     float wake_threshold;
     /* Optional second wake word: a model folder whose classifier runs on the
      * first model's features. Its folder name is the word's name. */
@@ -86,6 +89,9 @@ struct waked_ipc {
     struct le_wake_led led;
     struct le_clap_detector clap;
     struct le_smoke_alarm_detector smoke_alarm;
+    /* micd's control socket, used to pin the beam after a wake. */
+    const char *mic_socket;
+    unsigned int beam_lock_ms;
     struct le_wake_arbiter arbiter;
     /* A detection waiting for the other devices' claims. */
     int arb_pending;
@@ -241,6 +247,59 @@ fail:
     return -1;
 }
 
+/*
+ * Ask micd to pin the array to the beam it selected at wake time. This is a
+ * separate short-lived control connection: the streaming socket is already
+ * carrying raw audio. A failure is noted and ignored; losing the lock must
+ * never lose the wake.
+ */
+static void request_beam_lock(const struct waked_ipc *ipc)
+{
+    static const char request_prefix[] =
+        "{\"v\":1,\"id\":1,\"cmd\":\"lock_beam\",\"args\":{\"hold_ms\":";
+    struct sockaddr_un address;
+    struct timeval timeout = {0, 200000};
+    char request[160];
+    char response[256];
+    size_t used = 0;
+    int length, fd;
+
+    if (ipc->beam_lock_ms == 0 || !ipc->mic_socket)
+        return;
+    if (strlen(ipc->mic_socket) >= sizeof(address.sun_path))
+        return;
+    length = snprintf(request, sizeof(request), "%s%u}}\n",
+                      request_prefix, ipc->beam_lock_ms);
+    if (length <= 0 || (size_t)length >= sizeof(request))
+        return;
+    fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0)
+        return;
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    memset(&address, 0, sizeof(address));
+    address.sun_family = AF_UNIX;
+    strcpy(address.sun_path, ipc->mic_socket);
+    if (connect(fd, (struct sockaddr *)&address, sizeof(address)) < 0 ||
+        write_all(fd, request, (size_t)length) < 0)
+        goto done;
+    while (used + 1 < sizeof(response)) {
+        ssize_t count = read(fd, response + used, 1);
+
+        if (count < 0 && errno == EINTR)
+            continue;
+        if (count != 1)
+            break;
+        if (response[used++] == '\n')
+            break;
+    }
+    response[used] = '\0';
+    if (!strstr(response, "\"ok\":true"))
+        fprintf(stderr, "waked: beam lock request was not accepted\n");
+done:
+    close(fd);
+}
+
 static void preroll_write(int16_t *preroll, size_t *position,
                           const int16_t *samples, size_t count)
 {
@@ -385,6 +444,7 @@ static void publish_wake_event(struct waked_ipc *ipc,
 
     ++ipc->detected_count;
     ipc->last_event = *event;
+    request_beam_lock(ipc);
     if (le_wake_led_trigger(
             &ipc->led, monotonic_nanoseconds()) != LE_ADAPTER_OK)
         fprintf(stderr,
@@ -946,6 +1006,8 @@ static int run_waked(const struct waked_config *config)
     memset(&metrics, 0, sizeof(metrics));
     metrics.vad_floor_rms = config->vad_floor_rms;
     memset(&ipc, 0, sizeof(ipc));
+    ipc.mic_socket = config->mic_socket;
+    ipc.beam_lock_ms = config->beam_lock_ms;
     le_clap_detector_init(&ipc.clap);
     le_smoke_alarm_detector_init(&ipc.smoke_alarm);
     ipc.listen_fd = -1;
@@ -1216,6 +1278,7 @@ int main(int argc, char **argv)
         0,
         2,
         LE_VOICE_VAD_DEFAULT_FLOOR_RMS,
+        8000,
         WAKE_ACCEPT_THRESHOLD,
         NULL
     };
@@ -1292,6 +1355,15 @@ int main(int argc, char **argv)
                 floor_rms = (long)LE_VOICE_VAD_MAX_FLOOR_RMS;
             }
             config.vad_floor_rms = (unsigned int)floor_rms;
+        } else if (!strcmp(argv[i], "--beam-lock-ms") && i + 1 < argc) {
+            char *end = NULL;
+            long hold = strtol(argv[++i], &end, 10);
+
+            if (!end || *end != '\0' || hold < 0 || hold > 30000) {
+                fprintf(stderr, "waked: beam lock must be 0..30000 ms\n");
+                return 2;
+            }
+            config.beam_lock_ms = (unsigned int)hold;
         } else if (!strcmp(argv[i], "--dump-pcm") && i + 1 < argc) {
             config.dump_path = argv[++i];
         } else if (!strcmp(argv[i], "--dump-seconds") && i + 1 < argc) {
@@ -1309,6 +1381,7 @@ int main(int argc, char **argv)
                     "[--reference-socket PATH] "
                     "[--model-dir PATH] [--wake-threads 1..4] "
                     "[--vad-floor-rms 1..16384] "
+                    "[--beam-lock-ms 0..30000] "
                     "[--wake-threshold 0..1] "
                     "[--second-model-dir PATH] "
                     "[--dump-pcm PATH --dump-seconds N]\n", argv[0]);
