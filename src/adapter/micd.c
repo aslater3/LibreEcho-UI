@@ -1,6 +1,8 @@
 #include "adapter.h"
+#include "json.h"
 #include "log.h"
 #include "mic_beamformer.h"
+#include "voice_agc.h"
 #include "voice_dsp.h"
 
 #include <errno.h>
@@ -64,6 +66,8 @@ struct beam_view {
     volatile unsigned int mix_mode;
     /* Array lane used by the "single" mode; -1 is automatic (lowest selected lane). */
     volatile int mix_lane;
+    /* Capture AGC, set by "set_agc" and read by the stream worker. */
+    volatile int agc_enabled;
 };
 
 static struct beam_view *beam_view;
@@ -76,6 +80,25 @@ static unsigned int current_mix_mode(void)
 static int current_mix_lane(void)
 {
     return beam_view ? beam_view->mix_lane : -1;
+}
+
+/*
+ * Capture AGC, after the stock "m_enableAGC" switch. It is on unless
+ * LE_VOICE_AGC is a literal 0; a bad value leaves it on rather than stopping
+ * capture.
+ */
+static int agc_enabled_from_environment(void)
+{
+    const char *text = getenv("LE_VOICE_AGC");
+
+    if (!text || !text[0])
+        return 1;
+    return text[0] != '0' || text[1] != '\0';
+}
+
+static int current_agc_enabled(void)
+{
+    return beam_view ? beam_view->agc_enabled : 1;
 }
 
 /*
@@ -109,6 +132,27 @@ static int mix_mode_from_json(const char *text, const char *key)
         return -1;
     name[length] = '\0';
     return le_mic_mix_parse(name);
+}
+
+/* Exactly one top-level "enabled" boolean, and nothing else. */
+static int parse_agc_args(const char *args, int *enabled)
+{
+    struct json_member member;
+    size_t count = 0;
+    size_t length;
+
+    if (!args || !enabled)
+        return -1;
+    length = strnlen(args, LE_ADAPTER_MSG_MAX);
+    if (length == LE_ADAPTER_MSG_MAX ||
+        !json_valid_object(args, length) ||
+        json_duplicate_key(args, length, "enabled") ||
+        json_object_members(args, length, &member, 1, &count) < 0 ||
+        count != 1 || member.name_len != 7 ||
+        memcmp(member.name, "enabled", 7) != 0 ||
+        json_bool_span(member.value, member.value_len, enabled) != 1)
+        return -1;
+    return 0;
 }
 
 /* The owner's saved mix settings from LE_MIC_CONFIG are read once at start-up. */
@@ -805,7 +849,8 @@ static int format_status(char *buffer, size_t size,
         "\"beams\":%d,\"fft\":%d,\"hop\":%d,"
         "\"beam_design\":\"superdirective, white-noise gain >= -3 dB\","
         "\"highpass_hz\":80,\"vad\":\"native-energy-baseline\","
-        "\"aec\":false,\"beamforming\":true,\"wake_word\":false}}",
+        "\"agc\":%s,\"aec\":false,\"beamforming\":true,"
+        "\"wake_word\":false}}",
         available ? "true" : "false",
         capture_active ? "true" : "false",
         capture_active ? "\"raw-stream\"" : "null",
@@ -815,7 +860,8 @@ static int format_status(char *buffer, size_t size,
         miccal_source(config->idme_dir, config->dt_idme_dir),
         count, count == MIC_LOGICAL_CHANNELS ? "true" : "false",
         mics, le_mic_mix_name(current_mix_mode()), current_mix_lane(),
-        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP);
+        LE_BEAM_DEFAULT_BEAMS, LE_BEAM_FFT, LE_BEAM_HOP,
+        current_agc_enabled() ? "true" : "false");
     return n < 0 || (size_t)n >= size ? -1 : n;
 }
 
@@ -941,6 +987,7 @@ static int relay_capture_mono(int client_fd, unsigned long id,
     static struct le_beamformer beamformer;
     struct le_voice_calibration calibration;
     struct le_voice_highpass highpass;
+    struct le_voice_agc agc;
     unsigned char input[LE_VOICE_RAW_FRAME_BYTES * 256];
     int16_t output[256];
     int miccal[LE_VOICE_LOGICAL_CHANNELS];
@@ -979,6 +1026,15 @@ static int relay_capture_mono(int client_fd, unsigned long id,
         return -1;
     }
     le_voice_highpass_init(&highpass);
+    /* Enabled here regardless; the live flag gates processing per period so a
+       "set_agc" change applies to the running stream. */
+    if (le_voice_agc_init(&agc, 16000, 1) < 0) {
+        close(pipe_fds[0]);
+        kill(capture, SIGTERM);
+        while (waitpid(capture, NULL, 0) < 0 && errno == EINTR)
+            ;
+        return -1;
+    }
     mix_mask = beam_mic_mask();
 
     count = read(pipe_fds[0], input, sizeof(input));
@@ -1021,6 +1077,8 @@ static int relay_capture_mono(int client_fd, unsigned long id,
                         beam_view_publish(&beamformer);
                 }
                 apply_digital_gain(output, frames, digital_gain);
+                if (current_agc_enabled())
+                    le_voice_agc_process(&agc, output, frames);
                 if (write_all(client_fd, output,
                               frames * sizeof(output[0])) < 0)
                     break;
@@ -1166,6 +1224,7 @@ int main(int argc, char **argv)
         saved_mix_settings(&mode, &lane);
         beam_view->mix_mode = (unsigned int)mode;
         beam_view->mix_lane = lane;
+        beam_view->agc_enabled = agc_enabled_from_environment();
     }
     listen_fd = le_adapter_listen(config.socket_path);
     if (listen_fd < 0) {
@@ -1259,6 +1318,23 @@ int main(int argc, char **argv)
                 le_log_info("microphone lane set to %d", lane);
                 (void)snprintf(status, sizeof(status),
                                "{\"microphone_lane\":%d}", lane);
+                (void)respond(client_fd, id, 1, status);
+            }
+            close(client_fd);
+        } else if (!strcmp(command, "set_agc")) {
+            int enabled;
+
+            if (parse_agc_args(args, &enabled) < 0) {
+                (void)respond(client_fd, id, 0,
+                              "invalid capture AGC argument");
+            } else if (!beam_view) {
+                (void)respond(client_fd, id, 0,
+                              "capture AGC is unavailable");
+            } else {
+                beam_view->agc_enabled = enabled;
+                le_log_info("capture AGC %s", enabled ? "enabled" : "disabled");
+                (void)snprintf(status, sizeof(status),
+                               "{\"agc\":%s}", enabled ? "true" : "false");
                 (void)respond(client_fd, id, 1, status);
             }
             close(client_fd);

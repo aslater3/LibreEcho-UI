@@ -215,6 +215,7 @@ int main(void)
     CHECK(strstr(response, "\"centre_lane\":6,\"ring_radius_mm\":36") != NULL);
     CHECK(strstr(response, "\"vad\":\"native-energy-baseline\"") != NULL);
     CHECK(strstr(response, "\"wake_word\":false") != NULL);
+    CHECK(strstr(response, "\"agc\":true") != NULL);
     CHECK(strstr(response, "\"microphone_mix\":\"beamformer\"") != NULL);
     CHECK(strstr(response, "\"microphone_lane\":-1") != NULL);
     le_adapter_close(adapter);
@@ -237,6 +238,32 @@ int main(void)
                           response, sizeof(response)) == LE_ADAPTER_OK);
     CHECK(strstr(response, "\"microphone_mix\":\"average\"") != NULL);
     puts("micd: microphone mix mode is set live and reported in status");
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_agc", "{\"enabled\":false}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"agc\":false") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "status", "{}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"agc\":false") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_agc", "{\"enabled\":\"yes\"}",
+                          response, sizeof(response)) ==
+          LE_ADAPTER_ERR_REJECTED);
+    CHECK(strstr(response, "invalid capture AGC argument") != NULL);
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "set_agc", "{\"enabled\":true}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"agc\":true") != NULL);
+    puts("micd: capture AGC is switched live and reported in status");
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);
