@@ -158,6 +158,37 @@ The direction is the loudest beam, refined by a parabola through its
 neighbours. It shows where the most sound comes from, including steady noise,
 while the selected beam follows talkers. The two can therefore differ.
 
+### AFE diagnostics and ASR path latency
+
+The stock audio front end reports diagnostics with names such as
+`AFEDiagSelectedBeamNumber`, `AFEDiagSelectedBeamResidencyinFrames`,
+`AFEDiagBeamChangeCount` and
+`AFEDiagSelectedBeamDominantBeamSwitches`, and it exposes an ASR path delay
+through `ASRPathLatency`, `getASRPathLatencyMs` and
+`ASR Processing Equivalent Delay`. `beams` and `status` now carry the
+LibreEcho equivalents so a host or the UI can see what the front end is doing
+without watching audio:
+
+- `beams` has `afe_diagnostics`: the selected beam index
+  (`selected_beam`), how long it has been selected in 8 ms hops
+  (`selected_beam_residency_hops`), the detector's accepted switch count
+  (`beam_change_count`), the loudest beam (`dominant_beam`) and how often it
+  changed (`dominant_beam_switch_count`).
+- `status` has `pipeline.asr_path`: `latency_ms`, `capture_period_ms`,
+  `beamformer_ms` and `highpass_ms`. The calibrated stream also reports
+  `asr_path_latency_ms` in its header.
+
+The latency is the equivalent delay of the stream as built here: 40 ms for
+the tinycap period plus 16 ms for the beamformer window in `beamformer` mode,
+and 40 ms in `average` or `single`, which skip the beamformer delay. The
+high-pass and gain ramp add no sample delay. It says nothing about downstream
+network or recogniser time.
+
+The residency unit is the 8 ms hop, not the stock AFE frame, and
+`dominant_beam_switch_count` is the raw per-hop loudest-beam change, so it is
+noisier than the stock smoothed metric. Both are labelled as such rather than
+pretending to reproduce a config whose numbers are not in the dump.
+
 ## Safety and privacy properties
 
 - No capture starts merely because the device boots.
