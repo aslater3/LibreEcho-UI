@@ -35,7 +35,7 @@ NETWORKD_SOURCES = src/adapter/networkd.c src/adapter/network_health.c \
 	src/adapter/adapter_server.c src/log.c
 TIMED_SOURCES = src/adapter/timed.c src/log.c
 AUDIOD_SOURCES = src/adapter/audiod.c src/adapter/adapter_client.c src/adapter/adapter_server.c src/log.c
-MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamformer.c src/adapter/adapter_server.c src/log.c
+MICD_SOURCES = src/adapter/micd.c src/adapter/voice_dsp.c src/adapter/mic_beamformer.c src/adapter/wake_direction.c src/adapter/adapter_server.c src/log.c
 LEDD_SOURCES = src/adapter/ledd.c src/adapter/adapter_server.c src/log.c \
 	src/adapter/led_output.c src/adapter/music_visualizer_protocol.c \
 	src/adapter/led_music_director.c src/adapter/led_music_render.c
@@ -1017,6 +1017,12 @@ $(BUILD)/test-voice-ns: tests/test_voice_ns.c src/adapter/voice_ns.c src/adapter
 	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
 		-Wpedantic -Werror -Isrc -Isrc/adapter $(filter %.c,$^) -lm -o $@
 
+$(BUILD)/test-wake-direction: tests/test_wake_direction.c \
+		src/adapter/wake_direction.c src/adapter/wake_direction.h
+	@mkdir -p $(BUILD)
+	$(CC) -D_POSIX_C_SOURCE=200809L -std=c99 -O2 -Wall -Wextra \
+		-Wpedantic -Werror -Isrc -Isrc/adapter $(filter %.c,$^) -lm -o $@
+
 $(BUILD)/test-voice-pipeline-noise: tests/test_voice_pipeline_noise.c \
 		src/adapter/voice_pipeline.c src/adapter/voice_stream.c \
 		src/adapter/voice_ns.c src/adapter/voice_whisper.c src/adapter/voice_listening_led.c \
@@ -1492,6 +1498,7 @@ clean:
 		$(BUILD)/test-voice-aec $(BUILD)/test-voice-reference \
 		$(BUILD)/test-voice-aec-guard \
 		$(BUILD)/test-voice-ns $(BUILD)/test-voice-pipeline-noise \
+		$(BUILD)/test-wake-direction \
 		$(BUILD)/test-network-health $(BUILD)/test-gateway-probe \
 		$(BUILD)/test-button-settings $(BUILD)/test-buttond-privacy \
 		$(BUILD)/test-buttond-events $(BUILD)/test-buttond-actions \

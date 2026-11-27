@@ -220,6 +220,15 @@ int main(void)
     le_adapter_close(adapter);
     adapter = le_adapter_connect(socket_path, 250);
     CHECK(adapter != NULL);
+    CHECK(le_adapter_call(adapter, "wake_direction", "{}",
+                          response, sizeof(response)) == LE_ADAPTER_OK);
+    CHECK(strstr(response, "\"running\":false") != NULL);
+    CHECK(strstr(response, "\"samples\":0") != NULL);
+    CHECK(strstr(response, "\"localization\":{\"azimuth_deg\":-1") != NULL);
+    puts("micd: wake direction is empty before a stream runs");
+    le_adapter_close(adapter);
+    adapter = le_adapter_connect(socket_path, 250);
+    CHECK(adapter != NULL);
     CHECK(le_adapter_call(adapter, "set_mix", "{\"mode\":\"average\"}",
                           response, sizeof(response)) == LE_ADAPTER_OK);
     CHECK(strstr(response, "\"microphone_mix\":\"average\"") != NULL);
@@ -432,6 +441,8 @@ int main(void)
                 CHECK(field != NULL);
                 doa = strtod(field + 10, NULL);
                 CHECK(strstr(response, "\"beams\":[{\"deg\":0,") != NULL);
+                CHECK(strstr(response,
+                             "\"localization\":{\"azimuth_deg\":") != NULL);
                 break;
             }
             nanosleep(&pause_time, NULL);
@@ -441,6 +452,27 @@ int main(void)
             fprintf(stderr, "micd: beams reported %.1f deg for a source at "
                     "%.0f deg: %s\n", doa, BEAM_TEST_AZIMUTH, response);
         CHECK(azimuth_error(doa, BEAM_TEST_AZIMUTH) <= 20.0);
+        adapter = le_adapter_connect(socket_path, 250);
+        CHECK(adapter != NULL);
+        CHECK(le_adapter_call(adapter, "wake_direction", "{}", response,
+                              sizeof(response)) == LE_ADAPTER_OK);
+        le_adapter_close(adapter);
+        adapter = NULL;
+        {
+            const char *samples = strstr(response, "\"samples\":");
+            const char *direction = strstr(response, "\"azimuth_deg\":");
+
+            CHECK(samples != NULL);
+            CHECK(strtoul(samples + 10, NULL, 10) > 0);
+            CHECK(direction != NULL);
+            if (direction) {
+                double localized =
+                    strtod(direction + strlen("\"azimuth_deg\":"), NULL);
+
+                CHECK(azimuth_error(localized, BEAM_TEST_AZIMUTH) <= 30.0);
+            }
+        }
+        puts("micd: wake direction histogram localizes the active talker");
         close(stream_fd);
         stream_fd = -1;
         for (i = 0; i < 250; ++i) {

@@ -158,6 +158,28 @@ The direction is the loudest beam, refined by a parabola through its
 neighbours. It shows where the most sound comes from, including steady noise,
 while the selected beam follows talkers. The two can therefore differ.
 
+## Wake-direction histogram
+
+The stock ASP front end localises with AWD/AARLocalization and reports the
+azimuth, variance and angle/likelihood histograms as `awdAzRad`, `awdAzVar`,
+`awdAzHistAngle` and `awdAzHistLik`, smoothed by a `KalmanSmoother`.
+LibreEcho keeps that shape without a model. While a calibrated stream runs,
+each hop adds a small kernel around the selected beam, weighted by how far that
+beam stands above its noise floor. A steady directional noise contributes
+little because its selected score stays near one. The histogram decays slowly
+so a new talker takes over, and an exponential circular smoother stands in for
+the stock Kalman smoother.
+
+`GET /api/v1/microphones/beams` includes a `localization` object and the
+`wake_direction` micd command returns the same object: `azimuth_deg`,
+`azimuth_rad`, `variance_deg2`, `confidence`, `samples`, and a normalised
+`histogram` of `{deg, likelihood}`. With no accumulated speech the azimuth is
+`-1` and confidence is `0`. The histogram is diagnostic: nothing on the audio
+path depends on it, so a bad or empty estimate cannot cost the wake word.
+
+The stock dump had no `AFE.cfg`, so the kernel width, decay and smoother rate
+are judgement calls, not measured stock values.
+
 ## Safety and privacy properties
 
 - No capture starts merely because the device boots.

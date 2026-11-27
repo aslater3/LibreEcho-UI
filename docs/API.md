@@ -709,7 +709,18 @@ from the front (the volume-down side) viewed from above, the same frame as
     "beams": [
       { "deg": 0, "power_db": -46.0, "snr_db": 1.2 },
       { "deg": 30, "power_db": -43.9, "snr_db": 3.0 }
-    ]
+    ],
+    "localization": {
+      "azimuth_deg": 88,
+      "azimuth_rad": 1.5359,
+      "variance_deg2": 42.0,
+      "confidence": 0.91,
+      "samples": 240,
+      "histogram": [
+        { "deg": 60, "likelihood": 0.03 },
+        { "deg": 90, "likelihood": 0.78 }
+      ]
+    }
   },
   "error": null
 }
@@ -726,6 +737,12 @@ from the front (the volume-down side) viewed from above, the same frame as
   Near 0 dB the sound field is diffuse and `doa_deg` means little.
 - `selected_deg`: the beam currently feeding the voice pipeline; `locked` is
   true when it has been pinned rather than chosen automatically.
+- `localization`: a decaying azimuth histogram built from the selected beam
+  while speech-band contrast is present. `azimuth_deg`/`azimuth_rad` are the
+  circular mean, `variance_deg2` is circular variance, `confidence` scales the
+  resultant length by sample support, and `histogram` is the normalised
+  likelihood per beam angle. With no accumulated speech the mean is `-1` and
+  confidence is `0`. Nothing on the audio path depends on it.
 - `running` is `false` (with a `reason`) when no beamformed stream is open.
 - The mock backend returns a simulated source circling the device every 20 s,
   with `"simulated": true`.
